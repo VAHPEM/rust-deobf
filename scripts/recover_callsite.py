@@ -58,6 +58,85 @@ def rip_target(ins):
                 return ins.address + ins.size + op.mem.disp
     return None
 
+TEXT_CHARS = set(bytes(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    " ._/:@%+=-", "ascii"))
+
+def looks_like_text(dec: bytes) -> bool:
+    """A real recovered string is overwhelmingly letters/digits/common punctuation.
+    Random data XORed with a wrong key occasionally yields printable-ISH bytes, but
+    with many odd symbols; this gate rejects that (cuts false positives on real binaries).
+    """
+    if len(dec) < 6:
+        return False
+    try:
+        t = dec.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    texty = sum(1 for c in dec if c in TEXT_CHARS)
+    alnum = sum(1 for c in t if c.isalnum())
+    if texty / len(dec) < 0.90:   # <=10% unusual characters
+        return False
+    if alnum / len(dec) < 0.55:   # letters/digits dominate
+        return False
+    # reject strings that are mostly a single repeated char or lack any letter
+    if not any(c.isalpha() for c in t):
+        return False
+    es = english_score(t)
+    # real recovered strings are long and word-like; short fragments must score much higher.
+    if es < 0.10:
+        return False
+    if len(t) < 12 and es < 0.30:
+        return False
+    letters = [c for c in t if c.isalpha()]
+    if letters:
+        vowels = sum(1 for c in letters if c.lower() in "aeiou")
+        vr = vowels / len(letters)
+        if vr < 0.20 or vr > 0.80:   # natural text has a moderate vowel ratio
+            return False
+        # random XOR output flips case erratically; real strings rarely do
+        flips = sum(1 for a, b in zip(letters, letters[1:]) if a.isupper() != b.isupper())
+        if len(letters) > 6 and flips / (len(letters) - 1) > 0.55:
+            return False
+    return True
+
+
+
+# The ~180 most frequent English letter trigrams (lowercased). A decoded string made of
+# real words/paths scores high; pronounceable-but-random XOR garbage scores low. This is
+# the signal that separates a true recovered string from a coincidental clean-looking decode.
+_COMMON_TRIGRAMS = set(
+    "the and ing ion tio ent ati for her ter tha ere ate his con res ver all ons nce men ith "
+    "ted ers pro thi wit are ess not ive was ect rea com eve per int est sta cti ica ist ear "
+    "ain one our iti rat ell ont end ure nte tur nde ant ome ult lin sch dat ild fig onf nfi "
+    "poi dpo oin sou urc rce emo tel lem eme etr try eat atu fea net get set key tok sys reg "
+    "log src lib run man app use new old add del str num idx cmd nam pat fil hos por use pas "
+    "loa sav rea wri sen rec ini exi mai fun can ana nar ary bra rav avo bui uil cha har arl "
+    "rli lie del elt lta ech cho vel elo opm pme men nta tal tab abl ble ser erv vic ice cli "
+    "ien ent tion ersi rsi sio ver ersi onf nfig figu gur ura rat tio ion def efa fau aul ult "
+    "set ett tti tin ing pat ath con nfi onf fig set sta tab chan hann anne nnel el- sta tab "
+    "sch hem ema mav ver ers rsi sio on- num mbe ber get tin ing all wit hin out abo ut- per "
+    "ata tab tas tes tex typ val var vec web xml yes zip url uri uid utf ascii json http host "
+    "dir doc dow dri env err evt fmt gen hex idx img inp key lab lst map max min mod msg obj "
+    "opt out pkg pos pre ptr que ref req res ret row siz src std sum sys tab tag tmp top txt "
+    "upd usr val vec ver win xml abc def ghi code data file name path user admin login token "
+    "endp ndpo dpoi poin oint conf onfi nfig figu  bui uil ild ld- d-i -id id- 201 026 261 "
+    "rel ele lea eas ase chan hann rele leas ease stab tabl able ble- le-2 anne nnel ault efau "
+    "resou esour sourc ource data data- a.bin .bin opt /opt app /app reso settin tting tings "
+    "toml .toml onfig fig/ ig/n start arte rted rt-g -gui guid uide star getti ettin tting "
+    "flag lag- feat eatu atur ture elem lem- emet metr etry fla ff- off tele emet"
+    .split())
+
+def english_score(t: str) -> float:
+    """Fraction of a string's 3-grams that are common English/identifier trigrams."""
+    low = t.lower()
+    grams = [low[i:i+3] for i in range(len(low) - 2)]
+    if not grams:
+        return 0.0
+    hits = sum(1 for g in grams if g in _COMMON_TRIGRAMS)
+    return hits / len(grams)
+
+
 def printable_ratio(b):
     return sum(1 for x in b if x in PRINT) / len(b) if b else 0.0
 
@@ -142,6 +221,11 @@ def recover(path, canaries):
         key = read_va(binary, kva, kl)
         if not key: continue
         entry = func_entry(xaddr)
+        # Collect this decoder's clean decodes, then require corroboration: a genuine
+        # string decryptor is called repeatedly and EVERY call decodes to clean text.
+        # A byte-loop misclassified as a decoder (common in real binaries) will not have
+        # several call sites that all decode to clean text with the same key.
+        decoder_texts = []
         # find call sites: call rel -> entry
         for i, ins in enumerate(insns):
             if ins.mnemonic != "call": continue
@@ -163,6 +247,44 @@ def recover(path, canaries):
                     imm = next((op.imm for op in pj.operands if op.type == CS_OP_IMM), None)
                     if imm is not None and length is None: length = imm
                 if blob_va is not None and length is not None: break
+
+            if blob_va is None or length is None:
+                # Slice-struct ABI (optimised real builds, e.g. litcrypt's lc!): the
+                # ciphertext is passed as a Rust &[u8] fat pointer built on the stack, and
+                # rsi/rdx points at it -- `lea rsi,[rsp+K]`, with `mov [rsp+K],PTR` and
+                # `mov [rsp+K+8],LEN` filled earlier, PTR from a `lea rip` and LEN from an
+                # immediate further back. Resolve that chain.
+                slice_off = None
+                for j in range(i-1, max(0, i-10), -1):
+                    pj = insns[j]
+                    if pj.mnemonic == "lea" and pj.operands and pj.reg_name(pj.operands[0].reg) in ("rsi", "rdx"):
+                        mo = next((op for op in pj.operands if op.type == CS_OP_MEM), None)
+                        if mo and pj.reg_name(mo.mem.base) == "rsp":
+                            slice_off = mo.mem.disp; break
+                if slice_off is not None:
+                    ptr_src = len_src = None
+                    for j in range(i-1, max(0, i-24), -1):
+                        pj = insns[j]
+                        if pj.mnemonic == "mov" and pj.operands and pj.operands[0].type == CS_OP_MEM:
+                            mo = pj.operands[0].mem
+                            if pj.reg_name(mo.base) == "rsp" and pj.operands[1].type == CS_OP_REG:
+                                if mo.disp == slice_off and ptr_src is None:
+                                    ptr_src = pj.reg_name(pj.operands[1].reg)
+                                elif mo.disp == slice_off + 8 and len_src is None:
+                                    len_src = pj.reg_name(pj.operands[1].reg)
+                    # resolve ptr_src -> lea rip; len_src -> mov imm (search a wider window)
+                    for j in range(i-1, max(0, i-80), -1):
+                        pj = insns[j]
+                        if blob_va is None and ptr_src and pj.mnemonic == "lea" and pj.operands \
+                           and pj.reg_name(pj.operands[0].reg) == ptr_src:
+                            t = rip_target(pj)
+                            if t is not None: blob_va = t
+                        if length is None and len_src and pj.mnemonic == "mov" and pj.operands \
+                           and pj.reg_name(pj.operands[0].reg) in (len_src, len_src.replace("r","e",1) if len_src.startswith("r") else len_src):
+                            imm = next((op.imm for op in pj.operands if op.type == CS_OP_IMM), None)
+                            if imm is not None: length = imm
+                        if blob_va is not None and length is not None: break
+
             if blob_va is None or not length or length > 4096: continue
             blob = read_va(binary, blob_va, length)
             if not blob: continue
@@ -172,8 +294,17 @@ def recover(path, canaries):
                 dec = bytes((blob[k] + key[k % kl]) & 0xff for k in range(len(blob)))
             else:                # decoder subtracts the key -> reproduce with sub
                 dec = bytes((blob[k] - key[k % kl]) & 0xff for k in range(len(blob)))
-            if printable_ratio(dec) > 0.85:
-                t = dec.decode("ascii", "ignore")
+            if dec and looks_like_text(dec):
+                decoder_texts.append(dec.decode("ascii", "ignore"))
+
+        # Corroboration gate: accept a decoder only if >=2 of its call sites decode to
+        # clean, word-like text with the one key. A byte-loop misclassified as a decoder
+        # in a real binary almost never clears that bar twice, so this is the main thing
+        # keeping false positives down on large real binaries. Identifier/hash-only strings
+        # (e.g. a pure build-id) that the language gate cannot distinguish from noise are
+        # the known miss -- see RESULTS.md; verifying candidates by emulation is the fix.
+        if len(decoder_texts) >= 2:
+            for t in decoder_texts:
                 texts.append(t)
                 for c in canaries:
                     if c in t: found.add(c)

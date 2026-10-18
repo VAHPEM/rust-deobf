@@ -27,12 +27,20 @@ scripts/run_floss.py          baseline: strings(1) and FLOSS canary recall
 scripts/recover_callsite.py   our recoverer: static call-site dataflow for XOR/ADD/SUB decoders
 scripts/recover_emulate.py    emulation PoC (Unicorn) for inlined decoders (obfstr)
 build/summary.json            consolidated comparison  (build/results_table.md = full matrix)
-RESULTS.md                    the results table and what it establishes
+RESULTS.md                    the micro-benchmark results table
+VALIDATION.md                 what happens on REAL binaries (precision + recall findings)
 ```
 
 The sample programs are benign: they only print strings, exactly as Mandiant's own FLOSS
 test corpus does. No payloads, no real malware, no live indicators — all strings are
 author-generated canaries.
+
+## Reality check
+
+Micro-benchmark numbers below look strong, but see **VALIDATION.md**: on real binaries the
+tool has a filterable precision problem (~5 false positives on 30 MB ripgrep, down from 271)
+and an unsolved recall problem (call-site resolution breaks on optimised litcrypt builds;
+obfstr needs emulation). It is a PoC, not a finished tool.
 
 ## Headline result
 
