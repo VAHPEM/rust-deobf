@@ -4,7 +4,26 @@ Canary recall = how many of the 5 known ground-truth strings a tool reproduces f
 built binary. `strings`/FLOSS are baselines; `ours` is `scripts/recover_callsite.py`
 (static) unless noted. Full run: `bash scripts/build_all.sh && python3 scripts/run_floss.py && python3 scripts/recover_callsite.py build/*`.
 
-## Release builds — all obfuscators x {ELF,PE} x {strip,nostrip}
+## Two recovery methods
+
+| obfuscator | cipher | strings | FLOSS | static (ours) | **dynamic (ours)** |
+|---|---|---|---|---|---|
+| xor_custom | XOR | 0/5 | 0/5 | 5/5 | **5/5** |
+| add_custom | ADD | 0/5 | 0/5 | 5/5 | **5/5** |
+| sub_custom | SUB | 0/5 | 0/5 | 5/5 | **5/5** |
+| litcrypt | XOR | 0/5 | 0/5 | 5/5 | **5/5** |
+| litcrypt2 | XOR | 0/5 | 0/5 | 0/5 | **5/5** |
+| obfstr | XOR+ADD inlined | 0/5 | 0/5 | 0/5 (1/5 emu) | **5/5** |
+| muddy | ChaCha20-Poly1305 | 0/5 | 0/5 | 0/5 | **5/5** |
+
+Static recovery (`recover_callsite.py`) is fast and needs no execution, but only handles
+simple keyed decoders. Dynamic recovery (`recover_dynamic.py`, Frida memory scan) recovers
+**every** obfuscator including AEAD, because at runtime all strings are decrypted in memory —
+at the cost of executing the sample (sandbox only), needing code-path coverage, and ranking
+decoded strings out of runtime noise. See VALIDATION.md for the real-binary precision/recall
+analysis.
+
+## Release builds (static method) — all obfuscators x {ELF,PE} x {strip,nostrip}
 
 | obfuscator | cipher | fmt | profile | strip | strings | FLOSS | ours |
 |---|---|---|---|---|---|---|---|
