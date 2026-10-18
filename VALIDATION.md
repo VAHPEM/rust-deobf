@@ -48,13 +48,27 @@ back through the optimiser's register shuffling.
 codegen and is **not yet robust on real optimised Rust binaries**. Micro-benchmark recall
 overstates real-world recall.
 
-## 3. obfstr — needs dynamic analysis
+## 3. obfstr — solved by function emulation (5/5)
 
 obfstr inlines the decode into the caller with per-literal immediate keys, an ADD cipher, and
-a pointer hidden behind an `xref::inner` call. A Unicorn function-emulation PoC recovers the
-first literal (1/5); full recovery diverges on main's control flow. A full-system emulator
-(qiling) is the right tool but did not install in this environment (a hard `unicodecsv`
-dependency conflict on Python 3.12). obfstr remains open.
+a pointer hidden behind an `xref::inner` call — no static key, so call-site dataflow gets 0/5.
+The Unicorn function emulator (`scripts/recover_emulate.py`) now recovers **5/5** on x86-64,
+stripped and not, by emulating each function and scanning the bytes written to memory.
+
+The earlier PoC recovered only the first literal (1/5) and "diverged on main's control flow".
+The divergence had one concrete cause: after the first literal, obfstr calls the formatter via
+`call r15` — a **REX-prefixed** register-indirect call (`41 ff d7`). The opcode dispatcher
+tested the raw first byte, so it saw `0x41` (the REX prefix), not `0xff`, failed to recognise
+the indirect call, and let Unicorn execute it; `r15` came from an unrelocated (zero) GOT slot,
+so control jumped to a garbage address and the run died before literals 2–5. Skipping the REX
+prefix before reading the opcode fixes it: the external formatter call is stubbed, the
+intra-`.text` `xref::inner` call (which rebuilds the real ciphertext pointer from an argument
+whose low dword obfstr overwrites with the key) is still executed, and all five literals
+materialise in `main`'s frame. No full-system emulator (qiling) was needed.
+
+Scope: emulation is for the *inlined* case. The keyed-decoder families take their ciphertext
+as a function argument, so emulating their decoder in isolation sees no input — those stay the
+static call-site tool's job (5/5). AEAD (muddy) is cryptographically out of scope for static.
 
 ## Bottom line
 

@@ -33,7 +33,7 @@ FLOSS recovers **0/5** canaries on every Rust obfuscator and cannot open ELF at 
 | sub_custom | SUB | 0/5 | 0/5 | 5/5 | **5/5** |
 | litcrypt | XOR (runtime key) | 0/5 | 0/5 | 5/5 | **5/5** |
 | litcrypt2 | XOR (runtime key) | 0/5 | 0/5 | 0/5 | **5/5** |
-| obfstr | XOR+ADD inlined | 0/5 | 0/5 | 0/5 (1/5 emu) | **5/5** |
+| obfstr | XOR+ADD inlined | 0/5 | 0/5 | 0/5 call-site · **5/5 emulation** | **5/5** |
 | muddy | ChaCha20-Poly1305 | 0/5 | 0/5 | 0/5 | **5/5** |
 
 - **Static recovery** (`recover_callsite.py` for x86-64, `recover_arm64.py` for AArch64) is
@@ -41,6 +41,12 @@ FLOSS recovers **0/5** canaries on every Rust obfuscator and cannot open ELF at 
   XOR/ADD/SUB and litcrypt). It gets **5/5** on four keyed-decoder families across every
   release configuration — ELF and PE, stripped and not — and on **both** x86-64 and AArch64
   (the first string recoverer to target ARM64 Rust).
+- **Emulation recovery** (`recover_emulate.py`, Unicorn) handles the inlined case the
+  call-site tool cannot: obfstr embeds per-literal keys as immediates and hides the data
+  pointer behind an `xref::inner` call, so there is no static key to read. Emulating each
+  function (executing the intra-`.text` `xref` helper, stubbing external/formatter calls)
+  and scanning the bytes written to memory recovers **5/5** on obfstr, x86-64, stripped and
+  not — no execution of the whole program, no known plaintext.
 - **Dynamic recovery** (`recover_dynamic.py`, Frida memory scan) recovers **every**
   obfuscator including inlined (obfstr) and AEAD (muddy), because at runtime all strings are
   decrypted in memory — at the cost of executing the sample (**sandbox/VM only**), needing
@@ -55,7 +61,7 @@ The micro-benchmark numbers look strong, but this is a **PoC, not a finished pro
 see `VALIDATION.md`. On real binaries the static tool has a filterable precision problem
 (~5 false positives on a 30 MB `ripgrep`, down from 271 after layered filtering) and a
 recall problem (call-site resolution breaks on heavily optimised/inlined builds; obfstr
-needs emulation; litcrypt2 needs the dynamic path). The dynamic tool is cipher- and
+needs the emulation path — now 5/5; litcrypt2 needs the dynamic path). The dynamic tool is cipher- and
 arch-agnostic but only recovers strings on code paths you actually exercise, and its output
 must be ranked out of runtime noise.
 
@@ -75,7 +81,7 @@ scripts/
   recover_callsite.py    static call-site dataflow recoverer (x86-64, ELF+PE)
   recover_arm64.py       static call-site dataflow recoverer (AArch64/ELF) — new, no prior tool
   recover_dynamic.py     dynamic recoverer via runtime memory scan (Frida) — works on real builds
-  recover_emulate.py     emulation PoC (Unicorn) for inlined decoders (obfstr, partial)
+  recover_emulate.py     emulation recoverer (Unicorn) for inlined decoders (obfstr 5/5)
   build_all.sh           build the matrix {ELF,PE} x {debug,release} x {strip,nostrip}
   run_floss.py           baseline: strings(1) + FLOSS canary recall
   evaluate_all.py        reproducible end-to-end eval -> METRICS.md
@@ -245,9 +251,22 @@ idea with lightweight static dataflow:
    defended with a text-likeness filter, an English-trigram gate, and a ≥2-call-site
    corroboration requirement.
 
-obfstr defeats this by design: it inlines the decode with per-literal immediate keys and
-hides the data pointer behind a helper call, so there is no static key to read — hence the
-emulation PoC (`recover_emulate.py`, partial) and, in practice, the dynamic path.
+obfstr defeats call-site dataflow by design: it inlines the decode with per-literal immediate
+keys and hides the data pointer behind an `xref::inner` call, so there is no static key to
+read. The answer without executing the whole program is emulation.
+
+### Emulation recovery (Unicorn, for inlined decoders)
+
+`recover_emulate.py` emulates each function under an instruction budget and records the bytes
+written to memory; the decoded plaintext obfstr materialises in `main`'s frame appears in
+those writes. The decisive details: the intra-`.text` `xref::inner` call is *executed* (it
+rebuilds the real ciphertext pointer from an argument whose low dword obfstr overwrites with
+the key), while the external formatter call — `call r15` through an unrelocated GOT, a
+**REX-prefixed** `41 ff d7` — is *stubbed*; miss the REX prefix and emulation follows a zero
+pointer into garbage after the first literal (the old 1/5). With it, obfstr is **5/5** on
+x86-64, stripped and not. Scope: this is for the inlined case only; keyed-decoder families
+take their arguments from a caller and are the static tool's job, and AEAD (muddy) is out of
+cryptographic reach.
 
 ### Dynamic recovery (runtime memory scan)
 

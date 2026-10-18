@@ -9,14 +9,23 @@ callable decoder function.
 
 This tool takes the FLOSS approach for that case: emulate the code and capture the plaintext
 the decoder materialises in memory. Because obfstr inlines into `main`, we emulate whole
-functions with external calls stubbed out (a call is skipped and treated as returning 0),
-bound by an instruction budget, and record every byte written to memory. Printable runs in
-those writes are the recovered strings.
+functions bounded by an instruction budget and record every byte written to memory; printable
+runs in those writes are the recovered strings. Two call classes are treated differently:
+an *intra-.text* `call` (obfstr's `xref::inner`, which reconstructs the real ciphertext
+pointer from a deliberately-corrupted argument) is executed, because its return value is
+load-bearing; an *external* or register-indirect call (the `println!`/formatter, reached as
+`call r15` through an unrelocated GOT) is stubbed (skipped, returns 0) so emulation does not
+follow a zero pointer into garbage. Getting the register-indirect case right — it is REX-
+prefixed (`41 ff d7`), so the opcode test must skip the REX byte — is what lifts obfstr from
+1/5 (first literal only) to 5/5.
 
-Honest scope: recovers decoders whose plaintext transits writable memory during a bounded,
-call-free emulation (obfstr, and as a bonus the XOR/litcrypt families). It does not execute
-real library calls, so a decoder that only yields plaintext *inside* a std/libc call is out
-of reach. AEAD (muddy) remains cryptographically out of scope.
+Honest scope: this targets the *inlined* case (obfstr), where the plaintext is materialised
+in `main`'s own frame during a bounded emulation. It is NOT the tool for the keyed-decoder
+families (hand-rolled XOR/ADD/SUB, litcrypt): those decode in a separate function whose
+ciphertext/length arrive as arguments, so emulating the function in isolation sees no input
+and recovers nothing — the static call-site recoverer handles them (5/5) and should be used
+there. A decoder that only yields plaintext *inside* a real std/libc call is out of reach
+(the call is stubbed), and AEAD (muddy) is cryptographically out of scope.
 """
 from __future__ import annotations
 import json, sys, string
@@ -93,12 +102,22 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
             uc.reg_write(r, SCRATCH + 0x8000)
 
         def hook_code(uc, address, size, _):
-            # fast path: dispatch on opcode bytes, no per-insn disassembly
+            # fast path: dispatch on opcode bytes, no per-insn disassembly. Skip any REX
+            # prefix first: a register-indirect call such as `call r15` is `41 ff d7`, so
+            # testing the raw first byte would miss it, let Unicorn execute the external
+            # call into an unrelocated (zero) GOT slot, and diverge into garbage. This REX
+            # skip is what lets obfstr (whose print call is `call r15`) decode all literals
+            # instead of only the first.
             try:
-                op = uc.mem_read(address, 2)
+                raw = uc.mem_read(address, min(size, 15))
             except UcError:
                 return
-            b0 = op[0]
+            j = 0
+            while j < len(raw) and 0x40 <= raw[j] <= 0x4f:   # REX prefix(es)
+                j += 1
+            if j >= len(raw):
+                return
+            b0 = raw[j]
             lo = BASE + text_lo; hi = BASE + text_hi
             if b0 in (0xc3, 0xc2):          # ret / ret imm16
                 if depth[0] == 0:
@@ -108,15 +127,15 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
                 return
             if b0 == 0xe8:                  # call rel32
                 import struct
-                rel = struct.unpack("<i", uc.mem_read(address + 1, 4))[0]
-                tgt = (address + 5 + rel) & 0xffffffffffffffff
+                rel = struct.unpack("<i", raw[j + 1:j + 5])[0]
+                tgt = (address + size + rel) & 0xffffffffffffffff
                 if lo <= tgt < hi:
-                    depth[0] += 1            # intra-.text call (e.g. obfstr xref): let it run
+                    depth[0] += 1            # intra-.text call (e.g. obfstr xref::inner): let it run
                     return
                 nh = next((h for h in heads if h > address), None)
                 uc.reg_write(UC_X86_REG_RIP, BASE + nh if nh is not None else address + size)
                 uc.reg_write(UC_X86_REG_RAX, 0); return
-            if b0 == 0xff and (op[1] >> 3) & 7 in (2, 3):  # indirect call (GOT/PLT) -> external
+            if b0 == 0xff and j + 1 < len(raw) and (raw[j + 1] >> 3) & 7 in (2, 3):  # indirect call (GOT/PLT) -> external
                 nh = next((h for h in heads if h > address), None)
                 uc.reg_write(UC_X86_REG_RIP, BASE + nh if nh is not None else address + size)
                 uc.reg_write(UC_X86_REG_RAX, 0); return

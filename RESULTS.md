@@ -13,7 +13,7 @@ built binary. `strings`/FLOSS are baselines; `ours` is `scripts/recover_callsite
 | sub_custom | SUB | 0/5 | 0/5 | 5/5 | **5/5** |
 | litcrypt | XOR | 0/5 | 0/5 | 5/5 | **5/5** |
 | litcrypt2 | XOR | 0/5 | 0/5 | 0/5 | **5/5** |
-| obfstr | XOR+ADD inlined | 0/5 | 0/5 | 0/5 (1/5 emu) | **5/5** |
+| obfstr | XOR+ADD inlined | 0/5 | 0/5 | 0/5 call-site · **5/5 emulation** | **5/5** |
 | muddy | ChaCha20-Poly1305 | 0/5 | 0/5 | 0/5 | **5/5** |
 
 Static recovery (`recover_callsite.py`) is fast and needs no execution, but only handles
@@ -75,7 +75,7 @@ is documented as out of scope, not a central result.
 | sub_custom | hand-rolled SUB | 0/5 | 0/5 | **5/5** |
 | litcrypt | XOR (crate) | 0/5 | 0/5 | **5/5** |
 | litcrypt2 | XOR (crate fork) | 0/5 | 0/5 | 0/5³ |
-| obfstr | XOR+ADD, inlined (crate) | 0/5 | 0/5 | 0/5⁴ (1/5 by emulation) |
+| obfstr | XOR+ADD, inlined (crate) | 0/5 | 0/5 | 0/5 call-site · **5/5 emulation**⁴ |
 | muddy | ChaCha20-Poly1305 (crate) | 0/5 | 0/5 | 0/5⁵ |
 
 ¹ FLOSS 3.2.0 is PE/shellcode-only; on ELF it raises `PEFormatError` and cannot run.
@@ -85,9 +85,12 @@ is documented as out of scope, not a central result.
   matched. Recoverable in principle (same XOR structure) — open follow-up.
 ⁴ obfstr inlines the decode into the caller, embeds per-literal random keys as immediate
   `movabs` constants, uses an ADD cipher, and hides the ciphertext pointer behind an
-  `xref::inner` call. It is explicitly built to resist static analysis. Linear emulation
-  (`scripts/recover_emulate.py`) recovers the first literal (1/5); full recovery needs
-  environment-aware emulation (e.g. qiling) or per-block forced execution — the main open item.
+  `xref::inner` call. It is explicitly built to resist static *call-site* analysis (hence 0/5
+  there). Function emulation (`scripts/recover_emulate.py`, Unicorn) recovers **5/5** on
+  x86-64, stripped and not: it executes the intra-`.text` `xref::inner` helper (which rebuilds
+  the pointer) but stubs the external formatter call — a REX-prefixed `call r15` (`41 ff d7`)
+  that the opcode test must skip the REX byte to catch; missing it followed a zeroed GOT slot
+  into garbage after the first literal, which was the old 1/5.
 ⁵ muddy uses an AEAD cipher (ChaCha20-Poly1305) with an embedded key; a single static decode
   is cryptographically out of reach. Correctly reported as unrecoverable, not a miss.
 
@@ -99,9 +102,10 @@ is documented as out of scope, not a central result.
    static call-site dataflow** — no emulation, no known plaintext. `ours` recovers 5/5 across
    XOR, ADD and SUB hand-rolled ciphers and the litcrypt crate, on ELF and PE, stripped and not
    (16/64 configs; every release config of the 4 covered families).
-3. **The hard cases are characterised:** inlined per-literal-key schemes (obfstr) need
-   emulation; AEAD schemes (muddy) are out of static reach by cipher design; a fork's
-   index idiom (litcrypt2) needs a small extension.
+3. **The hard cases are characterised:** inlined per-literal-key schemes (obfstr) are solved
+   by function emulation (`recover_emulate.py`, 5/5) rather than call-site dataflow; AEAD
+   schemes (muddy) are out of static reach by cipher design; a fork's index idiom (litcrypt2)
+   needs a small extension (the dynamic path already gets it 5/5).
 
 ## How `ours` (static call-site recovery) works
 
