@@ -32,15 +32,15 @@ FLOSS recovers **0/5** canaries on every Rust obfuscator and cannot open ELF at 
 | add_custom | ADD | 0/5 | 0/5 | 5/5 | **5/5** |
 | sub_custom | SUB | 0/5 | 0/5 | 5/5 | **5/5** |
 | litcrypt | XOR (runtime key) | 0/5 | 0/5 | 5/5 | **5/5** |
-| litcrypt2 | XOR (runtime key) | 0/5 | 0/5 | 0/5 | **5/5** |
+| litcrypt2 | XOR (stride-permuted key) | 0/5 | 0/5 | **5/5** | **5/5** |
 | obfstr | XOR+ADD inlined | 0/5 | 0/5 | 0/5 call-site · **5/5 emulation** | **5/5** |
 | muddy | ChaCha20-Poly1305 | 0/5 | 0/5 | 0/5 | **5/5** |
 
 - **Static recovery** (`recover_callsite.py` for x86-64, `recover_arm64.py` for AArch64) is
-  fast and needs no execution, but only handles simple keyed decoders (hand-rolled
-  XOR/ADD/SUB and litcrypt). It gets **5/5** on four keyed-decoder families across every
-  release configuration — ELF and PE, stripped and not — and on **both** x86-64 and AArch64
-  (the first string recoverer to target ARM64 Rust).
+  fast and needs no execution. It gets **5/5** on the four hand-rolled/litcrypt keyed-decoder
+  families across every release configuration — ELF and PE, stripped and not — and on
+  **both** x86-64 and AArch64 (the first string recoverer to target ARM64 Rust), plus
+  litcrypt2's stride-permuted key schedule (**5/5**, x86-64) via a dedicated recogniser.
 - **Emulation recovery** (`recover_emulate.py`, Unicorn) handles the inlined case the
   call-site tool cannot: obfstr embeds per-literal keys as immediates and hides the data
   pointer behind an `xref::inner` call, so there is no static key to read. Emulating each
@@ -62,7 +62,8 @@ see `VALIDATION.md`. On real binaries the static tool has a filterable precision
 (~5 false positives on a 30 MB `ripgrep`, down from 271 after layered filtering — and 0 on
 14 other real binaries; reproduce with `scripts/measure_fp.py`) and a
 recall problem (call-site resolution breaks on heavily optimised/inlined builds; obfstr
-needs the emulation path — now 5/5; litcrypt2 needs the dynamic path). The dynamic tool is cipher- and
+needs the emulation path — now 5/5; litcrypt2's stride-permuted schedule is now handled
+statically — 5/5). The dynamic tool is cipher- and
 arch-agnostic but only recovers strings on code paths you actually exercise, and its output
 must be ranked out of runtime noise.
 

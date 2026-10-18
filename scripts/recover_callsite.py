@@ -140,6 +140,162 @@ def english_score(t: str) -> float:
 def printable_ratio(b):
     return sum(1 for x in b if x in PRINT) / len(b) if b else 0.0
 
+def _canon_reg(name):
+    """Map a sub-register name to its 64-bit parent (r14d->r14, eax->rax) for matching."""
+    if name is None:
+        return None
+    legacy = {"eax": "rax", "ebx": "rbx", "ecx": "rcx", "edx": "rdx", "esi": "rsi",
+              "edi": "rdi", "ebp": "rbp", "esp": "rsp",
+              "ax": "rax", "bx": "rbx", "cx": "rcx", "dx": "rdx",
+              "al": "rax", "bl": "rbx", "cl": "rcx", "dl": "rdx",
+              "sil": "rsi", "dil": "rdi", "bpl": "rbp"}
+    if name in legacy:
+        return legacy[name]
+    if name.startswith("r") and (name[-1] in "dwb") and name[1:2].isdigit():
+        return name[:-1]            # r14d/r14w/r14b -> r14
+    return name
+
+
+def recover_litcrypt2(binary, insns, canaries):
+    """Recover strings from litcrypt2's `lc!`, whose index idiom differs from litcrypt v1.
+
+    litcrypt2 walks a fixed-length key (64 bytes here) with a stride (+2) that wraps via
+    `lea idx,[idx+STRIDE]; cmp idx,KEYLEN; sete r8; cmovb idx,tmp` -- a permutation of
+    0..KEYLEN-1, not the `key[i % keylen]` that recover()'s generic path models (its
+    key-length inference reads this as KEYLEN+1 and resolves nothing). This dedicated pass
+    recognises the schedule from that instruction cluster, reads the rip-relative key, and
+    replays the exact state machine at each call site. Same >=2-call-site corroboration as
+    recover(), so it does not add false positives on ordinary binaries.
+    """
+    out, n = [], len(insns)
+    call_tgts = [op.imm for s in insns if s.mnemonic == "call"
+                 for op in s.operands if op.type == CS_OP_IMM]
+    for i, ins in enumerate(insns):
+        if ins.mnemonic != "cmovb" or not ins.operands:
+            continue
+        idx_reg = _canon_reg(ins.reg_name(ins.operands[0].reg))
+        # KEYLEN from a `cmp <reg>, imm` just before the cmovb
+        keylen = None
+        for j in range(i - 1, max(0, i - 5), -1):
+            if insns[j].mnemonic == "cmp":
+                im = next((op.imm for op in insns[j].operands if op.type == CS_OP_IMM), None)
+                if im and 8 <= im <= 1024:
+                    keylen = im
+                break
+        if not keylen:
+            continue
+        # STRIDE from a `lea <reg>,[base+disp]` (the index advance) before the cmovb
+        stride = None
+        for j in range(i - 1, max(0, i - 8), -1):
+            pj = insns[j]
+            if pj.mnemonic == "lea" and pj.operands:
+                mo = next((op for op in pj.operands if op.type == CS_OP_MEM), None)
+                if mo and mo.mem.base and not mo.mem.index and 0 < mo.mem.disp <= 16:
+                    stride = mo.mem.disp
+                    break
+        if not stride:
+            continue
+        # key base: a `xor r8, byte ptr [A+B]` within a few insns after; A or B is a lea-rip
+        key_va = None
+        for j in range(i + 1, min(n, i + 10)):
+            pj = insns[j]
+            if pj.mnemonic == "xor" and len(pj.operands) == 2 \
+               and pj.operands[0].type == CS_OP_REG and pj.operands[1].type == CS_OP_MEM:
+                mo = pj.operands[1].mem
+                for reg in (pj.reg_name(mo.base) if mo.base else None,
+                            pj.reg_name(mo.index) if mo.index else None):
+                    if not reg:
+                        continue
+                    for k in range(j - 1, max(0, j - 60), -1):
+                        pk = insns[k]
+                        if pk.mnemonic == "lea" and pk.operands \
+                           and pk.reg_name(pk.operands[0].reg) == reg:
+                            t = rip_target(pk)
+                            if t is not None:
+                                key_va = t
+                                break
+                    if key_va:
+                        break
+            if key_va:
+                break
+        if not key_va:
+            continue
+        key = read_va(binary, key_va, keylen)
+        if len(key) < keylen:
+            continue
+        # initial index = `mov <idx_reg>, imm` before the loop; first-byte const = `xor r8,imm8`
+        init_k = None
+        for j in range(i - 1, max(0, i - 20), -1):
+            pj = insns[j]
+            if pj.mnemonic == "mov" and len(pj.operands) == 2 \
+               and pj.operands[0].type == CS_OP_REG and pj.operands[1].type == CS_OP_IMM \
+               and _canon_reg(pj.reg_name(pj.operands[0].reg)) == idx_reg \
+               and 0 <= pj.operands[1].imm < keylen:
+                init_k = pj.operands[1].imm
+                break
+        if init_k is None:
+            init_k = stride
+        c0 = None
+        for j in range(i - 1, max(0, i - 30), -1):
+            pj = insns[j]
+            if pj.mnemonic == "xor" and len(pj.operands) == 2 \
+               and pj.operands[0].type == CS_OP_REG and pj.operands[1].type == CS_OP_IMM \
+               and 0 < pj.operands[1].imm < 256:
+                c0 = pj.operands[1].imm
+                break
+        if c0 is None:
+            c0 = key[0]
+        entry = max((t for t in call_tgts if t <= ins.address), default=None)
+        if entry is None:
+            continue
+
+        def schedule(ln):
+            seq, k = [], init_k
+            for _ in range(1, ln):
+                seq.append(k)
+                nxt = k + stride
+                k = 1 if nxt == keylen else (nxt if nxt < keylen else 0)
+            return seq
+
+        def decode(ct):
+            if not ct:
+                return b""
+            o = bytearray([ct[0] ^ c0])
+            for p, kk in enumerate(schedule(len(ct)), 1):
+                o.append(ct[p] ^ key[kk])
+            return bytes(o)
+
+        texts = []
+        for ci, cins in enumerate(insns):
+            if cins.mnemonic != "call":
+                continue
+            if next((op.imm for op in cins.operands if op.type == CS_OP_IMM), None) != entry:
+                continue
+            blob = length = None
+            for j in range(ci - 1, max(0, ci - 20), -1):
+                pj = insns[j]
+                if pj.mnemonic == "lea" and pj.operands \
+                   and pj.reg_name(pj.operands[0].reg) == "rsi" and blob is None:
+                    t = rip_target(pj)
+                    if t is not None:
+                        blob = t
+                if pj.mnemonic in ("mov", "lea") and pj.operands \
+                   and _canon_reg(pj.reg_name(pj.operands[0].reg)) == "rdx" and length is None:
+                    im = next((op.imm for op in pj.operands if op.type == CS_OP_IMM), None)
+                    if im is not None and 0 < im <= 4096:
+                        length = im
+                if blob and length:
+                    break
+            if blob and length:
+                dec = decode(read_va(binary, blob, length))
+                if dec and looks_like_text(dec):
+                    texts.append(dec.decode("ascii", "ignore"))
+        if len(texts) >= 2:          # same corroboration bar as recover()
+            out.extend(texts)
+            break
+    return out
+
+
 def recover(path, canaries):
     loaded = load(path)
     if loaded is None: return {"error": "no .text", "recall": 0, "n": len(canaries)}
@@ -308,6 +464,14 @@ def recover(path, canaries):
                 texts.append(t)
                 for c in canaries:
                     if c in t: found.add(c)
+
+    # litcrypt2's stride-permutation schedule is not an `i % keylen` repeat, so the generic
+    # loop above cannot resolve it; its dedicated recogniser runs as a second pass.
+    for t in recover_litcrypt2(binary, insns, canaries):
+        texts.append(t)
+        for c in canaries:
+            if c in t:
+                found.add(c)
 
     return {"decoders": len(seen), "recovered_texts": texts,
             "recovered": sorted(found), "recall": len(found), "n": len(canaries)}

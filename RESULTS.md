@@ -12,7 +12,7 @@ built binary. `strings`/FLOSS are baselines; `ours` is `scripts/recover_callsite
 | add_custom | ADD | 0/5 | 0/5 | 5/5 | **5/5** |
 | sub_custom | SUB | 0/5 | 0/5 | 5/5 | **5/5** |
 | litcrypt | XOR | 0/5 | 0/5 | 5/5 | **5/5** |
-| litcrypt2 | XOR | 0/5 | 0/5 | 0/5 | **5/5** |
+| litcrypt2 | XOR (stride-permuted) | 0/5 | 0/5 | **5/5** | **5/5** |
 | obfstr | XOR+ADD inlined | 0/5 | 0/5 | 0/5 call-site · **5/5 emulation** | **5/5** |
 | muddy | ChaCha20-Poly1305 | 0/5 | 0/5 | 0/5 | **5/5** |
 
@@ -74,15 +74,20 @@ is documented as out of scope, not a central result.
 | add_custom | hand-rolled ADD | 0/5 | 0/5 | **5/5** |
 | sub_custom | hand-rolled SUB | 0/5 | 0/5 | **5/5** |
 | litcrypt | XOR (crate) | 0/5 | 0/5 | **5/5** |
-| litcrypt2 | XOR (crate fork) | 0/5 | 0/5 | 0/5³ |
+| litcrypt2 | XOR (crate fork) | 0/5 | 0/5 | **5/5**³ |
 | obfstr | XOR+ADD, inlined (crate) | 0/5 | 0/5 | 0/5 call-site · **5/5 emulation**⁴ |
 | muddy | ChaCha20-Poly1305 (crate) | 0/5 | 0/5 | 0/5⁵ |
 
 ¹ FLOSS 3.2.0 is PE/shellcode-only; on ELF it raises `PEFormatError` and cannot run.
 ² `ours` targets keyed decoders, not plaintext; `strings` already covers plaintext, so the
   tool is meant to run *alongside* `strings`.
-³ litcrypt2 (maintained fork) uses a different index-wrap idiom; key-length inference not yet
-  matched. Recoverable in principle (same XOR structure) — open follow-up.
+³ litcrypt2 (maintained fork) walks a fixed 64-byte key with a **+2 stride** that wraps via
+  `lea idx,[idx+2]; cmp idx,0x40; sete; cmovb` — a permutation of 0..63, not `key[i % keylen]`.
+  recover()'s generic key-length inference misread the `cmp,0x40` as keylen 65 and resolved
+  nothing. `recover_callsite.recover_litcrypt2()` now recognises that instruction cluster,
+  reads the rip-relative key, and replays the exact schedule at each call site: **5/5** on
+  x86-64, with the same ≥2-call-site corroboration, so it adds no false positives (verified
+  with `measure_fp.py`: ripgrep's 5 residuals unchanged, 0 FP elsewhere).
 ⁴ obfstr inlines the decode into the caller, embeds per-literal random keys as immediate
   `movabs` constants, uses an ADD cipher, and hides the ciphertext pointer behind an
   `xref::inner` call. It is explicitly built to resist static *call-site* analysis (hence 0/5
@@ -103,9 +108,9 @@ is documented as out of scope, not a central result.
    XOR, ADD and SUB hand-rolled ciphers and the litcrypt crate, on ELF and PE, stripped and not
    (16/64 configs; every release config of the 4 covered families).
 3. **The hard cases are characterised:** inlined per-literal-key schemes (obfstr) are solved
-   by function emulation (`recover_emulate.py`, 5/5) rather than call-site dataflow; AEAD
-   schemes (muddy) are out of static reach by cipher design; a fork's index idiom (litcrypt2)
-   needs a small extension (the dynamic path already gets it 5/5).
+   by function emulation (`recover_emulate.py`, 5/5) rather than call-site dataflow; a fork's
+   stride-permuted index idiom (litcrypt2) is handled by a dedicated call-site pass
+   (`recover_litcrypt2`, 5/5); AEAD schemes (muddy) remain out of static reach by cipher design.
 
 ## How `ours` (static call-site recovery) works
 
