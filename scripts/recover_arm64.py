@@ -70,10 +70,19 @@ def recover(path, canaries):
         lo, hi = max(0, i - 8), min(len(insns), i + 12)
         keylen = None
         for j in range(lo, hi):
-            if insns[j].mnemonic == "and":
+            m = insns[j].mnemonic
+            if m == "and":
                 imm = next((o.imm for o in insns[j].operands if o.type == CS_OP_IMM), None)
                 if imm is not None and 0 < imm < 256 and (imm & (imm + 1)) == 0:
                     keylen = imm + 1
+            elif m == "cmp":
+                # modulo-by-compare (e.g. litcrypt): cmp Xi,#N followed by a conditional
+                # select/negate that wraps the index -> key length N+1
+                imm = next((o.imm for o in insns[j].operands if o.type == CS_OP_IMM), None)
+                if imm is not None and 0 < imm < 256:
+                    for k in range(j + 1, min(len(insns), j + 4)):
+                        if insns[k].mnemonic in ("csel", "csinc", "cneg", "csinv", "csneg"):
+                            keylen = imm + 1; break
         if not keylen:
             continue
         key_va = None

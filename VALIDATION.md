@@ -139,14 +139,15 @@ over SSH from the host. This is the environment the dynamic method is designed f
 ## 6. Cross-architecture static recovery — AArch64 (new)
 
 The static recoverer was x86-64-only. `scripts/recover_arm64.py` ports it to AArch64 and,
-built + run natively on the Kali arm64 VM, recovers the hand-rolled keyed-decoder families:
+built + run natively on the Kali arm64 VM, recovers the same four keyed-decoder families it covers on x86-64 (hand-rolled XOR/ADD/SUB plus the litcrypt crate):
 
 | obfuscator | cipher | arm64 static recall |
 |---|---|---|
 | xor_custom | XOR | 5/5 |
 | add_custom | ADD | 5/5 |
 | sub_custom | SUB | 5/5 |
-| litcrypt / obfstr / muddy | crate / inlined / AEAD | 0/5 (as on x86-64) |
+| litcrypt | XOR (crate) | 5/5 |
+| obfstr / muddy | inlined / AEAD | 0/5 (as on x86-64) |
 
 As far as the Oct-2026 survey found, no static string-decoder-recovery tool existed for ARM64
 Rust binaries at all, so this is new coverage (Apple-Silicon / ARM mobile Rust malware). The
@@ -154,7 +155,7 @@ ARM64 idiom differs from x86-64 in three ways the port handles: the key pointer 
 `adrp`+`add` (two instructions) instead of a single rip-relative `lea`; the mask `and` and the
 key/enc `ldrb` loads sit *after* the decode op in the loop body (loop-carried), so detection
 scans both sides of the op; and ops in a loop share a key region, so the recoverer tries all
-three keyed ops per blob and keeps whichever yields clean text (the cipher self-identifies).
+three keyed ops per blob and keeps whichever yields clean text (the cipher self-identifies); litcrypt's index wrap is a cmp+csel modulo rather than an and-mask, handled alongside the x86-style mask.
 
 The coverage class is the same as x86-64: static handles simple hand-rolled keyed decoders on
 both architectures; optimised crate builds, inlining and AEAD still require the dynamic path
