@@ -12,8 +12,12 @@ It recovers decoded strings regardless of which crate or inlining the obfuscator
 it never parses the decoder -- it observes the result. Coverage depends on exercising the code
 paths that perform the decode (pass representative argv), exactly like sandbox detonation.
 
-SAFETY: this executes the target. Only run binaries you intend to execute, in a sandbox/VM.
-It is meant for controlled analysis of samples, not for running untrusted code on your host.
+SAFETY: this executes the target AND scans the whole process address space. Run it ONLY inside
+an isolated analysis VM/sandbox dedicated to the sample. Two reasons: (1) you are executing the
+sample; (2) the memory scan reads all readable+writable memory of the process, so anything else
+resident in that process or injected agent (environment, other secrets) is also surfaced as
+noise -- in a shared/host environment that can leak unrelated data. In a clean sandbox the only
+interesting memory is the sample's own, which is the point.
 
     python scripts/recover_dynamic.py ./binary                 # default run
     python scripts/recover_dynamic.py ./binary --argv --list   # pass argv to the target
@@ -49,6 +53,7 @@ function scan() {
     if (cur.length >= MINLEN) out.add(String.fromCharCode.apply(null, cur));
   }
   for (const s of out) send({ t: 'str', s: s });
+  try { for (const m of Process.enumerateModules()) if (m.path) send({ t: 'mod', p: m.path }); } catch (e) {}
   send({ t: 'done' });
 }
 // Scan when the program writes output or exits (strings are decoded by then). frida 17
@@ -83,6 +88,7 @@ def run(path: Path, argv: list[str], min_len: int, timeout: float) -> set[str]:
         sys.exit("frida not installed: pip install frida frida-tools")
 
     runtime = set()
+    mods = set()
     device = frida.get_local_device()
     pid = device.spawn([str(path)] + argv)
     session = device.attach(pid)
@@ -94,6 +100,8 @@ def run(path: Path, argv: list[str], min_len: int, timeout: float) -> set[str]:
             p = msg["payload"]
             if p.get("t") == "str":
                 runtime.add(p["s"])
+            elif p.get("t") == "mod":
+                mods.add(p["p"])
             elif p.get("t") == "done":
                 done["v"] = True
 
@@ -111,7 +119,7 @@ def run(path: Path, argv: list[str], min_len: int, timeout: float) -> set[str]:
         device.kill(pid)
     except Exception:
         pass
-    return runtime
+    return runtime, mods
 
 
 def main():
@@ -127,7 +135,18 @@ def main():
         sys.exit(f"no such file: {path}")
 
     static = static_strings(path, args.min_len)
-    runtime = run(path, args.argv, args.min_len, args.timeout)
+    runtime, mods = run(path, args.argv, args.min_len, args.timeout)
+    # Subtract strings that belong to loaded shared libraries (libc, ld, ...): they are
+    # runtime noise, not decoded secrets. The target's own module is excluded from this
+    # subtraction so we don't drop its decoded output.
+    lib_strings = set()
+    for m in mods:
+        try:
+            if Path(m).resolve() == path.resolve(): continue
+        except Exception:
+            pass
+        lib_strings |= static_strings(Path(m), args.min_len)
+    static = static | lib_strings
     decoded = [s for s in runtime if s not in static]
     # Memory scanning surfaces everything in RW memory, most of it runtime noise. Keep the
     # strings that read as real text (same word-likeness gate as the static tool), ranked by
