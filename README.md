@@ -27,6 +27,7 @@ scripts/run_floss.py          baseline: strings(1) and FLOSS canary recall
 scripts/recover_callsite.py   our recoverer: static call-site dataflow for XOR/ADD/SUB decoders
 scripts/recover_emulate.py    emulation PoC (Unicorn) for inlined decoders (obfstr)
 scripts/recover_dynamic.py    dynamic recovery via runtime memory scan (Frida) — works on real optimised builds
+scripts/recover_arm64.py      static recovery ported to AArch64/ARM64 (new: no prior tool)
 build/summary.json            consolidated comparison  (build/results_table.md = full matrix)
 RESULTS.md                    the micro-benchmark results table
 VALIDATION.md                 what happens on REAL binaries (precision + recall findings)
