@@ -178,7 +178,7 @@ def recover(path, canaries):
                 for c in canaries:
                     if c in t: found.add(c)
 
-    return {"decoders": len(seen), "recovered_texts": texts[:20],
+    return {"decoders": len(seen), "recovered_texts": texts,
             "recovered": sorted(found), "recall": len(found), "n": len(canaries)}
 
 def main():

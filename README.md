@@ -21,6 +21,7 @@ it, then (c) implements a recoverer for the case they miss.
 bench_src/gen_projects.py     generate benign Rust programs that print known canaries, one per
                               obfuscation crate (obfstr, litcrypt, litcrypt2, muddy, cryptify)
                               plus hand-written XOR/ADD/SUB decoders and a plaintext control
+scripts/recover.py            unified CLI: static recovery + emulation fallback
 scripts/build_all.sh          build the matrix {ELF,PE}x{debug,release}x{strip,nostrip}
 scripts/run_floss.py          baseline: strings(1) and FLOSS canary recall
 scripts/recover_callsite.py   our recoverer: static call-site dataflow for XOR/ADD/SUB decoders
@@ -42,6 +43,16 @@ XOR, ADD and SUB, plus the **litcrypt** crate — across every release configura
 resist static analysis) is partially recovered by emulation (1/5); litcrypt2 (fork) needs a
 small extension; muddy (AEAD) is out of static reach by cipher design. Full matrix and a
 survey of existing tools: RESULTS.md.
+
+## Usage
+
+```bash
+python scripts/recover.py path/to/binary          # recover strings from one binary
+python scripts/recover.py binary --no-emulate      # static only (fast)
+```
+
+It prints the decoded strings. Static recovery handles keyed XOR/ADD/SUB decoders and
+litcrypt; the emulation fallback handles inlined decoders (obfstr, partial).
 
 ## How the recoverer works
 

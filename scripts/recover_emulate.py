@@ -79,6 +79,7 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
     writes = bytearray(0x4000)
     seen = set()
     hits = set()
+    strings_out = emulate_capture.last_strings = set()
     try:
         uc = Uc(UC_ARCH_X86, UC_MODE_64)
         map_image(uc, binary)
@@ -155,6 +156,16 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
         for c in canaries:
             if c.encode() in text:
                 hits.add(c)
+        # also surface general printable runs (for analysts without known canaries)
+        import string as _s
+        PR = set(bytes(_s.printable, "ascii")) - set(b"\x0b\x0c\r\n\t")
+        cur = bytearray()
+        for by in text:
+            if by in PR: cur.append(by)
+            else:
+                if len(cur) >= 6: strings_out.add(bytes(cur).decode("ascii", "ignore"))
+                cur = bytearray()
+        if len(cur) >= 6: strings_out.add(bytes(cur).decode("ascii", "ignore"))
     except Exception:
         pass
     return hits
