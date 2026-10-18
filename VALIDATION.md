@@ -200,3 +200,36 @@ three keyed ops per blob and keeps whichever yields clean text (the cipher self-
 The coverage class is the same as x86-64: static handles simple hand-rolled keyed decoders on
 both architectures; optimised crate builds, inlining and AEAD still require the dynamic path
 (which is already architecture-agnostic — §5).
+
+## 7. Tier-3 Rust metadata recovery — measured precision (`scripts/measure_rust_meta.py`)
+
+`recover_rust_meta.py` recovers, statically, the crate set + versions and the panic
+`file:line:col` a Rust binary leaks. Scored against ground truth — each bench project's
+`Cargo.lock` is the exact compiled-in crate set — over 8 ELF binaries (including a
+`meta_probe` crate pulling regex/serde_json/url/base64 for a non-trivial dependency tree):
+
+| metric | result |
+|---|---|
+| precision (recovered crates that are real deps) | **17/17 = 1.00** |
+| version-exact (recovered crate@version matches the lock) | **17/17 = 1.00** |
+| false crates | **0** |
+| panic sites recovered (8 ELF binaries) | **2533** |
+
+The recovered set includes transitive deps with exact versions (aho-corasick 1.1.5,
+regex-automata 0.4.18, idna 1.1.0, icu_normalizer 2.3.0, memchr 2.8.3, …) — a real slice of
+the dependency graph, not just the direct deps. Two honest caveats:
+
+- **Coverage is partial by construction.** Only a crate that emits a
+  `.cargo/registry/src/<index>/<crate>-<ver>/` path inside a panic `Location` leaks a
+  version; proc-macro, build-only and panic-free crates leave none, so recovered/lockfile is
+  < 1 (litcrypt's 15 lock deps leak 0). That is a property of what rustc emits, not a miss —
+  precision and version-accuracy are the metrics that matter, and both are perfect here.
+- **PIE ELF needed relocation-aware recovery.** On a position-independent ELF the Location
+  filename pointer is stored as 0 and fixed up at load, so the raw-pointer scan (which works
+  on PE's absolute pointers) found **0** panic sites. `find_location_structs` now also reads
+  the relocation addends (`R_*_RELATIVE`), lifting ELF panic-site recovery from 0 to
+  ~207–1073 per binary — e.g. muddy's `main.rs:4..8`, the exact `lc!` call lines.
+
+Real-world qualitative case: on `catthief.exe` (a Rust PE from FLARE-On), the same tool
+recovered 17 crates with versions (ureq 2.12.1, rustls 0.23.40, ring 0.17.14, …), 697 panic
+sites, and a leaked `http://192.168.56.102:8080/exfil` indicator — see `ARTIFACT_TIERS.md`.

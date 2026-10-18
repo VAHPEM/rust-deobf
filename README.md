@@ -88,6 +88,7 @@ scripts/
   run_floss.py           baseline: strings(1) + FLOSS canary recall
   evaluate_all.py        reproducible end-to-end eval -> METRICS.md
   measure_fp.py          precision: false positives of static recovery on real benign binaries
+  measure_rust_meta.py   Tier-3 accuracy: crate/version + panic-site recovery vs Cargo.lock
   # artifact-recovery tiers (reuse the same static/dynamic engines; see ARTIFACT_TIERS.md)
   recover_artifacts.py   Tier 2: dynamic config/C2 recovery — URLs, IP:port, JSON, base64 (Frida)
   recover_rust_meta.py   Tier 3: static Rust structure — crates+versions, panic file:line, types

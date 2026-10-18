@@ -106,7 +106,18 @@ def read_sections(path: Path):
                 syms.append(s.name)
     except Exception:
         pass
-    return image_base, ptr, secs, syms
+    # Relocations carrying an addend (ELF RELA): in a PIE build the Location filename
+    # pointers are stored as 0 and resolved at load, so the addend is the real string VA.
+    # PE base relocations carry no addend and are skipped (PE uses absolute pointers).
+    relocs = []
+    try:
+        for r in b.relocations:
+            ad = getattr(r, "addend", 0)
+            if ad:
+                relocs.append((int(r.address), int(ad)))
+    except Exception:
+        pass
+    return image_base, ptr, secs, syms, relocs
 
 
 def va_read(secs, va, n):
@@ -134,11 +145,17 @@ def find_source_paths(secs):
     return out
 
 
-def find_location_structs(secs, ptr, src_by_va):
-    """Recover core::panic::Location records by matching the struct shape in rodata:
-    {ptr(filename), len(usize)==len(filename), u32 line, u32 col}. We look for a
-    pointer that lands on a known .rs string whose recorded length matches, then read
-    the two u32 that follow as line/col. Returns [(file, line, col)]."""
+def find_location_structs(secs, ptr, src_by_va, relocs=None):
+    """Recover core::panic::Location records = {ptr(filename), len(usize)==len(filename),
+    u32 line, u32 col}. Two layouts:
+
+    - Absolute pointers (PE, non-PIE): the filename field holds the string's VA directly,
+      so scan rodata for a qword that lands on a known .rs string of the matching length.
+    - Relocated pointers (PIE ELF): the field is stored as 0 and fixed up at load, so the
+      real VA lives in the relocation addend. For each reloc whose addend is a known .rs
+      string VA, read len/line/col from the struct bytes that follow the relocated field.
+
+    Returns [(file, line, col)]."""
     locs = []
     fileptr = {va: (s, ln) for s, (va, ln) in src_by_va.items()}
     packP = "<Q" if ptr == 8 else "<I"
@@ -156,6 +173,20 @@ def find_location_structs(secs, ptr, src_by_va):
             line, col = struct.unpack_from("<II", data, off + 2 * ptr)
             if 0 < line < 2_000_000 and 0 < col < 100_000:
                 locs.append((s, line, col))
+    for addr, addend in (relocs or []):
+        hit = fileptr.get(addend)
+        if not hit:
+            continue
+        s, ln = hit
+        rl = va_read(secs, addr + ptr, ptr)
+        if len(rl) < ptr or struct.unpack_from(packP, rl, 0)[0] != ln:
+            continue
+        lc = va_read(secs, addr + 2 * ptr, 8)
+        if len(lc) < 8:
+            continue
+        line, col = struct.unpack_from("<II", lc, 0)
+        if 0 < line < 2_000_000 and 0 < col < 100_000:
+            locs.append((s, line, col))
     # de-dup, keep deterministic order
     seen, uniq = set(), []
     for t in locs:
@@ -205,10 +236,10 @@ def demangle(sym):
 
 
 def recover(path: Path):
-    image_base, ptr, secs, syms = read_sections(path)
+    image_base, ptr, secs, syms, relocs = read_sections(path)
     raw_text = b"\n".join(d for _, d in secs).decode("latin-1", "ignore")
     src = find_source_paths(secs)
-    locs = find_location_structs(secs, ptr, src)
+    locs = find_location_structs(secs, ptr, src, relocs)
     rust_syms = [demangle(s) for s in syms
                  if s.startswith(("_ZN", "_R")) or "17h" in s]
     # Strong Rust evidence = structure only a Rust build produces: a cargo-registry path,

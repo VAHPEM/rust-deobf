@@ -142,6 +142,12 @@ Positive cases (proving the detectors fire on a true signal):
   by-design cases (inlined / AEAD / litcrypt2's runtime key), matching RESULTS.md. (frida
   17.24.1 is now installed in `~/ctf-venv` on the Kali VM.)
 
-Still open: a genuinely packed malware/CTF sample for `dump_unpacked`'s dynamic path, a real
-hash-import sample for `recover_apihash --names`, and a Rust panic-metadata corpus for Tier-3
-precision scoring.
+Tier-3 is now scored against ground truth (`scripts/measure_rust_meta.py` vs each bench
+project's `Cargo.lock`): **crate precision 17/17 = 1.00, version-exact 17/17 = 1.00, 0 false
+crates, 2533 panic sites across 8 ELF binaries**. Panic-site recovery was extended to PIE ELF
+by reading relocation addends (the filename pointer is relocated, not absolute). See
+`VALIDATION.md §7`.
+
+Still open: a genuinely packed malware/CTF sample for `dump_unpacked`'s dynamic path, and a
+real hash-import sample for `recover_apihash --names` (both have synthetic positive cases and
+clean negatives, but not yet an in-the-wild positive).
