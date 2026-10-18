@@ -57,9 +57,13 @@ survey of existing tools: RESULTS.md.
 ## Usage
 
 ```bash
-python scripts/recover.py path/to/binary          # recover strings from one binary
-python scripts/recover.py binary --no-emulate      # static only (fast)
+python scripts/recover.py path/to/binary     # auto-detects arch/format, runs static recovery
+python scripts/recover_dynamic.py path/to/binary   # dynamic recovery (sandbox only)
 ```
+
+`recover.py` auto-detects the architecture (x86-64 or AArch64) and format (ELF/PE) and
+dispatches to the matching static recoverer; for optimised/inlined/AEAD builds it points to
+the dynamic path.
 
 It prints the decoded strings. Static recovery handles keyed XOR/ADD/SUB decoders and
 litcrypt; the emulation fallback handles inlined decoders (obfstr, partial).

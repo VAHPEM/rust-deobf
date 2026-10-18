@@ -1,87 +1,84 @@
 #!/usr/bin/env python3
-"""recover.py — recover obfuscated strings from a Rust (or other x86-64) binary.
+"""recover.py - unified string-recovery front end for Rust binaries.
 
-A single entry point for analysts. Tries static call-site recovery first (fast, no
-execution; handles hand-rolled XOR/ADD/SUB and litcrypt), then falls back to bounded
-Unicorn emulation for inlined decoders (obfstr). Prints the decoded strings it finds.
+Detects the binary's architecture and format, then dispatches to the right recoverer:
 
-    python scripts/recover.py <binary> [--min-len 6] [--no-emulate]
+  x86-64 (ELF or PE)  -> static call-site recovery   (recover_callsite.py)
+  AArch64 (ELF)       -> static call-site recovery   (recover_arm64.py)
+  anything, hard case -> run scripts/recover_dynamic.py in a sandbox (prints how)
 
-This is defensive tooling: it reads and statically/║emulated-decodes a binary to surface
-hidden strings for malware triage. It does not run the sample's real code (external calls
-are stubbed during emulation).
+Static recovery is fast and needs no execution, but only handles simple keyed decoders
+(hand-rolled XOR/ADD/SUB and litcrypt). For optimised crate builds, inlined decoders
+(obfstr) and AEAD (muddy), use the dynamic path. See VALIDATION.md.
+
+    python scripts/recover.py <binary>
 """
 from __future__ import annotations
-import argparse, sys, string
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import recover_callsite as rcs
+import lief
 
-PRINT = set(bytes(string.printable, "ascii")) - set(b"\x0b\x0c")
+CANARIES_HINT = "(pass a binary; recovered strings are printed, not matched against known values)"
 
 
-def printable_strings(texts, min_len):
-    out = []
-    for t in texts:
-        cur = []
-        for ch in t:
-            if ord(ch) < 128 and ch.encode()[0] in PRINT and ch not in "\r\n\t":
-                cur.append(ch)
-            else:
-                if len(cur) >= min_len: out.append("".join(cur))
-                cur = []
-        if len(cur) >= min_len: out.append("".join(cur))
-    return out
+def detect(path):
+    b = lief.parse(str(path))
+    if b is None:
+        return None, None
+    fmt = b.format.name if hasattr(b, "format") else "?"
+    # architecture
+    arch = "?"
+    try:
+        hdr = b.header
+        m = (hdr.machine_type.name if hasattr(hdr, "machine_type") else str(hdr.machine)).upper()
+        if "AARCH64" in m or "ARM64" in m:
+            arch = "aarch64"
+        elif "X86_64" in m or "AMD64" in m or "86_64" in m:
+            arch = "x86_64"
+        elif "ARM" in m:
+            arch = "arm"
+    except Exception:
+        pass
+    return fmt, arch
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("binary")
-    ap.add_argument("--min-len", type=int, default=6)
-    ap.add_argument("--no-emulate", action="store_true", help="skip the emulation fallback")
-    args = ap.parse_args()
-
-    path = Path(args.binary)
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    path = Path(sys.argv[1])
     if not path.exists():
         sys.exit(f"no such file: {path}")
 
-    # Pass an empty canary set: recover() still collects every decoded blob it produces.
-    res = rcs.recover(path, canaries=[])
-    static_strings = sorted(set(printable_strings(res.get("recovered_texts", []), args.min_len)))
+    fmt, arch = detect(path)
+    print(f"binary: {path.name}   format={fmt}   arch={arch}")
 
-    print(f"== static call-site recovery ==  ({res.get('decoders', 0)} decoder(s) found)")
-    if static_strings:
-        for s in static_strings:
-            print(f"  {s}")
+    canaries = []  # print everything recovered; we are not scoring here
+    if arch == "x86_64":
+        import recover_callsite as R
+        r = R.recover(path, canaries)
+        engine = "static x86-64 (recover_callsite)"
+    elif arch == "aarch64":
+        import recover_arm64 as R
+        r = R.recover(path, canaries)
+        engine = "static aarch64 (recover_arm64)"
     else:
-        print("  (no keyed decoder recovered statically)")
+        print(f"no static engine for arch={arch}; use the dynamic path.")
+        r = None
+        engine = None
 
-    if not args.no_emulate:
-        try:
-            import lief
-            import recover_emulate as rem
-            b = lief.parse(str(path))
-            text = next((s for s in b.sections if s.name == ".text"), None)
-            if text is not None:
-                code = bytes(text.content); tva = text.virtual_address
-                # emulate the largest handful of functions; collect decoded strings
-                funcs = rem.function_ranges(b, code, tva)
-                em = set()
-                for (fva, _) in funcs[:60]:
-                    rem.emulate_capture(b, code, tva, fva, [])
-                    em |= getattr(rem.emulate_capture, "last_strings", set())
-                em_strings = sorted(s for s in printable_strings(em, args.min_len)
-                                    if s not in static_strings)
-                print(f"\n== emulation fallback ==  ({len(funcs)} candidate function(s))")
-                # show only strings that look like recovered plaintext, not emulation noise
-                interesting = [s for s in em_strings if sum(c.isalnum() for c in s) >= len(s)*0.6]
-                for s in interesting[:40]:
-                    print(f"  {s}")
-                if not interesting:
-                    print("  (nothing additional recovered by emulation)")
-        except Exception as e:
-            print(f"\n== emulation fallback unavailable: {e} ==")
+    if r is not None:
+        strings = sorted(set(s for s in r.get("recovered_texts", []) if len(s) >= 6))
+        print(f"\n== {engine} ==  decoder candidates: {r.get('decoders', 0)}")
+        if strings:
+            for s in strings:
+                print(f"  {s}")
+        else:
+            print("  (no keyed decoder recovered statically)")
+
+    print("\n== for optimised / inlined / AEAD builds, recover dynamically (sandbox only) ==")
+    print(f"  python {Path(__file__).parent}/recover_dynamic.py {path}")
 
 
 if __name__ == "__main__":
