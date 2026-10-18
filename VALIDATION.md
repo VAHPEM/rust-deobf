@@ -63,3 +63,75 @@ On real binaries it has a **manageable precision problem** (filterable, ~5 FP on
 **unsolved recall problem** (call-site resolution breaks on optimised slice-struct ABI, and
 obfstr needs emulation). It is a promising PoC, not a finished tool — which is why the right
 next step is hardening on real binaries before any upstream contribution, not a FLOSS PR today.
+
+## 4. The fix for real builds: dynamic memory recovery (new)
+
+Since optimised builds defeat static resolution (§2) and lightweight emulation (§3), the
+working approach is the one real malware analysts use: run the sample in a controlled
+process, let it decode its strings into memory, then scan writable memory and report what
+is present at runtime but absent from the file on disk. `scripts/recover_dynamic.py` does
+this with Frida — it never parses the decoder, it observes the result, so it is immune to
+inlining and to whichever crate produced the obfuscation.
+
+On the same `notecli` binary that static recovery scored **0/3** on:
+
+| method | notecli (optimised litcrypt build) |
+|---|---|
+| static call-site (`recover_callsite.py`) | 0/3 |
+| **dynamic memory scan (`recover_dynamic.py`)** | **3/3** |
+
+All three litcrypt-hidden strings are recovered in a single run and rank near the top after
+a text-likeness + noise filter. The trade-off is the dynamic analog of the static precision
+problem: memory scanning surfaces everything in RW memory, so the decoded secrets come mixed
+with runtime noise (environment strings, allocator debris) and are ranked, not isolated.
+Coverage of conditionally-decoded strings depends on exercising the relevant code paths
+(pass representative argv), exactly like sandbox detonation.
+
+**Caveat:** this executes the target. Run only in a sandbox/VM, never untrusted code on your host.
+
+## Revised bottom line
+
+The honest, complete picture after real-binary validation:
+
+- **Static** (`recover_callsite.py`): fast, no execution, high precision after filtering; works
+  on simple/unoptimised decoders (hand-rolled XOR/ADD/SUB, litcrypt in a toy build). Breaks on
+  optimised real builds (inlining, slice-struct ABI, runtime key init). Best used as a
+  **detector/triage** step that flags candidate decoder functions.
+- **Dynamic** (`recover_dynamic.py`): executes in a sandbox and recovers the real decoded
+  strings regardless of crate or inlining (3/3 where static got 0/3). Needs code-path coverage
+  and output ranking.
+
+This static-detect + dynamic-recover split is the same division of labour FLOSS uses
+(heuristic candidate detection + emulation). The project's defensible contribution is the
+reproducible Rust benchmark plus a measured, honest account of where each method's limits lie.
+
+## 5. Clean-environment validation — Kali Linux analysis VM (arm64)
+
+The container numbers in §1/§4 are pessimistic: scanning memory in a shared dev container
+also picks up unrelated resident data as noise. Re-run in the proper place — a dedicated
+Kali Linux analysis VM (Apple-Silicon, aarch64), reached over SSH — the picture is cleaner
+and adds a new architecture.
+
+Benchmark rebuilt natively on the VM (release, arm64) and run through `recover_dynamic.py`:
+
+| obfuscator | cipher | dynamic recall | noise (text-like strings) |
+|---|---|---|---|
+| xor_custom | XOR | 5/5 | 13 |
+| litcrypt | XOR | 5/5 | 13 |
+| obfstr | XOR+ADD inlined | 5/5 | 12 |
+| muddy | ChaCha20-Poly1305 | 5/5 | 14 |
+
+Two results:
+
+1. **Dynamic recovery is architecture-agnostic.** The static recoverer is x86-64-only (it
+   parses x86 with capstone), but dynamic memory recovery recovers 5/5 on **aarch64** binaries
+   unchanged — it observes decoded memory, not instructions. Rust malware on Apple Silicon and
+   ARM mobile is a real and growing target that the static path does not cover at all.
+
+2. **In a clean sandbox the precision is good.** Only ~13 text-like strings survive per target
+   (vs 57-181 in the shared container), the decoded secrets rank at the top, and the residual
+   noise is legitimate loader/libc strings (`ld-uClibc`, `__libc_dlopen_mode`), not a context
+   leak. This is the number that matters: run the tool where it is meant to run.
+
+Setup used: Kali aarch64 VM, Rust + Frida installed, binaries built natively, analysis driven
+over SSH from the host. This is the environment the dynamic method is designed for.
