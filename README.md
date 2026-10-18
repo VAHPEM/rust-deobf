@@ -1,4 +1,4 @@
-# rust-string-deobf
+# rust-deobf
 
 A reproducible benchmark and recovery tooling for **string deobfuscation in Rust
 binaries** — defensive reverse-engineering research for malware triage.
@@ -108,8 +108,8 @@ is an author-generated canary (see `bench_src/manifest.json`).
 ## Download
 
 ```bash
-git clone https://github.com/VAHPEM/rust-string-deobf.git
-cd rust-string-deobf
+git clone https://github.com/VAHPEM/rust-deobf.git
+cd rust-deobf
 ```
 
 ## Dependencies & installation
