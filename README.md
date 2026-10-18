@@ -3,98 +3,265 @@
 A reproducible benchmark and recovery tooling for **string deobfuscation in Rust
 binaries** — defensive reverse-engineering research for malware triage.
 
+Two recoverers (static + dynamic), a labelled micro-benchmark of benign Rust programs
+built against every common string-obfuscation crate, and an honest evaluation against the
+standard baseline (Mandiant FLOSS) on both synthetic and real binaries.
+
+---
+
 ## Why
 
 Mandiant's FLOSS is the standard open-source tool for pulling obfuscated strings out of
-malware, but it is built for C/C++ PE binaries. Rust malware is rising, and defensive
+malware, but it is built for C/C++ PE binaries. Rust malware is rising and defensive
 tooling for it is effectively absent (confirmed Oct 2026): the one Go equivalent,
 GoStringUngarbler, was archived 2026-04-27 and only ever handled `garble -literals`; no
 public tool recovers obfuscated strings from Rust binaries, and no labelled benchmark of
 real binaries with annotated string-decryption functions exists in any language.
 
-This project (a) builds such a benchmark for Rust and (b) measures existing tools against
-it, then (c) implements a recoverer for the case they miss.
-
-## What's here
-
-```
-bench_src/gen_projects.py     generate benign Rust programs that print known canaries, one per
-                              obfuscation crate (obfstr, litcrypt, litcrypt2, muddy, cryptify)
-                              plus hand-written XOR/ADD/SUB decoders and a plaintext control
-scripts/recover.py            unified CLI: static recovery + emulation fallback
-scripts/build_all.sh          build the matrix {ELF,PE}x{debug,release}x{strip,nostrip}
-scripts/run_floss.py          baseline: strings(1) and FLOSS canary recall
-scripts/recover_callsite.py   our recoverer: static call-site dataflow for XOR/ADD/SUB decoders
-scripts/recover_emulate.py    emulation PoC (Unicorn) for inlined decoders (obfstr)
-scripts/recover_dynamic.py    dynamic recovery via runtime memory scan (Frida) — works on real optimised builds
-scripts/recover_arm64.py      static recovery ported to AArch64/ARM64 (new: no prior tool)
-build/summary.json            consolidated comparison  (build/results_table.md = full matrix)
-RESULTS.md                    the micro-benchmark results table
-VALIDATION.md                 what happens on REAL binaries (precision + recall findings)
-```
-
-The sample programs are benign: they only print strings, exactly as Mandiant's own FLOSS
-test corpus does. No payloads, no real malware, no live indicators — all strings are
-author-generated canaries.
-
-## Reality check
-
-Micro-benchmark numbers below look strong, but see **VALIDATION.md**: on real binaries the
-tool has a filterable precision problem (~5 false positives on 30 MB ripgrep, down from 271)
-and an unsolved recall problem (call-site resolution breaks on optimised litcrypt builds;
-obfstr needs emulation). It is a PoC, not a finished tool.
+This project (a) builds such a benchmark for Rust, (b) measures existing tools against it,
+and (c) implements two recoverers for the cases they miss — a fast static call-site
+recoverer and a universal dynamic (runtime memory-scan) recoverer.
 
 ## Headline result
 
 FLOSS recovers **0/5** canaries on every Rust obfuscator and cannot open ELF at all.
-Our static call-site recoverer gets **5/5** on four keyed-decoder families — hand-rolled
-XOR, ADD and SUB, plus the **litcrypt** crate — across every release configuration
-(ELF and PE, stripped and not: 16/64 configs). obfstr (inlined per-literal keys, built to
-resist static analysis) is partially recovered by emulation (1/5); litcrypt2 (fork) needs a
-small extension; muddy (AEAD) is out of static reach by cipher design. Full matrix and a
-survey of existing tools: RESULTS.md.
+
+| obfuscator | cipher | `strings` | FLOSS | static (ours) | **dynamic (ours)** |
+|---|---|---|---|---|---|
+| xor_custom | XOR | 0/5 | 0/5 | 5/5 | **5/5** |
+| add_custom | ADD | 0/5 | 0/5 | 5/5 | **5/5** |
+| sub_custom | SUB | 0/5 | 0/5 | 5/5 | **5/5** |
+| litcrypt | XOR (runtime key) | 0/5 | 0/5 | 5/5 | **5/5** |
+| litcrypt2 | XOR (runtime key) | 0/5 | 0/5 | 0/5 | **5/5** |
+| obfstr | XOR+ADD inlined | 0/5 | 0/5 | 0/5 (1/5 emu) | **5/5** |
+| muddy | ChaCha20-Poly1305 | 0/5 | 0/5 | 0/5 | **5/5** |
+
+- **Static recovery** (`recover_callsite.py` for x86-64, `recover_arm64.py` for AArch64) is
+  fast and needs no execution, but only handles simple keyed decoders (hand-rolled
+  XOR/ADD/SUB and litcrypt). It gets **5/5** on four keyed-decoder families across every
+  release configuration — ELF and PE, stripped and not — and on **both** x86-64 and AArch64
+  (the first string recoverer to target ARM64 Rust).
+- **Dynamic recovery** (`recover_dynamic.py`, Frida memory scan) recovers **every**
+  obfuscator including inlined (obfstr) and AEAD (muddy), because at runtime all strings are
+  decrypted in memory — at the cost of executing the sample (**sandbox/VM only**), needing
+  code-path coverage, and ranking decoded strings out of runtime noise.
+
+Full matrix: `RESULTS.md`. Reproducible metrics: `METRICS.md`. Real-binary
+precision/recall analysis and the cross-architecture validation: `VALIDATION.md`.
+
+## Reality check
+
+The micro-benchmark numbers look strong, but this is a **PoC, not a finished product** —
+see `VALIDATION.md`. On real binaries the static tool has a filterable precision problem
+(~5 false positives on a 30 MB `ripgrep`, down from 271 after layered filtering) and a
+recall problem (call-site resolution breaks on heavily optimised/inlined builds; obfstr
+needs emulation; litcrypt2 needs the dynamic path). The dynamic tool is cipher- and
+arch-agnostic but only recovers strings on code paths you actually exercise, and its output
+must be ranked out of runtime noise.
+
+---
+
+## Repository layout
+
+```
+bench_src/
+  gen_projects.py        generate benign Rust programs that print 5 known canaries, one
+                         crate per obfuscator (obfstr, litcrypt, litcrypt2, muddy, cryptify)
+                         plus hand-written XOR/ADD/SUB decoders and a plaintext control
+  <obfuscator>/          one Cargo project per obfuscation family (source of the benchmark)
+  manifest.json          canaries + per-variant crate/env/cipher metadata
+scripts/
+  recover.py             unified CLI: auto-detect arch+format, dispatch to the right recoverer
+  recover_callsite.py    static call-site dataflow recoverer (x86-64, ELF+PE)
+  recover_arm64.py       static call-site dataflow recoverer (AArch64/ELF) — new, no prior tool
+  recover_dynamic.py     dynamic recoverer via runtime memory scan (Frida) — works on real builds
+  recover_emulate.py     emulation PoC (Unicorn) for inlined decoders (obfstr, partial)
+  build_all.sh           build the matrix {ELF,PE} x {debug,release} x {strip,nostrip}
+  run_floss.py           baseline: strings(1) + FLOSS canary recall
+  evaluate_all.py        reproducible end-to-end eval -> METRICS.md
+build/                   built sample binaries + consolidated result JSON/tables
+RESULTS.md               micro-benchmark results table (full config matrix)
+METRICS.md               machine-generated metrics from evaluate_all.py
+VALIDATION.md            what happens on REAL binaries + cross-arch validation
+```
+
+The sample programs are **benign**: they only print canary strings, exactly as Mandiant's
+own FLOSS test corpus does. No payloads, no real malware, no live indicators — every string
+is an author-generated canary (see `bench_src/manifest.json`).
+
+---
+
+## Download
+
+```bash
+git clone https://github.com/VAHPEM/rust-string-deobf.git
+cd rust-string-deobf
+```
+
+## Dependencies & installation
+
+### 1. Python (recovery tools) — required
+
+Python 3.10+.
+
+```bash
+python3 -m pip install lief capstone unicorn frida frida-tools
+```
+
+| package | used by | purpose |
+|---|---|---|
+| `lief` | all recoverers | parse ELF/PE, resolve VAs ↔ file offsets, detect arch/format |
+| `capstone` | `recover_callsite.py`, `recover_arm64.py` | disassemble `.text` |
+| `unicorn` | `recover_emulate.py` | CPU emulation fallback for inlined decoders (obfstr) |
+| `frida`, `frida-tools` | `recover_dynamic.py` | attach to the running sample and scan memory |
+
+Static recovery (`recover.py` → callsite/arm64) needs only `lief` + `capstone`. `unicorn`
+is needed only for the emulation PoC; `frida` only for dynamic recovery.
+
+### 2. Rust toolchain — required only to (re)build the benchmark
+
+Install via [rustup](https://rustup.rs/), then add the targets you want to build for:
+
+```bash
+rustup target add x86_64-pc-windows-gnu      # PE / Windows cross-build
+rustup target add aarch64-unknown-linux-gnu  # ARM64 ELF cross-build (optional)
+```
+
+System linkers for cross-building:
+
+```bash
+# Debian/Ubuntu/Kali
+sudo apt install mingw-w64                    # PE linker (x86_64-pc-windows-gnu)
+sudo apt install gcc-aarch64-linux-gnu        # ARM64 cross-linker (optional)
+# macOS (Homebrew)
+brew install mingw-w64
+```
+
+You do **not** need Rust to run the recoverers against a binary you already have — only to
+regenerate/rebuild the benchmark corpus.
+
+### 3. FLOSS — optional, for reproducing the baseline
+
+```bash
+python3 -m venv /opt/flossenv
+/opt/flossenv/bin/pip install flare-floss
+```
+
+`run_floss.py` invokes FLOSS at `/opt/flossenv/bin/floss` (the `FLOSS` constant at the top
+of the script) — install it there, or edit that one line to point at your own FLOSS. FLOSS
+is only used to reproduce the baseline column; the recoverers do not depend on it.
+
+---
+
+## Required VMs / sandbox
+
+| task | environment | why |
+|---|---|---|
+| **Static recovery** (`recover.py`, x86-64 & ARM64) | any host, no VM | reads the binary, never executes it |
+| **Building the benchmark** | any host with Rust | cross-compiles, does not run samples |
+| **Dynamic recovery** (`recover_dynamic.py`) | **isolated analysis VM — required** | it *executes* the target and scans its whole address space |
+
+**Dynamic recovery must run inside a dedicated, isolated analysis VM** — never on your host.
+Two reasons: (1) you are executing an untrusted sample; (2) the memory scan reads all
+readable+writable memory of the process, so anything else resident in that process (env,
+other secrets, injected-agent state) surfaces as noise and could leak in a shared
+environment. In a clean VM the only interesting memory is the sample's own, which is the
+point.
+
+Recommended VMs (both validated):
+
+- **Kali Linux** (ARM64 or x86-64) — used for the clean dynamic validation and for the
+  cross-architecture (AArch64) static validation in `VALIDATION.md` §5–§6. Frida installs
+  cleanly; reached over SSH. ARM64 Kali additionally lets you build and analyse AArch64 Rust
+  binaries natively.
+- **Windows 11** — optional, only if you want to detonate **PE** samples dynamically
+  (dynamic recovery of a Windows-target binary must run on Windows). Static recovery of PE
+  binaries works fine from any host, so this VM is niche.
+
+Snapshot the VM before detonation and revert afterwards, as with any sample analysis.
+
+---
 
 ## Usage
 
+### Recover strings from a binary (static, no execution)
+
 ```bash
-python scripts/recover.py path/to/binary     # auto-detects arch/format, runs static recovery
-python scripts/recover_dynamic.py path/to/binary   # dynamic recovery (sandbox only)
+python3 scripts/recover.py path/to/binary
 ```
 
-`recover.py` auto-detects the architecture (x86-64 or AArch64) and format (ELF/PE) and
-dispatches to the matching static recoverer; for optimised/inlined/AEAD builds it points to
-the dynamic path.
+`recover.py` auto-detects architecture (x86-64 or AArch64) and format (ELF/PE) via `lief`
+and dispatches to the matching static recoverer. It prints the decoded strings. For
+optimised/inlined/AEAD builds it tells you to use the dynamic path.
 
-It prints the decoded strings. Static recovery handles keyed XOR/ADD/SUB decoders and
-litcrypt; the emulation fallback handles inlined decoders (obfstr, partial).
+### Recover strings from a hard binary (dynamic — **VM/sandbox only**)
 
-## How the recoverer works
-
-No emulation, no known plaintext. It mirrors FLOSS's "find the decoder, recover its output"
-idea with lightweight static dataflow instead of a CPU emulator:
-
-1. Disassemble `.text` (capstone); find the decode op (`xor`/`add`/`sub`) on a byte register
-   in a repeating-key loop. Key length from the index-wrap idiom: `and e_,0xK` (K+1) or
-   `cmp r,0xM`+`cmov*` (M+1).
-2. Resolve the key pointer: the `lea reg,[rip+disp]` feeding the key-indexed byte load —
-   the op's own memory operand or a `movzx` just before it.
-3. Resolve each call site: backward-scan for ciphertext pointer (`lea`) and length
-   (`mov imm`), ABI-aware for SysV (ELF) and Win64 (PE).
-4. Apply the code's own op (xor/add/sub) with `key[i % keylen]`; keep printable output.
-
-obfstr needs the emulation path (`scripts/recover_emulate.py`): it inlines the decode with
-per-literal immediate keys and hides the data pointer behind a helper call, so there is no
-static key to read.
-
-## Setup
-
+```bash
+# inside an isolated analysis VM only:
+python3 scripts/recover_dynamic.py path/to/binary [-- arg1 arg2 ...]
 ```
-rustup target add x86_64-pc-windows-gnu      # PE builds (needs mingw-w64)
-pip install lief capstone unicorn
-python3 -m venv floss && floss/bin/pip install flare-floss
+
+Runs the sample, lets it decode its strings in memory, scans writable memory, and reports
+strings that are **not** present statically (i.e. decoded at runtime), ranked by
+text-likeness. Pass representative arguments so the decode paths actually execute — coverage
+is exactly like sandbox detonation. Recovers every obfuscator including AEAD, regardless of
+crate or inlining, because it observes the result instead of parsing the decoder.
+
+### Rebuild the benchmark corpus
+
+```bash
+python3 bench_src/gen_projects.py     # regenerate the Cargo projects (idempotent)
+bash   scripts/build_all.sh           # build {ELF,PE} x {debug,release} x {strip,nostrip}
 ```
+
+### Reproduce the baseline and metrics
+
+```bash
+python3 scripts/run_floss.py                      # strings + FLOSS recall -> build/*.json
+python3 scripts/evaluate_all.py [--ripgrep /path/to/rg]   # end-to-end -> METRICS.md
+```
+
+`--ripgrep` points the precision test at a real unobfuscated binary (optional; any large
+release binary works).
+
+---
+
+## How the recoverers work
+
+### Static call-site recovery (x86-64 and AArch64)
+
+No known plaintext, no emulation. It mirrors FLOSS's "find the decoder, recover its output"
+idea with lightweight static dataflow:
+
+1. Disassemble `.text` (capstone) and find the decode op (`xor`/`add`/`sub`, or ARM64
+   `eor`/`add`/`sub`) on a byte register inside a repeating-key loop. Key length comes from
+   the index-wrap idiom: `and r, 0xK` → K+1, or `cmp r, 0xM` + conditional-move/select → M+1.
+2. Resolve the key pointer — x86-64: the `lea reg,[rip+disp]` feeding the key-indexed byte
+   load; AArch64: the `adrp`+`add` pair.
+3. Resolve each call site: backward-scan for the ciphertext pointer and length, ABI-aware
+   for SysV (ELF x86-64), Win64 (PE), and AAPCS64 (ELF ARM64), including slice-struct passing
+   in optimised builds.
+4. Apply the code's own op with `key[i % keylen]`; keep printable output. Precision is
+   defended with a text-likeness filter, an English-trigram gate, and a ≥2-call-site
+   corroboration requirement.
+
+obfstr defeats this by design: it inlines the decode with per-literal immediate keys and
+hides the data pointer behind a helper call, so there is no static key to read — hence the
+emulation PoC (`recover_emulate.py`, partial) and, in practice, the dynamic path.
+
+### Dynamic recovery (runtime memory scan)
+
+Run the sample in a controlled process, let it decrypt its strings in memory, then diff
+writable memory against the static `strings` of the loaded images and report the difference.
+Cipher- and architecture-agnostic because it never parses the decoder — it observes the
+decrypted result. This is the standard malware-analysis route and the reason it handles AEAD
+(muddy) and inlined (obfstr) builds that no static method reaches.
+
+---
 
 ## Scope / ethics
 
-Defensive RE research only. Inputs are synthetic benign binaries; the tooling reads and
-decodes binaries, it produces no offensive capability.
+Defensive RE research only. All inputs are synthetic, benign binaries that print
+author-generated canaries; the tooling reads and decodes binaries and produces no offensive
+capability. Run dynamic analysis only against samples you are authorised to analyse, inside
+an isolated VM.
