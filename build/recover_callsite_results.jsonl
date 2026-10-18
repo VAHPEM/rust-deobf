@@ -1,0 +1,40 @@
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/litcrypt__elf__debug__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/litcrypt__elf__debug__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/litcrypt__elf__release__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/litcrypt__elf__release__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/litcrypt__pe__debug__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/litcrypt__pe__debug__strip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/litcrypt__pe__release__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/litcrypt__pe__release__strip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/muddy__elf__debug__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/muddy__elf__debug__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/muddy__elf__release__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/muddy__elf__release__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/muddy__pe__debug__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/muddy__pe__debug__strip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/muddy__pe__release__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/muddy__pe__release__strip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/obfstr__elf__debug__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/obfstr__elf__debug__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/obfstr__elf__release__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/obfstr__elf__release__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/obfstr__pe__debug__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/obfstr__pe__debug__strip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/obfstr__pe__release__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/obfstr__pe__release__strip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/plaintext__elf__debug__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/plaintext__elf__debug__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/plaintext__elf__release__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/plaintext__elf__release__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/plaintext__pe__debug__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/plaintext__pe__debug__strip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/plaintext__pe__release__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/plaintext__pe__release__strip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/xor_custom__elf__debug__nostrip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/xor_custom__elf__debug__strip"}
+{"decoders": 1, "recovered_texts": ["canary::alpha::7f3c-config-endpoint", "canary::bravo::build-id-20261018", "canary::charlie::/opt/app/resources/data.bin", "canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"], "recovered": ["canary::alpha::7f3c-config-endpoint", "canary::bravo::build-id-20261018", "canary::charlie::/opt/app/resources/data.bin", "canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"], "recall": 5, "n": 5, "target": "build/xor_custom__elf__release__nostrip"}
+{"decoders": 1, "recovered_texts": ["canary::alpha::7f3c-config-endpoint", "canary::bravo::build-id-20261018", "canary::charlie::/opt/app/resources/data.bin", "canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"], "recovered": ["canary::alpha::7f3c-config-endpoint", "canary::bravo::build-id-20261018", "canary::charlie::/opt/app/resources/data.bin", "canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"], "recall": 5, "n": 5, "target": "build/xor_custom__elf__release__strip"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/xor_custom__pe__debug__nostrip.exe"}
+{"decoders": 0, "recovered_texts": [], "recovered": [], "recall": 0, "n": 5, "target": "build/xor_custom__pe__debug__strip.exe"}
+{"decoders": 1, "recovered_texts": ["canary::alpha::7f3c-config-endpoint", "canary::bravo::build-id-20261018", "canary::charlie::/opt/app/resources/data.bin", "canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"], "recovered": ["canary::alpha::7f3c-config-endpoint", "canary::bravo::build-id-20261018", "canary::charlie::/opt/app/resources/data.bin", "canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"], "recall": 5, "n": 5, "target": "build/xor_custom__pe__release__nostrip.exe"}
+{"decoders": 1, "recovered_texts": ["canary::alpha::7f3c-config-endpoint", "canary::bravo::build-id-20261018", "canary::charlie::/opt/app/resources/data.bin", "canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"], "recovered": ["canary::alpha::7f3c-config-endpoint", "canary::bravo::build-id-20261018", "canary::charlie::/opt/app/resources/data.bin", "canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"], "recall": 5, "n": 5, "target": "build/xor_custom__pe__release__strip.exe"}

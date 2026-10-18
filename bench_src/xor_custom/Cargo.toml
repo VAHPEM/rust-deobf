@@ -1,0 +1,10 @@
+[package]
+name = "xor_custom"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[profile.release]
+strip = false
+opt-level = 3

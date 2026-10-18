@@ -1,0 +1,47 @@
+{
+  "canaries": [
+    "canary::alpha::7f3c-config-endpoint",
+    "canary::bravo::build-id-20261018",
+    "canary::charlie::/opt/app/resources/data.bin",
+    "canary::delta::feature-flag-telemetry-off",
+    "canary::echo::schema-version-4"
+  ],
+  "variants": {
+    "plaintext": {
+      "crate": null,
+      "env": null,
+      "cipher": "none"
+    },
+    "xor_custom": {
+      "crate": null,
+      "env": null,
+      "cipher": "xor"
+    },
+    "obfstr": {
+      "crate": "obfstr = \"0.4\"",
+      "env": null,
+      "cipher": "xor"
+    },
+    "litcrypt": {
+      "crate": "litcrypt = \"0.4\"",
+      "env": [
+        "LITCRYPT_ENCRYPT_KEY",
+        "benchmark-fixed-key-do-not-reuse"
+      ],
+      "cipher": "xor"
+    },
+    "cryptify": {
+      "crate": "cryptify = \"3\"",
+      "env": [
+        "CRYPTIFY_KEY",
+        "benchmark-fixed-key"
+      ],
+      "cipher": "xor-ish"
+    },
+    "muddy": {
+      "crate": "muddy = \"0.3\"",
+      "env": null,
+      "cipher": "chacha20poly1305"
+    }
+  }
+}
