@@ -71,24 +71,44 @@ def recover(path, canaries):
 
     decoders = []  # (loop_xor_addr, key_va, keylen)
     for i, ins in enumerate(insns):
-        if ins.mnemonic != "xor": continue
+        if ins.mnemonic not in ("xor", "add", "sub"): continue
         # xor r8b, byte ptr [rip+disp]  OR  xor r8b, byte ptr [base+index]
         mem_op = next((op for op in ins.operands if op.type == CS_OP_MEM), None)
         if mem_op is None: continue
         key_va = rip_target(ins)  # key may be rip-relative directly
         keylen = None
-        # mask (and e_, 0xK) within ~8 insns before => repeating key length K+1
-        for j in range(max(0, i-8), i):
-            if insns[j].mnemonic == "and":
+        # repeating-key length, two idioms, within ~16 insns around the xor:
+        #   (a) `and e_, 0xK`            => keylen K+1  (K+1 a power of two)
+        #   (b) `cmp r, 0xM` + `cmov*`   => keylen M+1  (modulo-by-compare, e.g. litcrypt)
+        for j in range(max(0, i-16), min(len(insns), i+2)):
+            m = insns[j].mnemonic
+            if m == "and":
                 imm = next((op.imm for op in insns[j].operands if op.type == CS_OP_IMM), None)
                 if imm is not None and 0 < imm < 256 and (imm & (imm+1)) == 0:
                     keylen = imm + 1
+            elif m == "cmp":
+                imm = next((op.imm for op in insns[j].operands if op.type == CS_OP_IMM), None)
+                if imm is not None and 0 < imm < 256:
+                    # confirm a conditional move / branch nearby uses it as a wrap
+                    for k in range(j+1, min(len(insns), j+4)):
+                        if insns[k].mnemonic.startswith("cmov") or insns[k].mnemonic in ("jae","jnb","jb","ja"):
+                            keylen = imm + 1; break
         if key_va is None:
-            # the key pointer is whichever of {base,index} was loaded by `lea reg,[rip+disp]`;
-            # the other register is the loop induction variable (i & mask).
+            # The key pointer is a `lea reg,[rip+disp]` whose reg indexes a byte load in the
+            # decode loop. That byte load is either the decode op's own memory operand, or a
+            # `movzx` a few instructions earlier that feeds the op's source register (some
+            # codegen loads the key first, then combines with the ciphertext). Collect the
+            # pointer-register candidates from both.
             ptr_regs = []
             if mem_op.mem.base: ptr_regs.append(ins.reg_name(mem_op.mem.base))
             if mem_op.mem.index: ptr_regs.append(ins.reg_name(mem_op.mem.index))
+            for j in range(max(0, i-4), i):   # preceding byte loads (movzx/mov) in the loop
+                pj = insns[j]
+                if pj.mnemonic in ("movzx", "mov") and pj.operands:
+                    mo = next((op for op in pj.operands if op.type == CS_OP_MEM), None)
+                    if mo:
+                        if mo.mem.base: ptr_regs.append(pj.reg_name(mo.mem.base))
+                        if mo.mem.index: ptr_regs.append(pj.reg_name(mo.mem.index))
             for j in range(i-1, max(0, i-60), -1):
                 pj = insns[j]
                 if pj.mnemonic == "lea" and pj.operands and pj.operands[0].type == CS_OP_REG:
@@ -96,12 +116,12 @@ def recover(path, canaries):
                         t = rip_target(pj)
                         if t is not None: key_va = t; break
         if key_va is not None and keylen:
-            decoders.append((ins.address, key_va, keylen))
+            decoders.append((ins.address, key_va, keylen, ins.mnemonic))
 
     # dedupe decoders by (key_va, keylen); the loop start we approximate as the xor addr's function
     seen = {}
-    for addr, kva, kl in decoders:
-        seen.setdefault((kva, kl), addr)
+    for addr, kva, kl, opn in decoders:
+        seen.setdefault((kva, kl), (addr, opn))
 
     # Find the function entry for each decoder xor: walk back to the nearest `push rbp`/func prologue
     def func_entry(xaddr):
@@ -118,7 +138,7 @@ def recover(path, canaries):
         return None
 
     found = set(); texts = []
-    for (kva, kl), xaddr in seen.items():
+    for (kva, kl), (xaddr, opn) in seen.items():
         key = read_va(binary, kva, kl)
         if not key: continue
         entry = func_entry(xaddr)
@@ -146,7 +166,12 @@ def recover(path, canaries):
             if blob_va is None or not length or length > 4096: continue
             blob = read_va(binary, blob_va, length)
             if not blob: continue
-            dec = bytes(blob[k] ^ key[k % kl] for k in range(len(blob)))
+            if opn == "xor":
+                dec = bytes(blob[k] ^ key[k % kl] for k in range(len(blob)))
+            elif opn == "add":   # decoder adds the key  -> reproduce with add
+                dec = bytes((blob[k] + key[k % kl]) & 0xff for k in range(len(blob)))
+            else:                # decoder subtracts the key -> reproduce with sub
+                dec = bytes((blob[k] - key[k % kl]) & 0xff for k in range(len(blob)))
             if printable_ratio(dec) > 0.85:
                 t = dec.decode("ascii", "ignore")
                 texts.append(t)

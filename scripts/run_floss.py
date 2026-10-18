@@ -57,7 +57,7 @@ def run_floss(path: Path, fmt: str) -> tuple[str,bool,str]:
 def main():
     rows = []
     bins = sorted(BUILD.glob("*"))
-    bins = [b for b in bins if b.is_file() and not b.name.endswith(".jsonl") and b.name.split("__")[0] not in SKIP]
+    bins = [b for b in bins if b.is_file() and not b.name.endswith((".jsonl",".json")) and b.name.split("__")[0] not in SKIP]
     for i, b in enumerate(bins, 1):
         proj, fmt, profile, striptail = b.name.split("__")
         strip = striptail.replace(".exe","")

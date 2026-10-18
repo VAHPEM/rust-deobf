@@ -17,6 +17,16 @@
       "env": null,
       "cipher": "xor"
     },
+    "add_custom": {
+      "crate": null,
+      "env": null,
+      "cipher": "add"
+    },
+    "sub_custom": {
+      "crate": null,
+      "env": null,
+      "cipher": "sub"
+    },
     "obfstr": {
       "crate": "obfstr = \"0.4\"",
       "env": null,
@@ -42,6 +52,14 @@
       "crate": "muddy = \"0.3\"",
       "env": null,
       "cipher": "chacha20poly1305"
+    },
+    "litcrypt2": {
+      "crate": "litcrypt2 = \"0.1\"",
+      "env": [
+        "LITCRYPT_ENCRYPT_KEY",
+        "benchmark-fixed-key-2"
+      ],
+      "cipher": "xor"
     }
   }
 }

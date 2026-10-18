@@ -6,7 +6,7 @@ SRC="$ROOT/bench_src"; OUT="$ROOT/build"; mkdir -p "$OUT"
 MANIFEST="$ROOT/build/build_manifest.jsonl"; : > "$MANIFEST"
 
 targets=( "x86_64-unknown-linux-gnu:elf" "x86_64-pc-windows-gnu:pe" )
-for proj in plaintext xor_custom obfstr litcrypt cryptify muddy; do
+for proj in $(ls -d "$SRC"/*/ 2>/dev/null | xargs -n1 basename); do
   pdir="$SRC/$proj"; [ -d "$pdir" ] || continue
   # per-project build env (e.g. litcrypt/cryptify fixed key)
   env_line=$(python3 -c "import json;v=json.load(open('$SRC/manifest.json'))['variants']['$proj']['env'];print(f'{v[0]}={v[1]}' if v else '')")

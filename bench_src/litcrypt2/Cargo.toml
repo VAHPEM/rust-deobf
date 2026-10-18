@@ -1,0 +1,11 @@
+[package]
+name = "litcrypt2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+litcrypt2 = "0.1"
+
+[profile.release]
+strip = false
+opt-level = 3

@@ -73,6 +73,30 @@ VARIANTS["xor_custom"] = {
     "build_rs": None, "env": None,
 }
 
+# 2b. hand-written ADD/SUB ciphers (obfstr itself uses ADD; show we generalise beyond XOR)
+for scheme, opname in (("add_custom", "sub"), ("sub_custom", "add")):
+    # decode op is the inverse of the encode op
+    key2 = bytes(bytearray((hashlib.sha256((scheme).encode()).digest())))[:16]
+    def enc_blob(c, key2=key2, scheme=scheme):
+        bs = c.encode()
+        if scheme == "add_custom":   # cipher = plain + key ; decode = cipher - key
+            data = bytes((bs[i] + key2[i % len(key2)]) & 0xff for i in range(len(bs)))
+        else:                        # cipher = plain - key ; decode = cipher + key
+            data = bytes((bs[i] - key2[i % len(key2)]) & 0xff for i in range(len(bs)))
+        return "[" + ",".join(str(b) for b in data) + "]"
+    decls = "\n".join(f"static ENC_{i}: [u8; {len(c.encode())}] = {enc_blob(c)};" for i, c in enumerate(CANARIES))
+    op = "wrapping_sub" if scheme == "add_custom" else "wrapping_add"
+    header = f"""static DKEY: [u8; {len(key2)}] = [{",".join(str(b) for b in key2)}];
+{decls}
+#[inline(never)]
+fn dec(enc: &[u8]) -> String {{
+    let mut out = Vec::with_capacity(enc.len());
+    for (i, b) in enc.iter().enumerate() {{ out.push(b.{op}(DKEY[i % DKEY.len()])); }}
+    String::from_utf8(out).unwrap()
+}}"""
+    lines = ["fn main() {"] + [f"    println!(\"{{}}\", dec(&ENC_{i}));" for i in range(len(CANARIES))] + ["}"]
+    VARIANTS[scheme] = {"deps": [], "header": header, "body": "\n".join(lines), "build_rs": None, "env": None}
+
 # 3. obfstr (XOR, compile-time)
 VARIANTS["obfstr"] = {
     "deps": ['obfstr = "0.4"'],
@@ -109,6 +133,16 @@ VARIANTS["muddy"] = {
     "build_rs": None, "env": None,
 }
 
+
+# 4b. litcrypt2 (maintained fork of litcrypt, same lc! XOR idiom)
+_lit2 = ["use_litcrypt!();", "fn main() {"] + [f'    println!("{{}}", lc!("{esc(c)}"));' for c in CANARIES] + ["}"]
+VARIANTS["litcrypt2"] = {
+    "deps": ['litcrypt2 = "0.1"'],
+    "header": "extern crate alloc;\n#[macro_use]\nextern crate litcrypt2;",
+    "body": "\n".join(_lit2),
+    "build_rs": None, "env": ("LITCRYPT_ENCRYPT_KEY", "benchmark-fixed-key-2"),
+}
+
 manifest = {"canaries": CANARIES, "variants": {}}
 for name, v in VARIANTS.items():
     d = SRC / name
@@ -122,10 +156,11 @@ for name, v in VARIANTS.items():
     if v["build_rs"]:
         (d / "build.rs").write_text(v["build_rs"])
     manifest["variants"][name] = {
-        "crate": None if name in ("plaintext", "xor_custom") else v["deps"][0],
+        "crate": (v["deps"][0] if v["deps"] else None),
         "env": v["env"],
-        "cipher": {"plaintext":"none","xor_custom":"xor","obfstr":"xor","litcrypt":"xor",
-                   "cryptify":"xor-ish","muddy":"chacha20poly1305"}[name],
+        "cipher": {"plaintext":"none","xor_custom":"xor","add_custom":"add","sub_custom":"sub",
+                   "obfstr":"xor","litcrypt":"xor","litcrypt2":"xor",
+                   "cryptify":"xor-ish","muddy":"chacha20poly1305"}.get(name,"?"),
     }
 (SRC / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(f"generated {len(VARIANTS)} projects:", ", ".join(VARIANTS))

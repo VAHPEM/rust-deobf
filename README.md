@@ -18,13 +18,14 @@ it, then (c) implements a recoverer for the case they miss.
 ## What's here
 
 ```
-bench_src/gen_projects.py     generate benign Rust programs that print known canaries,
-                              one per obfuscation crate (obfstr, litcrypt, muddy) plus a
-                              hand-written XOR decoder and a plaintext control
+bench_src/gen_projects.py     generate benign Rust programs that print known canaries, one per
+                              obfuscation crate (obfstr, litcrypt, litcrypt2, muddy, cryptify)
+                              plus hand-written XOR/ADD/SUB decoders and a plaintext control
 scripts/build_all.sh          build the matrix {ELF,PE}x{debug,release}x{strip,nostrip}
 scripts/run_floss.py          baseline: strings(1) and FLOSS canary recall
-scripts/recover_callsite.py   our recoverer: static call-site dataflow for XOR decoders
-build/summary.json            consolidated comparison
+scripts/recover_callsite.py   our recoverer: static call-site dataflow for XOR/ADD/SUB decoders
+scripts/recover_emulate.py    emulation PoC (Unicorn) for inlined decoders (obfstr)
+build/summary.json            consolidated comparison  (build/results_table.md = full matrix)
 RESULTS.md                    the results table and what it establishes
 ```
 
@@ -35,22 +36,30 @@ author-generated canaries.
 ## Headline result
 
 FLOSS recovers **0/5** canaries on every Rust obfuscator and cannot open ELF at all.
-Our call-site recoverer gets **5/5** on the hand-rolled XOR family across all four release
-configurations (including stripped ELF). obfstr/litcrypt (vectorised/inlined XOR) and
-muddy (AEAD) remain open — see RESULTS.md.
+Our static call-site recoverer gets **5/5** on four keyed-decoder families — hand-rolled
+XOR, ADD and SUB, plus the **litcrypt** crate — across every release configuration
+(ELF and PE, stripped and not: 16/64 configs). obfstr (inlined per-literal keys, built to
+resist static analysis) is partially recovered by emulation (1/5); litcrypt2 (fork) needs a
+small extension; muddy (AEAD) is out of static reach by cipher design. Full matrix and a
+survey of existing tools: RESULTS.md.
 
 ## How the recoverer works
 
-No emulation, no known plaintext. It mirrors FLOSS's "find the decoder, recover its
-output" idea with lightweight static dataflow instead of a CPU emulator:
+No emulation, no known plaintext. It mirrors FLOSS's "find the decoder, recover its output"
+idea with lightweight static dataflow instead of a CPU emulator:
 
-1. Disassemble `.text` (capstone); find the repeating-key XOR decode loop
-   (`and e_, 0xK` key mask → key length K+1; `xor dst, [key+i]`).
-2. Resolve the key: the `lea reg,[rip+disp]` feeding the XOR's key operand (base *or*
-   index register).
-3. Resolve each call site: backward-scan for the ciphertext pointer (`lea`, 2nd arg) and
-   length (`mov imm`, 3rd arg), ABI-aware for both SysV (ELF) and Win64 (PE).
-4. Decode `blob[i] ^ key[i % keylen]`, keep printable results.
+1. Disassemble `.text` (capstone); find the decode op (`xor`/`add`/`sub`) on a byte register
+   in a repeating-key loop. Key length from the index-wrap idiom: `and e_,0xK` (K+1) or
+   `cmp r,0xM`+`cmov*` (M+1).
+2. Resolve the key pointer: the `lea reg,[rip+disp]` feeding the key-indexed byte load —
+   the op's own memory operand or a `movzx` just before it.
+3. Resolve each call site: backward-scan for ciphertext pointer (`lea`) and length
+   (`mov imm`), ABI-aware for SysV (ELF) and Win64 (PE).
+4. Apply the code's own op (xor/add/sub) with `key[i % keylen]`; keep printable output.
+
+obfstr needs the emulation path (`scripts/recover_emulate.py`): it inlines the decode with
+per-literal immediate keys and hides the data pointer behind a helper call, so there is no
+static key to read.
 
 ## Setup
 
