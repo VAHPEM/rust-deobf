@@ -85,10 +85,18 @@ scripts/
   build_all.sh           build the matrix {ELF,PE} x {debug,release} x {strip,nostrip}
   run_floss.py           baseline: strings(1) + FLOSS canary recall
   evaluate_all.py        reproducible end-to-end eval -> METRICS.md
+  # artifact-recovery tiers (reuse the same static/dynamic engines; see ARTIFACT_TIERS.md)
+  recover_artifacts.py   Tier 2: dynamic config/C2 recovery — URLs, IP:port, JSON, base64 (Frida)
+  recover_rust_meta.py   Tier 3: static Rust structure — crates+versions, panic file:line, types
+  recover_apihash.py     Tier 2: resolve hash-obfuscated API imports, statically
+  dump_unpacked.py       Tier 2: dump + carve an unpacked stage-2 (Frida W->X; static carve core)
+  deobf_expr.py          Tier 4: prove/simplify MBA + classify opaque predicates (z3)
+  deobf_cff.py           Tier 4: locate control-flow-flattening dispatchers (static)
 build/                   built sample binaries + consolidated result JSON/tables
 RESULTS.md               micro-benchmark results table (full config matrix)
 METRICS.md               machine-generated metrics from evaluate_all.py
 VALIDATION.md            what happens on REAL binaries + cross-arch validation
+ARTIFACT_TIERS.md        the artifact-recovery tiers above + their live validation
 ```
 
 The sample programs are **benign**: they only print canary strings, exactly as Mandiant's
@@ -111,18 +119,22 @@ cd rust-string-deobf
 Python 3.10+.
 
 ```bash
-python3 -m pip install lief capstone unicorn frida frida-tools
+python3 -m pip install lief capstone unicorn z3-solver frida frida-tools
 ```
 
 | package | used by | purpose |
 |---|---|---|
 | `lief` | all recoverers | parse ELF/PE, resolve VAs ↔ file offsets, detect arch/format |
-| `capstone` | `recover_callsite.py`, `recover_arm64.py` | disassemble `.text` |
-| `unicorn` | `recover_emulate.py` | CPU emulation fallback for inlined decoders (obfstr) |
-| `frida`, `frida-tools` | `recover_dynamic.py` | attach to the running sample and scan memory |
+| `capstone` | `recover_callsite.py`, `recover_arm64.py`, `deobf_cff.py`, `recover_apihash.py` | disassemble `.text` |
+| `unicorn` | `recover_emulate.py` | CPU emulation for inlined decoders (obfstr) |
+| `z3-solver` | `deobf_expr.py` | prove MBA simplifications / classify opaque predicates |
+| `frida`, `frida-tools` | `recover_dynamic.py`, `recover_artifacts`/`dump_unpacked` (dynamic) | attach to the running sample and scan memory |
+| `pefile` (optional) | `recover_apihash.py` corpus prep | dump a DLL's export names for `--names` |
 
 Static recovery (`recover.py` → callsite/arm64) needs only `lief` + `capstone`. `unicorn`
-is needed only for the emulation PoC; `frida` only for dynamic recovery.
+is needed only for emulation, `z3-solver` only for `deobf_expr`, and `frida` only for the
+dynamic tools. Each tool ships a `--selftest`; the artifact-recovery tiers are documented,
+with their live validation, in `ARTIFACT_TIERS.md`.
 
 ### 2. Rust toolchain — required only to (re)build the benchmark
 
