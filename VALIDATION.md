@@ -30,6 +30,32 @@ should use a real corpus trigram-frequency table, not a hand-tuned set. Identifi
 strings (e.g. a bare build-id) are fundamentally hard: language statistics cannot distinguish
 them from noise, so they are recoverable only by verifying the decoder dynamically.
 
+### Reproducible precision sweep — `scripts/measure_fp.py`
+
+The 271→5 figure above is now a rerunnable measurement. `measure_fp.py` runs the shipped
+`recover_callsite` (all filters on) over a corpus of real, benign binaries that hide no
+canaries, so every string it emits is a false positive:
+
+```
+python scripts/measure_fp.py            # auto-discovers real system binaries
+python scripts/measure_fp.py --bins <paths…> --json   # writes build/fp_results.json
+```
+
+Measured over **15 real x86-64 binaries** (git, openssl, bash, gpg, perl, vim, three
+python3 builds, libcrypto, tar/gzip/xz/dpkg, and **ripgrep 14.1.0** — the reference binary
+above), 26 MB of `.text`, 133 decoder candidates considered (`build/fp_results.json`):
+
+| corpus | binaries | decoder candidates | false positives |
+|---|---|---|---|
+| 14 system binaries (git, openssl, python3, bash, perl, vim, …) | 14 | 113 | **0** |
+| ripgrep 14.1.0 (30 MB Rust binary) | 1 | 20 | **5** (short fragments) |
+| **total** | **15** | **133** | **5** (≈0.19 / MB of `.text`) |
+
+So the corroboration + language gates reduce the detector's many candidate loops to **zero**
+false strings on 14 of 15 real binaries; the only residuals are 5 short garbage fragments on
+ripgrep (`GateRp`, `pregbaI`, …), exactly the "short fragments" noted above. This is the
+precision number that matters, and it is now reproducible with one command.
+
 ## 2. Recall in context — real optimised build using litcrypt (notecli, ELF, stripped)
 
 A realistic benign CLI: a `clap`-based note tool (2,460 strings in the binary) with three

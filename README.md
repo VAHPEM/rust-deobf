@@ -59,7 +59,8 @@ precision/recall analysis and the cross-architecture validation: `VALIDATION.md`
 
 The micro-benchmark numbers look strong, but this is a **PoC, not a finished product** —
 see `VALIDATION.md`. On real binaries the static tool has a filterable precision problem
-(~5 false positives on a 30 MB `ripgrep`, down from 271 after layered filtering) and a
+(~5 false positives on a 30 MB `ripgrep`, down from 271 after layered filtering — and 0 on
+14 other real binaries; reproduce with `scripts/measure_fp.py`) and a
 recall problem (call-site resolution breaks on heavily optimised/inlined builds; obfstr
 needs the emulation path — now 5/5; litcrypt2 needs the dynamic path). The dynamic tool is cipher- and
 arch-agnostic but only recovers strings on code paths you actually exercise, and its output
@@ -85,6 +86,7 @@ scripts/
   build_all.sh           build the matrix {ELF,PE} x {debug,release} x {strip,nostrip}
   run_floss.py           baseline: strings(1) + FLOSS canary recall
   evaluate_all.py        reproducible end-to-end eval -> METRICS.md
+  measure_fp.py          precision: false positives of static recovery on real benign binaries
   # artifact-recovery tiers (reuse the same static/dynamic engines; see ARTIFACT_TIERS.md)
   recover_artifacts.py   Tier 2: dynamic config/C2 recovery — URLs, IP:port, JSON, base64 (Frida)
   recover_rust_meta.py   Tier 3: static Rust structure — crates+versions, panic file:line, types
