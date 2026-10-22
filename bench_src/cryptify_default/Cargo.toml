@@ -1,0 +1,11 @@
+[package]
+name = "cryptify_default"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cryptify = "3"
+
+[profile.release]
+strip = false
+opt-level = 3

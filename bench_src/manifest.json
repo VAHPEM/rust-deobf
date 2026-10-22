@@ -48,6 +48,11 @@
       ],
       "cipher": "xor-ish"
     },
+    "cryptify_default": {
+      "crate": "cryptify = \"3\"",
+      "env": null,
+      "cipher": "xor-ish"
+    },
     "muddy": {
       "crate": "muddy = \"0.3\"",
       "env": null,

@@ -386,3 +386,19 @@ emulating 5,700+ functions across ARM64, PE and python3.13 completed without a U
   `vendor/<crate>-<ver>/` are recognised; DWARF sections (including PE `/N` long names, resolved
   through the COFF string table) are no longer scanned — that removed `windows-sys`, a crate not
   in meta_probe's Cargo.lock (PE precision 20/21 → 20/20). ELF precision: 17/17, unchanged.
+
+### 9c. cryptify
+
+cryptify (`encrypt_string!`) was in the benchmark but recovered by nothing (0/5 static, emulation
+and — without the build-time variable — dynamic). Its decrypt_string reads `CRYPTIFY_KEY` at
+runtime, falling back to the crate's default key `xnasff3wcedj`, the same default the macro uses
+at build time. The default key is not a string in the binary: rustc builds it from immediates
+(`movabs rax, 0x7733666673616e78` + `mov dword [rcx+8], 0x6a646563` on x86-64; half rodata,
+half `movk` on AArch64).
+
+`recover_cryptify.py` identifies the crate by its `CRYPTIFY_KEY` literal, collects every call
+site that passes a (ptr, len) `&str` (SysV, Win64 and AAPCS64 argument registers) and decodes
+with the default key, requiring >= 2 clean call sites. New bench variant `cryptify_default`
+(built without the variable): **5/5** on x86-64 ELF and PE and on AArch64, release and debug,
+stripped and not. The custom-key variant is detected and reported as runtime-keyed rather than
+guessed at; `plaintext` and the other crates are not flagged.

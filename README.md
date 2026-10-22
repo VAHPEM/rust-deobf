@@ -27,11 +27,17 @@ release builds):
 | litcrypt | XOR, runtime key | 0/5 | 0/5 | **5/5** | **5/5** |
 | litcrypt2 | XOR, stride-permuted key | 0/5 | 0/5 | **5/5** | **5/5** |
 | obfstr | XOR+ADD, inlined | 0/5 | 0/5 | **5/5** (emulation) | **5/5** |
+| cryptify (default key) | XOR, crate-default key | 0/5 | 0/5 | **5/5** | **5/5** |
+| cryptify (custom key) | XOR, key from env at build *and* run time | 0/5 | 0/5 | —¹ | **5/5**¹ |
 | muddy | ChaCha20-Poly1305 (AEAD) | 0/5 | 0/5 | — | **5/5** |
 
 Across **every** release configuration — ELF and PE, stripped and not — and on **both x86-64
 and AArch64**. As far as an Oct-2026 survey found, this is the **first string-deobfuscation
 tooling to target ARM64 Rust** at all.
+
+<sub>¹ cryptify reads `CRYPTIFY_KEY` again at runtime: with a custom key the sample only decrypts
+when run with that variable set, and the key is not in the binary. `recover_cryptify` detects
+the crate and says so.</sub>
 
 <sub>Baseline is FLOSS 3.2.0 (PE/shellcode-only; raises on ELF). FLOSS 4.x adds ELF/Mach-O
 layout, but its language string extractors are still PE-oriented and recover **0/5** on

@@ -125,6 +125,16 @@ VARIANTS["cryptify"] = {
     "build_rs": None, "env": ("CRYPTIFY_KEY", "benchmark-fixed-key"),
 }
 
+# 5b. cryptify with its default key: no CRYPTIFY_KEY at build time, which is also what makes
+#     the program print its strings when run without the variable (cryptify reads the key at
+#     runtime from the same env var, falling back to the same default)
+VARIANTS["cryptify_default"] = {
+    "deps": ['cryptify = "3"'],
+    "header": "",
+    "body": main_body(lambda c: f'cryptify::encrypt_string!("{esc(c)}")'),
+    "build_rs": None, "env": None,
+}
+
 # 6. muddy (ChaCha20-Poly1305 AEAD, embedded key)
 VARIANTS["muddy"] = {
     "deps": ['muddy = "0.3"'],
@@ -160,7 +170,7 @@ for name, v in VARIANTS.items():
         "env": v["env"],
         "cipher": {"plaintext":"none","xor_custom":"xor","add_custom":"add","sub_custom":"sub",
                    "obfstr":"xor","litcrypt":"xor","litcrypt2":"xor",
-                   "cryptify":"xor-ish","muddy":"chacha20poly1305"}.get(name,"?"),
+                   "cryptify":"xor-ish","cryptify_default":"xor-ish","muddy":"chacha20poly1305"}.get(name,"?"),
     }
 (SRC / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(f"generated {len(VARIANTS)} projects:", ", ".join(VARIANTS))

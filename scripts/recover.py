@@ -5,6 +5,8 @@ Detects the binary's architecture and format, then runs the recoverers that appl
 
   1. static call-site recovery  - keyed decoders (hand-rolled XOR/ADD/SUB, litcrypt, litcrypt2)
                                   x86-64 ELF/PE: recover_callsite.py   AArch64 ELF: recover_arm64.py
+                                  cryptify: recover_cryptify.py (default key; a custom key is
+                                  runtime-only and is reported as such)
   2. emulation                  - inlined decoders (obfstr): recover_emulate.py (Unicorn).
                                   Runs automatically when the static pass finds nothing
                                   (`--emulate auto`), always with `--emulate always`.
@@ -81,6 +83,19 @@ def run(path: Path, emulate: str = "auto", stackstrings: bool = True, min_len: i
     result["engines"].append({"engine": engine, "decoders": r.get("decoders", 0),
                               "strings": len(static_records), "seconds": round(time.monotonic() - t0, 1)})
 
+    import recover_cryptify as C
+    t0 = time.monotonic()
+    c = C.recover(path)
+    if c["cryptify"]:
+        known = {x["string"] for x in result["decoded"]}
+        crypt = [x for x in c["records"] if len(x["string"]) >= min_len and x["string"] not in known]
+        result["decoded"].extend(crypt)
+        static_records += crypt
+        result["engines"].append({"engine": "cryptify (recover_cryptify)", "strings": len(crypt),
+                                  "seconds": round(time.monotonic() - t0, 1)})
+        if c["note"]:
+            result["notes"].append(c["note"])
+
     if emulate == "always" or (emulate == "auto" and not static_records):
         import recover_emulate as E
         t0 = time.monotonic()
@@ -121,7 +136,9 @@ def print_text(result: dict) -> None:
     if result["decoded"]:
         print("\n== decoded strings ==")
         for x in result["decoded"]:
-            if x.get("method", "").startswith("static"):
+            if x.get("method") == "static-cryptify":
+                where = f"cryptify key {x['key']!r}  call {_hex(x['call'])}  data {_hex(x['blob'])}"
+            elif x.get("method", "").startswith("static"):
                 where = f"decoder {_hex(x['decoder'])}  call {_hex(x['call'])}  data {_hex(x['blob'])}"
             else:
                 where = f"function {_hex(x['function'])}  (emulation)"
