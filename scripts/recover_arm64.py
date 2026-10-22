@@ -34,6 +34,154 @@ def _x(name):
     return "x" + name[1:] if name and name.startswith("w") else name
 
 
+def _resolve_pageadd(insns, i, reg, back=80):
+    """Walk back from index i to resolve an `adrp Xr,#P; add Xr,Xr,#O` pair into P+O."""
+    want = _x(reg)
+    for j in range(i, max(0, i - back), -1):
+        pj = insns[j]
+        if pj.mnemonic == "add" and pj.operands and _rn(pj, pj.operands[0].reg) == want:
+            src = _rn(pj, pj.operands[1].reg) if len(pj.operands) > 1 else None
+            off = next((o.imm for o in pj.operands if o.type == CS_OP_IMM), None)
+            for k in range(j - 1, max(0, j - back), -1):
+                pk = insns[k]
+                if pk.mnemonic == "adrp" and _rn(pk, pk.operands[0].reg) == src:
+                    pa = next((o.imm for o in pk.operands if o.type == CS_OP_IMM), None)
+                    if pa is not None and off is not None:
+                        return pa + off
+            break
+    return None
+
+
+def recover_litcrypt2_arm64(binary, insns, canaries):
+    """Recover litcrypt2's `lc!` strings on AArch64 (the x86 recover_litcrypt2 analogue).
+
+    litcrypt2 walks a fixed 64-byte key with stride +2, wrapping to 1 at `nxt == keylen`
+    and to 0 beyond -- a permutation of 0..keylen-1, NOT the `key[i % keylen]` the generic
+    recover() models (which reads the `cmp #0x40` as keylen 0x41 and resolves nothing, so
+    litcrypt2 scores 0/5 on the generic path). The ARM codegen of the wrap is
+
+        add  Xnxt, Xidx, #STRIDE      ; idx + stride
+        cmp  Xnxt, #KEYLEN            ; == key length?
+        cset Wc, eq                   ; c = (nxt == keylen)
+        csel Xidx, Xnxt, Wc, lo       ; idx = (nxt < keylen) ? nxt : (1 if ==keylen else 0)
+
+    with `ldrb Wk,[Xkeybase, Xidx]` loading the key byte. The decoder is a shared function
+    (one process-wide key, so byte0 const-folds to `cipher[0] ^ key[0]`); each `lc!` site is
+    `adrp X1,#P; add X1,X1,#O` (ciphertext) + `mov W2,#LEN` + `bl <decoder>` (AAPCS64). We
+    recognise the wrap cluster, read the rip-relative key, and replay the state machine at
+    each call site. Same >=2-call-site corroboration as the generic path -> no new FPs.
+    """
+    out, n = [], len(insns)
+    blt = sorted({o.imm for x in insns if x.mnemonic == "bl"
+                  for o in x.operands if o.type == CS_OP_IMM})
+
+    def entry_of(a):
+        k = bisect.bisect_right(blt, a) - 1
+        return blt[k] if k >= 0 else None
+
+    for i, ins in enumerate(insns):
+        if ins.mnemonic != "csel" or len(ins.operands) < 3:
+            continue
+        if ins.op_str.split(",")[-1].strip() != "lo":        # unsigned-< select = the wrap
+            continue
+        idx_reg = _x(_rn(ins, ins.operands[0].reg))
+        nxt_reg = _x(_rn(ins, ins.operands[1].reg))
+        c_reg = _x(_rn(ins, ins.operands[2].reg))
+        if not any(insns[j].mnemonic == "cset"
+                   and _x(_rn(insns[j], insns[j].operands[0].reg)) == c_reg
+                   and insns[j].op_str.split(",")[-1].strip() == "eq"
+                   for j in range(max(0, i - 4), i)):
+            continue
+        keylen = None
+        for j in range(max(0, i - 5), i):
+            if insns[j].mnemonic == "cmp" and _x(_rn(insns[j], insns[j].operands[0].reg)) == nxt_reg:
+                keylen = next((o.imm for o in insns[j].operands if o.type == CS_OP_IMM), None)
+        if not keylen or not (8 <= keylen <= 1024):
+            continue
+        stride = None
+        for j in range(max(0, i - 8), i):
+            pj = insns[j]
+            if pj.mnemonic == "add" and len(pj.operands) == 3 \
+               and _x(_rn(pj, pj.operands[0].reg)) == nxt_reg \
+               and _x(_rn(pj, pj.operands[1].reg)) == idx_reg \
+               and pj.operands[2].type == CS_OP_IMM:
+                stride = pj.operands[2].imm
+        if not stride or not (0 < stride <= 16):
+            continue
+        key_va = None
+        for j in range(max(0, i - 10), min(n, i + 6)):
+            pj = insns[j]
+            if pj.mnemonic == "ldrb" and pj.operands[-1].type == CS_OP_MEM:
+                mo = pj.operands[-1].mem
+                if mo.base and mo.index and _x(_rn(pj, mo.index)) == idx_reg:
+                    t = _resolve_pageadd(insns, j, _rn(pj, mo.base))
+                    if t is not None:
+                        key_va = t; break
+        if key_va is None:
+            continue
+        key = read_va(binary, key_va, keylen)
+        if len(key) < keylen:
+            continue
+        init_k = None
+        for j in range(max(0, i - 30), i):
+            pj = insns[j]
+            if pj.mnemonic in ("mov", "movz") and len(pj.operands) == 2 \
+               and pj.operands[0].type == CS_OP_REG and pj.operands[1].type == CS_OP_IMM \
+               and _x(_rn(pj, pj.operands[0].reg)) == idx_reg and 0 <= pj.operands[1].imm < keylen:
+                init_k = pj.operands[1].imm
+        if init_k is None:
+            init_k = stride
+        c0 = key[0]                                          # const-folded byte-0 key
+        entry = entry_of(ins.address)
+        if entry is None:
+            continue
+
+        def schedule(ln):
+            seq, k = [], init_k
+            for _ in range(1, ln):
+                seq.append(k); nx = k + stride
+                k = 1 if nx == keylen else (nx if nx < keylen else 0)
+            return seq
+
+        def decode(ct):
+            if not ct:
+                return b""
+            o = bytearray([ct[0] ^ c0])
+            for p, kk in enumerate(schedule(len(ct)), 1):
+                o.append(ct[p] ^ key[kk])
+            return bytes(o)
+
+        texts = []
+        for ci, cins in enumerate(insns):
+            if cins.mnemonic != "bl":
+                continue
+            if next((o.imm for o in cins.operands if o.type == CS_OP_IMM), None) != entry:
+                continue
+            blob = length = None
+            for j in range(ci - 1, max(0, ci - 20), -1):
+                pj = insns[j]
+                if pj.mnemonic == "add" and pj.operands \
+                   and _rn(pj, pj.operands[0].reg) == "x1" and blob is None:
+                    t = _resolve_pageadd(insns, j, "x1")
+                    if t is not None:
+                        blob = t
+                if pj.mnemonic in ("mov", "movz") and pj.operands \
+                   and _x(_rn(pj, pj.operands[0].reg)) == "x2" and length is None:
+                    im = next((o.imm for o in pj.operands if o.type == CS_OP_IMM), None)
+                    if im is not None and 0 < im <= 4096:
+                        length = im
+                if blob and length:
+                    break
+            if blob and length:
+                dec = decode(read_va(binary, blob, length))
+                if dec and looks_like_text(dec):
+                    texts.append(dec.decode("ascii", "ignore"))
+        if len(texts) >= 2:
+            out.extend(texts)
+            break
+    return out
+
+
 def recover(path, canaries):
     binary = lief.parse(str(path))
     text = next((s for s in binary.sections if s.name == ".text"), None)
@@ -155,6 +303,14 @@ def recover(path, canaries):
                 for c in canaries:
                     if c in t:
                         found.add(c)
+
+    # litcrypt2's stride-permutation schedule is not an `i % keylen` repeat, so the generic
+    # path above resolves nothing on it; run the dedicated recogniser as a second pass.
+    for t in recover_litcrypt2_arm64(binary, insns, canaries):
+        texts.append(t)
+        for c in canaries:
+            if c in t:
+                found.add(c)
 
     return {"decoders": len(seen), "recovered": sorted(found), "recovered_texts": texts,
             "recall": len(found), "n": len(canaries)}

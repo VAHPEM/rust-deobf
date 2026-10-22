@@ -87,7 +87,11 @@ is documented as out of scope, not a central result.
   nothing. `recover_callsite.recover_litcrypt2()` now recognises that instruction cluster,
   reads the rip-relative key, and replays the exact schedule at each call site: **5/5** on
   x86-64, with the same ≥2-call-site corroboration, so it adds no false positives (verified
-  with `measure_fp.py`: ripgrep's 5 residuals unchanged, 0 FP elsewhere).
+  with `measure_fp.py`: ripgrep's 5 residuals unchanged, 0 FP elsewhere). The same schedule
+  is ported to AArch64 (`recover_arm64.recover_litcrypt2_arm64()`): there the wrap compiles to
+  `add Xnxt,Xidx,#2 / cmp Xnxt,#0x40 / cset Wc,eq / csel Xidx,Xnxt,Wc,lo` and the key pointer
+  to `adrp`+`add`; **5/5** on arm64 too, with the other six arm64 bench binaries unchanged
+  (muddy/obfstr stayed 0/5 — no new FP).
 ⁴ obfstr inlines the decode into the caller, embeds per-literal random keys as immediate
   `movabs` constants, uses an ADD cipher, and hides the ciphertext pointer behind an
   `xref::inner` call. It is explicitly built to resist static *call-site* analysis (hence 0/5
@@ -109,8 +113,9 @@ is documented as out of scope, not a central result.
    (16/64 configs; every release config of the 4 covered families).
 3. **The hard cases are characterised:** inlined per-literal-key schemes (obfstr) are solved
    by function emulation (`recover_emulate.py`, 5/5) rather than call-site dataflow; a fork's
-   stride-permuted index idiom (litcrypt2) is handled by a dedicated call-site pass
-   (`recover_litcrypt2`, 5/5); AEAD schemes (muddy) remain out of static reach by cipher design.
+   stride-permuted index idiom (litcrypt2) is handled by a dedicated call-site pass on both
+   x86-64 and AArch64 (`recover_litcrypt2` / `recover_litcrypt2_arm64`, 5/5 each); AEAD schemes
+   (muddy) remain out of static reach by cipher design.
 
 ## How `ours` (static call-site recovery) works
 

@@ -8,3 +8,5 @@ bench_src/*/target/
 bench_src/*/Cargo.lock
 __pycache__/
 *.pyc
+build/*_arm64
+build/litcrypt2_arm64

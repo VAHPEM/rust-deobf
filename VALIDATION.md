@@ -179,7 +179,7 @@ over SSH from the host. This is the environment the dynamic method is designed f
 ## 6. Cross-architecture static recovery — AArch64 (new)
 
 The static recoverer was x86-64-only. `scripts/recover_arm64.py` ports it to AArch64 and,
-built + run natively on the Kali arm64 VM, recovers the same four keyed-decoder families it covers on x86-64 (hand-rolled XOR/ADD/SUB plus the litcrypt crate):
+built + run natively on the Kali arm64 VM, recovers the same five keyed-decoder families it covers on x86-64 (hand-rolled XOR/ADD/SUB plus the litcrypt and litcrypt2 crates):
 
 | obfuscator | cipher | arm64 static recall |
 |---|---|---|
@@ -187,7 +187,17 @@ built + run natively on the Kali arm64 VM, recovers the same four keyed-decoder 
 | add_custom | ADD | 5/5 |
 | sub_custom | SUB | 5/5 |
 | litcrypt | XOR (crate) | 5/5 |
+| litcrypt2 | XOR, stride-2 key permutation | 5/5 |
 | obfstr / muddy | inlined / AEAD | 0/5 (as on x86-64) |
+
+litcrypt2 needed a dedicated second pass (as on x86-64): it walks a fixed 64-byte key with a
+`+2` stride that wraps to 1 at `nxt == keylen` and to 0 beyond — a permutation of the key
+indices, not the `key[i % keylen]` repeat the generic path models. On ARM64 the wrap compiles
+to `add Xnxt,Xidx,#2` / `cmp Xnxt,#0x40` / `cset Wc,eq` / `csel Xidx,Xnxt,Wc,lo`, which the
+recogniser matches, then reads the `adrp`+`add` key pointer and replays the state machine at
+each `bl <decoder>` call site. The pass fires only on that exact cluster with ≥2 corroborating
+call sites, so it added nothing on the other six binaries (muddy/obfstr stayed 0/5 — no new
+false positives).
 
 As far as the Oct-2026 survey found, no static string-decoder-recovery tool existed for ARM64
 Rust binaries at all, so this is new coverage (Apple-Silicon / ARM mobile Rust malware). The
@@ -251,6 +261,6 @@ vivisect; this project uses lighter, targeted methods and adds Rust-specific str
 Still-open gaps this comparison surfaces: Rust plain-string blob splitting (by `&str` slice
 lengths — the same relocation technique §7 uses for Location pointers), tight strings, the
 rustc-commit → Rust-version map (FLOSS ships a database; we recover the commit but don't map
-it), and ARM64 ports of `recover_litcrypt2` / `recover_emulate` (`recover_stackstrings` is
-now x86-64 + AArch64). None of these change the headline result (FLOSS 0/5 on obfuscated
-Rust); they are breadth.
+it), and the ARM64 port of `recover_emulate` (obfstr inline-decode via Unicorn ARM;
+`recover_stackstrings` and `recover_litcrypt2` are now both x86-64 + AArch64). None of these
+change the headline result (FLOSS 0/5 on obfuscated Rust); they are breadth.

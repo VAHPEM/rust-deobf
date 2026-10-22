@@ -37,10 +37,11 @@ FLOSS recovers **0/5** canaries on every Rust obfuscator and cannot open ELF at 
 | muddy | ChaCha20-Poly1305 | 0/5 | 0/5 | 0/5 | **5/5** |
 
 - **Static recovery** (`recover_callsite.py` for x86-64, `recover_arm64.py` for AArch64) is
-  fast and needs no execution. It gets **5/5** on the four hand-rolled/litcrypt keyed-decoder
-  families across every release configuration — ELF and PE, stripped and not — and on
-  **both** x86-64 and AArch64 (the first string recoverer to target ARM64 Rust), plus
-  litcrypt2's stride-permuted key schedule (**5/5**, x86-64) via a dedicated recogniser.
+  fast and needs no execution. It gets **5/5** on all five keyed-decoder families — the
+  hand-rolled XOR/ADD/SUB, litcrypt, and litcrypt2's stride-permuted key schedule — across
+  every release configuration (ELF and PE, stripped and not) and on **both** x86-64 and
+  AArch64 (the first string recoverer to target ARM64 Rust). litcrypt2's permutation schedule
+  is handled by a dedicated recogniser on each architecture.
 - **Emulation recovery** (`recover_emulate.py`, Unicorn) handles the inlined case the
   call-site tool cannot: obfstr embeds per-literal keys as immediates and hides the data
   pointer behind an `xref::inner` call, so there is no static key to read. Emulating each
