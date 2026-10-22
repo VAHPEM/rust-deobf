@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""recover_stackstrings.py - recover stack strings (x86-64), statically.
+"""recover_stackstrings.py - recover stack strings (x86-64 + AArch64), statically.
 
 A stack string is assembled at runtime from immediates written to consecutive stack
 slots -- `mov byte ptr [rbp-0x20], 'h'; mov byte ptr [rbp-0x1f], 'i'`, or packed as
@@ -111,6 +111,83 @@ def collect(code: bytes, text_va: int, min_len: int):
     return sorted(((sc, s) for s, sc in best.items()), reverse=True)
 
 
+def _arm_canon(n):
+    """w0/x0 are the same register; wzr/xzr read as zero."""
+    if n in ("wzr", "xzr"):
+        return "zr"
+    if n and n[0] in "wx" and n[1:].isdigit():
+        return "r" + n[1:]
+    return n
+
+
+def collect_arm64(code: bytes, text_va: int, min_len: int):
+    """AArch64 stack strings: `mov wN,#imm` then `strb/strh/str wN,[sp|x29,#off]` (the value
+    register is reused across stores, `strb wzr` writes a NUL). Track each register's last
+    immediate, place the stored bytes by offset, and read off runs -- same shape as collect()."""
+    from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+    from capstone.arm64 import ARM64_OP_REG, ARM64_OP_IMM, ARM64_OP_MEM
+    looks_like_text, english_score = _text_gate()
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN); md.detail = True
+
+    regval = {"zr": 0}
+    frame: dict = {}
+    found = []
+
+    def flush():
+        if not frame:
+            return
+        by_base = {}
+        for (base, disp), b in frame.items():
+            by_base.setdefault(base, {})[disp] = b
+        for base, slots in by_base.items():
+            offs = sorted(slots)
+            run = bytearray(); prev = None
+            def emit():
+                if len(run) >= min_len:
+                    s = bytes(run).decode("latin-1", "ignore")
+                    if looks_like_text(bytes(run)):
+                        found.append((english_score(s), s))
+            for o in offs:
+                c = slots[o]
+                if prev is not None and o != prev + 1:
+                    emit(); run = bytearray()
+                if 0x20 <= c < 0x7f or c == 9:
+                    run.append(c)
+                else:
+                    emit(); run = bytearray()
+                prev = o
+            emit()
+        frame.clear()
+
+    for ins in md.disasm(code, text_va):
+        m = ins.mnemonic
+        if m in ("bl", "blr", "b", "br", "ret", "cbz", "cbnz", "tbz", "tbnz") or m.startswith("b."):
+            flush(); continue
+        ops = ins.operands
+        if m in ("mov", "movz") and len(ops) == 2 \
+           and ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_IMM:
+            regval[_arm_canon(ins.reg_name(ops[0].reg))] = ops[1].imm & 0xFFFFFFFFFFFFFFFF
+        elif m in ("strb", "strh", "str") and len(ops) == 2 \
+             and ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_MEM:
+            src_name = ins.reg_name(ops[0].reg)
+            size = {"strb": 1, "strh": 2}.get(m) or (4 if src_name.startswith("w") else 8)
+            base = ins.reg_name(ops[1].mem.base) if ops[1].mem.base else None
+            if base not in ("sp", "x29"):
+                continue
+            src = _arm_canon(src_name)
+            if src not in regval:
+                continue
+            val = regval[src] & ((1 << (size * 8)) - 1)
+            for k, b in enumerate(val.to_bytes(size, "little")):
+                frame[(base, ops[1].mem.disp + k)] = b
+    flush()
+    best = {}
+    for sc, s in found:
+        if s not in best or sc > best[s]:
+            best[s] = sc
+    return sorted(((sc, s) for s, sc in best.items()), reverse=True)
+
+
 def recover(path: Path, min_len: int = 5):
     import lief
     b = lief.parse(str(path))
@@ -120,8 +197,15 @@ def recover(path: Path, min_len: int = 5):
     if text is None:
         return {"error": "no .text", "stackstrings": []}
     base = (b.optional_header.imagebase if "PE" in b.format.name else 0) + text.virtual_address
-    ss = collect(bytes(text.content), base, min_len)
-    return {"stackstrings": [s for _, s in ss], "ranked": ss}
+    try:
+        mach = (b.header.machine_type.name if hasattr(b.header, "machine_type")
+                else str(b.header.machine)).upper()
+    except Exception:
+        mach = ""
+    arm = "AARCH64" in mach or "ARM64" in mach
+    ss = (collect_arm64 if arm else collect)(bytes(text.content), base, min_len)
+    return {"stackstrings": [s for _, s in ss], "ranked": ss,
+            "arch": "aarch64" if arm else "x86-64"}
 
 
 def _selftest():
@@ -142,7 +226,21 @@ def _selftest():
     r = collect(bytes(code), 0x1000, 5)
     got = [t for _, t in r]
     assert any("secret_on_stack!" in t for t in got), got
-    print("selftest OK: recovered stack string", [t for t in got if "secret" in t])
+
+    # AArch64: mov w0,#c; strb w0,[sp,#off] for "Key", then ret -> flush
+    def mov_w0(imm):   # MOVZ w0,#imm16
+        return _s.pack("<I", 0x52800000 | ((imm & 0xFFFF) << 5))
+    def strb_sp(off):  # STRB w0,[sp,#off]
+        return _s.pack("<I", 0x39000000 | ((off & 0xFFF) << 10) | (31 << 5))
+    acode = bytearray()
+    for k, ch in enumerate(s):               # same 16-char secret, clears the text gate
+        acode += mov_w0(ch) + strb_sp(k)
+    acode += _s.pack("<I", 0xD65F03C0)  # ret
+    ar = collect_arm64(bytes(acode), 0x1000, 5)
+    agot = [t for _, t in ar]
+    assert any("secret_on_stack!" in t for t in agot), agot
+    print("selftest OK: x86 stack string", [t for t in got if "secret" in t],
+          "| arm64 stack string", [t for t in agot if "secret" in t])
 
 
 def main():

@@ -243,7 +243,7 @@ vivisect; this project uses lighter, targeted methods and adds Rust-specific str
 | FLOSS technique | rust-deobf | notes |
 |---|---|---|
 | static strings | `strings(1)` baseline | FLOSS's `language/rust` splits Rust's concatenated `&str` blob by its slice lengths; **not yet ported** (open gap). |
-| stack strings | `recover_stackstrings.py` | immediate stores to `[rbp±k]`/`[rsp+k]`, laid out by offset. Static (no vivisect). 0 on git/openssl/gzip at `--min-len 6`. |
+| stack strings | `recover_stackstrings.py` (x86-64 + **AArch64**) | immediate stores to `[rbp±k]`/`[rsp+k]` (x86) or `strb/str wN,[sp\|x29,#off]` after `mov wN,#imm` (ARM). Static (no vivisect). 0 on git/openssl/gzip at `--min-len 6`; validated on a compiled x86-64 and a compiled aarch64 fixture. |
 | tight strings | — | a stack-string variant that decodes in a tight loop; **not yet covered**. |
 | decoded strings (emulation) | `recover_callsite`/`recover_arm64` (keyed), `recover_emulate` (obfstr), `recover_dynamic` (frida, any cipher incl. AEAD) | FLOSS emulates with vivisect; we split static/emulation/dynamic so the cheap path runs first. |
 | language-specific (Go/Rust/.NET) | `recover_rust_meta.py` | FLOSS's Rust support is plain-string *layout*; ours goes further — crates+versions, panic `file:line:col`, types — but neither recovers *obfuscated* Rust strings except this project's recoverers. |
@@ -251,6 +251,6 @@ vivisect; this project uses lighter, targeted methods and adds Rust-specific str
 Still-open gaps this comparison surfaces: Rust plain-string blob splitting (by `&str` slice
 lengths — the same relocation technique §7 uses for Location pointers), tight strings, the
 rustc-commit → Rust-version map (FLOSS ships a database; we recover the commit but don't map
-it), and ARM64 ports of `recover_litcrypt2` / `recover_emulate` / `recover_stackstrings`
-(currently x86-64). None of these change the headline result (FLOSS 0/5 on obfuscated Rust);
-they are breadth.
+it), and ARM64 ports of `recover_litcrypt2` / `recover_emulate` (`recover_stackstrings` is
+now x86-64 + AArch64). None of these change the headline result (FLOSS 0/5 on obfuscated
+Rust); they are breadth.
