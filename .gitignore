@@ -10,3 +10,7 @@ __pycache__/
 *.pyc
 build/*_arm64
 build/litcrypt2_arm64
+# every benchmark binary built by scripts/build_all.sh (all crates, x86-64 and ARM64=1)
+build/*__*
+build/arm64/
+build/build_manifest.jsonl

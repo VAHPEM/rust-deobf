@@ -274,7 +274,7 @@ vivisect; this project uses lighter, targeted methods and adds Rust-specific str
 | FLOSS technique | rust-deobf | notes |
 |---|---|---|
 | static strings | `strings(1)` baseline | FLOSS's `language/rust` splits Rust's concatenated `&str` blob by its slice lengths; **not yet ported** (open gap). |
-| stack strings | `recover_stackstrings.py` (x86-64 + **AArch64**) | immediate stores to `[rbp±k]`/`[rsp+k]` (x86) or `strb/str wN,[sp\|x29,#off]` after `mov wN,#imm` (ARM). Static (no vivisect). 0 on git/openssl/gzip at `--min-len 6`; validated on a compiled x86-64 and a compiled aarch64 fixture. |
+| stack strings | `recover_stackstrings.py` (x86-64 + **AArch64**) | immediate stores to `[rbp±k]`/`[rsp+k]`, direct or through a register (`movabs rax, imm64; mov [rbp-k], rax`) on x86, or `strb/str wN,[sp\|x29,#off]` after `mov wN,#imm` (ARM). Static (no vivisect). 0 on git/openssl/gzip at `--min-len 6`; validated on a compiled x86-64 and a compiled aarch64 fixture, and on a C program (§9). |
 | tight strings | — | a stack-string variant that decodes in a tight loop; **not yet covered**. |
 | decoded strings (emulation) | `recover_callsite`/`recover_arm64` (keyed), `recover_emulate` (obfstr), `recover_dynamic` (frida, any cipher incl. AEAD) | FLOSS emulates with vivisect; we split static/emulation/dynamic so the cheap path runs first. |
 | language-specific (Go/Rust/.NET) | `recover_rust_meta.py` | FLOSS's Rust support is plain-string *layout*; ours goes further — crates+versions, panic `file:line:col`, types — but neither recovers *obfuscated* Rust strings except this project's recoverers. |
@@ -287,3 +287,72 @@ across the recovery stack — `recover_arm64` (keyed static incl. litcrypt2), `r
 (obfstr inline-decode, below), `recover_stackstrings`, and the architecture-agnostic
 `recover_dynamic` all cover ARM64. None of the remaining gaps change the headline result
 (FLOSS 0/5 on obfuscated Rust); they are breadth.
+
+## 9. Toolchain drift, canary-free emulation, and FLOSS interop (Oct 2026, rustc 1.97)
+
+Rebuilding the whole benchmark with the current toolchain (rustc 1.97.0, 2026-07-07) instead of
+re-reading old binaries surfaced regressions that the committed result files could not show.
+All numbers below are reproducible with `scripts/build_all.sh` (`ARM64=1` adds AArch64) and the
+recoverers' own CLIs.
+
+**Static recovery, what changed in the generated code and what was fixed**
+
+| finding | before | after |
+|---|:-:|:-:|
+| litcrypt2 x86-64, release: the key-index wrap is now `cmp idx,KEYLEN; setne; cmovb` (the recogniser assumed `sete`, the mirror image; with a 21-byte key the permutation differs) | 0/5 | **5/5** |
+| AArch64 linked by `rust-lld` (static musl): `adrp`+`add` is relaxed to `nop; adr`, which the ARM64 address resolver did not model — every keyed family affected | **0/5** each | **5/5** each |
+| litcrypt2 AArch64: same `cset …, ne` wrap as on x86-64 | 0/5 | **5/5** |
+
+The replay now reads the wrap condition (`sete`/`setne`, `cset eq`/`ne`) from the instruction
+instead of assuming it, and the ARM64 resolver accepts the single-instruction `adr` form at the
+key pointer and at call sites. Pre-existing ARM64 binaries (`build/litcrypt2_arm64`, adrp form)
+stay 5/5.
+
+**Emulation (`recover_emulate.py`) works without canaries**
+
+The emulator used to report only matches against known canaries, so on a real sample it reported
+nothing — and with an empty canary list it stopped after the first function (`0 == 0`). It now
+reports every text-like string a function materialises that does **not** already occur in the
+file (FLOSS's definition of a decoded string), drops copies spliced together from static data
+(e.g. `TM_deregisterTMC` + `ibc_start_main`) and partial-overwrite views (Rust strings are not
+NUL-terminated, so a shorter string leaves a longer one's tail behind). Other changes:
+
+- **function ranking** like FLOSS's feature scoring: functions with 64-bit immediates (obfstr's
+  `movabs`/`movk` keys) and non-zeroing XOR/EOR are emulated first — obfstr is found after
+  1–15 functions instead of up to 400;
+- **syscalls** (`svc #0`, `syscall`) in statically linked runtimes are answered instead of
+  ending emulation, and intra-`.text` calls are executed only one level deep, so a static
+  `println!` no longer spins in its lock loop until the timeout. AArch64 non-stripped obfstr:
+  **1/5 → 5/5**;
+- the ARM64 stack snapshot covers the whole live frame, not a fixed 0xA00-byte window.
+
+| canary-free run (`recover(path, [])`) | strings reported |
+|---|---|
+| obfstr x86-64 release, stripped / not | exactly the 5 canaries |
+| obfstr AArch64 release | the 5 canaries; 3 carry a stale tail (`…-20261018int`) — known limitation |
+| plaintext, xor_custom, litcrypt, muddy, cryptify (x86-64 and AArch64) | **0** |
+| real binaries: git, curl, bash, python3.13, openssl, tar, xz, cargo | **0** |
+
+**Stack strings and indicators**
+
+- `recover_stackstrings` tracks immediates held in registers: x86-64 has no 64-bit immediate
+  store, so 8-byte chunks arrive as `movabs rax, imm64; mov [rbp-k], rax`. A plain C fixture with
+  two stack strings went from 0 to 2 recovered (`stack-secret-one`, `http://c2.example`). On the
+  real binaries above the additions are a handful of genuinely stack-built strings
+  (`/proc/self/exe`, SipHash's constant) — no noise.
+- The shared text gate accepts strings shaped like indicators (URLs, domains, IPv4[:port],
+  Windows/Unix paths, registry keys, e-mail) before its English-trigram scoring, which rejected
+  short ones such as `http://c2.example`. `measure_fp.py`: still **0 false positives** on 15
+  real binaries (23.4 MB of `.text`).
+
+**FLOSS results documents**
+
+`recover.py --floss-json out.json` writes the findings as a FLOSS (≥ 4.0) results document:
+call-site recoveries as decoded strings with decoder / call site / ciphertext addresses,
+emulated ones as decoded strings of their function, stack strings, and the file's static
+strings. FLOSS 4.0 master loads and renders these documents (`floss -n 6 out.json`; `-n` must be
+given until FLOSS stops applying its default minimum length to loaded documents).
+
+| debug builds | release builds |
+|---|---|
+| 0/5 for every family, static and emulation — not claimed (release is what ships) | 5/5 for xor/add/sub_custom, litcrypt, litcrypt2 (static) and obfstr (emulation), x86-64 and AArch64, stripped and not |

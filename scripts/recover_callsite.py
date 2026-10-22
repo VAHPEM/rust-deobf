@@ -23,7 +23,7 @@ Honest scope: XOR-keyed schemes only. AEAD (muddy: ChaCha20-Poly1305) is reporte
 out-of-scope-by-design, which is the correct analyst answer, not a miss.
 """
 from __future__ import annotations
-import json, sys, string
+import json, re, sys, string
 from pathlib import Path
 import lief
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM, CS_OP_IMM, CS_OP_REG
@@ -62,6 +62,25 @@ TEXT_CHARS = set(bytes(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     " ._/:@%+=-", "ascii"))
 
+_IOC_PATTERNS = [
+    re.compile(r"^[a-z][a-z0-9+.-]{1,15}://[^\s/$.?#][^\s]*$", re.I),                # scheme://host...
+    re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+               r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?::\d{1,5})?$"),                 # IPv4[:port]
+    re.compile(r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+               r"(?:com|net|org|io|ru|cn|xyz|top|info|biz|onion|dev|app|cc|tk|site|online|club)"
+               r"(?::\d{1,5})?(?:/\S*)?$", re.I),                                       # domain
+    re.compile(r"^[A-Za-z]:\\(?:[\w .$()-]+\\)*[\w .$()-]+$"),                       # C:\path
+    re.compile(r"^/(?:[\w.-]+/)+[\w.-]*$"),                                            # /unix/path
+    re.compile(r"^(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU)(?:\\[\w .{}-]+)+$", re.I),         # registry
+    re.compile(r"^[\w.+-]+@[\w-]+\.[\w.-]+$"),                                         # e-mail
+]
+
+
+def looks_like_ioc(t: str) -> bool:
+    """Whether a string has the shape of a network/host indicator."""
+    return any(p.match(t) for p in _IOC_PATTERNS)
+
+
 def looks_like_text(dec: bytes) -> bool:
     """A real recovered string is overwhelmingly letters/digits/common punctuation.
     Random data XORed with a wrong key occasionally yields printable-ISH bytes, but
@@ -73,6 +92,11 @@ def looks_like_text(dec: bytes) -> bool:
         t = dec.decode("ascii")
     except UnicodeDecodeError:
         return False
+    # Indicators (URLs, domains, IPs, paths, registry keys) are what triage is after; they are
+    # often short, not English (`http://c2.example`) or letter-free (an IP), so the checks below
+    # would reject them. Their shape is specific enough to accept them directly.
+    if looks_like_ioc(t):
+        return True
     texty = sum(1 for c in dec if c in TEXT_CHARS)
     alnum = sum(1 for c in t if c.isalnum())
     if texty / len(dec) < 0.90:   # <=10% unusual characters
@@ -195,6 +219,19 @@ def recover_litcrypt2(binary, insns, canaries):
                     break
         if not stride:
             continue
+        # Wrap value: the index register is zeroed, then `set<cc>` writes 0/1 into it, and the
+        # `cmovb` keeps `idx+STRIDE` only while it is below KEYLEN. So once the index runs past
+        # the key, the next index is 1 when <cc> holds and 0 otherwise. rustc emits either
+        # `sete` (idx+STRIDE == KEYLEN -> 1, past it -> 0) or `setne` (== -> 0, past -> 1),
+        # depending on version and key length, so read it instead of assuming one.
+        wrap_eq, wrap_past = 1, 0
+        for j in range(i - 1, max(0, i - 4), -1):
+            m = insns[j].mnemonic
+            if m in ("sete", "setz"):
+                break
+            if m in ("setne", "setnz"):
+                wrap_eq, wrap_past = 0, 1
+                break
         # key base: a `xor r8, byte ptr [A+B]` within a few insns after; A or B is a lea-rip
         key_va = None
         for j in range(i + 1, min(n, i + 10)):
@@ -254,7 +291,7 @@ def recover_litcrypt2(binary, insns, canaries):
             for _ in range(1, ln):
                 seq.append(k)
                 nxt = k + stride
-                k = 1 if nxt == keylen else (nxt if nxt < keylen else 0)
+                k = nxt if nxt < keylen else (wrap_eq if nxt == keylen else wrap_past)
             return seq
 
         def decode(ct):
@@ -289,7 +326,8 @@ def recover_litcrypt2(binary, insns, canaries):
             if blob and length:
                 dec = decode(read_va(binary, blob, length))
                 if dec and looks_like_text(dec):
-                    texts.append(dec.decode("ascii", "ignore"))
+                    texts.append({"string": dec.decode("ascii", "ignore"), "decoder": entry,
+                                  "call": cins.address, "blob": blob, "method": "static-litcrypt2"})
         if len(texts) >= 2:          # same corroboration bar as recover()
             out.extend(texts)
             break
@@ -372,7 +410,7 @@ def recover(path, canaries):
                 return insns[k].address
         return None
 
-    found = set(); texts = []
+    found = set(); texts = []; records = []
     for (kva, kl), (xaddr, opn) in seen.items():
         key = read_va(binary, kva, kl)
         if not key: continue
@@ -451,7 +489,8 @@ def recover(path, canaries):
             else:                # decoder subtracts the key -> reproduce with sub
                 dec = bytes((blob[k] - key[k % kl]) & 0xff for k in range(len(blob)))
             if dec and looks_like_text(dec):
-                decoder_texts.append(dec.decode("ascii", "ignore"))
+                decoder_texts.append({"string": dec.decode("ascii", "ignore"), "decoder": entry,
+                                      "call": ins.address, "blob": blob_va, "method": "static"})
 
         # Corroboration gate: accept a decoder only if >=2 of its call sites decode to
         # clean, word-like text with the one key. A byte-loop misclassified as a decoder
@@ -460,20 +499,20 @@ def recover(path, canaries):
         # (e.g. a pure build-id) that the language gate cannot distinguish from noise are
         # the known miss -- see RESULTS.md; verifying candidates by emulation is the fix.
         if len(decoder_texts) >= 2:
-            for t in decoder_texts:
-                texts.append(t)
-                for c in canaries:
-                    if c in t: found.add(c)
+            records.extend(decoder_texts)
 
     # litcrypt2's stride-permutation schedule is not an `i % keylen` repeat, so the generic
     # loop above cannot resolve it; its dedicated recogniser runs as a second pass.
-    for t in recover_litcrypt2(binary, insns, canaries):
-        texts.append(t)
-        for c in canaries:
-            if c in t:
-                found.add(c)
+    records.extend(recover_litcrypt2(binary, insns, canaries))
 
-    return {"decoders": len(seen), "recovered_texts": texts,
+    for rec in records:
+        texts.append(rec["string"])
+        for c in canaries:
+            if c in rec["string"]:
+                found.add(c)
+    # records: one per recovered string, {"string", "decoder", "call", "blob", "method"} with the
+    # decoder function, the call site and the ciphertext as virtual addresses
+    return {"decoders": len(seen), "recovered_texts": texts, "records": records,
             "recovered": sorted(found), "recall": len(found), "n": len(canaries)}
 
 def main():

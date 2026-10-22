@@ -50,8 +50,13 @@ Three recoverers, picked by how hard the target is — run the cheap one first:
   config, both architectures. Needs only `lief` + `capstone`.
 - **Emulation recovery** (`recover_emulate.py`, Unicorn) — for the inlined case (obfstr) where
   there is no static key to read: emulate each function, snapshot the plaintext it materialises
-  in memory. 5/5 on obfstr, x86-64 and ARM64, without running the whole program. Unicorn
-  emulates ARM64 cross-host, so no ARM machine needed.
+  in memory. 5/5 on obfstr, x86-64 and ARM64, without running the whole program. Works without
+  known plaintext: it reports strings that are not already in the file (FLOSS's rule for decoded
+  strings) and ranks functions by decoder features first, so obfstr is found after 1–15 functions;
+  0 false positives on git, curl, bash, python, openssl, tar, xz and cargo. Unicorn emulates ARM64
+  cross-host, so no ARM machine needed.
+- **Stack strings** (`recover_stackstrings.py`) — immediates written to the stack frame, including
+  the `movabs reg, imm64; mov [rbp-k], reg` form compilers use for 8-byte chunks.
 - **Dynamic recovery** (`recover_dynamic.py`, Frida) — runs the sample in a sandbox and diffs
   decrypted memory against the static strings. Cipher- and arch-agnostic, so it even handles
   AEAD (muddy) and inlined (obfstr). **Isolated analysis VM only.**
@@ -67,12 +72,21 @@ git clone https://github.com/VAHPEM/rust-deobf.git
 cd rust-deobf
 python3 -m pip install lief capstone unicorn z3-solver frida frida-tools
 
-# static recovery — any host, no execution, auto-detects x86-64/ARM64 + ELF/PE
+# any host, never runs the sample: auto-detects x86-64/ARM64 + ELF/PE, runs static call-site
+# recovery, falls back to Unicorn emulation when that finds nothing, adds stack strings
 python3 scripts/recover.py path/to/binary
+python3 scripts/recover.py path/to/binary --json                  # records with addresses
+python3 scripts/recover.py path/to/binary --floss-json out.json   # open with: floss -n 6 out.json
 
-# hard targets (inlined / AEAD) — inside an isolated analysis VM ONLY
+# AEAD / runtime-only decoders — inside an isolated analysis VM ONLY
 python3 scripts/recover_dynamic.py path/to/binary [-- arg1 arg2 ...]
 ```
+
+Every recovered string comes with where it came from: decoder function, call site and ciphertext
+address for call-site recovery, the emulated function for inlined decoders, the store instruction
+for stack strings. `--floss-json` writes them as a **FLOSS results document**, so the strings
+FLOSS cannot recover from Rust show up in `floss`, `floss --html` and the FLOSS web viewer next to
+the file's static strings.
 
 Static recovery needs only `lief` + `capstone`; `unicorn` is for emulation, `z3-solver` for
 expression analysis, `frida` for the dynamic tools. Every script ships a `--selftest`.
@@ -95,8 +109,13 @@ This is a **proof-of-concept, not a finished product** (full detail in `VALIDATI
 - **Static precision** is filterable, not perfect: ~5 false positives on a 30 MB `ripgrep`
   (down from 271 before layered filtering) and 0 on 14 other real binaries — reproduce with
   `scripts/measure_fp.py`.
-- **Static recall** depends on recognising the decode idiom; heavily optimised/inlined builds
-  can break call-site resolution (obfstr needs the emulation path; both are now 5/5 here).
+- **Static recall** depends on recognising the decode idiom, and the idiom drifts with the
+  compiler: rebuilding with rustc 1.97 changed litcrypt2's index wrap, and `rust-lld` turns ARM64
+  `adrp`+`add` into `adr` — both broke recovery until handled (`VALIDATION.md` §9). Rebuild the
+  benchmark with the current toolchain (`scripts/build_all.sh`, `ARM64=1` for AArch64) rather
+  than trusting old result files. Release builds only; debug builds are not recovered.
+- **Emulated strings on ARM64** can keep a few stale bytes at the end (`…-20261018int`): Rust
+  strings are not NUL-terminated and the recovered buffer is a stack snapshot.
 - **Dynamic recovery** is cipher- and arch-agnostic but only recovers strings on code paths you
   actually execute, and its output must be ranked out of runtime noise.
 
@@ -176,8 +195,9 @@ RESULTS.md · METRICS.md · VALIDATION.md · ARTIFACT_TIERS.md
 Python 3.10+. Static recovery needs `lief` + `capstone`; add `unicorn` for emulation,
 `z3-solver` for `deobf_expr`, `frida`/`frida-tools` for the dynamic tools. Rust is needed only
 to (re)build the benchmark — install [rustup](https://rustup.rs/), then
-`rustup target add x86_64-pc-windows-gnu` (PE) and/or `aarch64-unknown-linux-gnu` (ARM64), plus
-`mingw-w64` / `gcc-aarch64-linux-gnu` linkers. FLOSS (optional, baseline only):
+`rustup target add x86_64-pc-windows-gnu` (PE, plus the `mingw-w64` linker). For ARM64,
+`rustup target add aarch64-unknown-linux-musl` and run `ARM64=1 scripts/build_all.sh`: it links
+static binaries with the bundled `rust-lld`, so no ARM machine or cross gcc is needed. FLOSS (optional, baseline only):
 `pip install flare-floss` into a venv and point the `FLOSS` constant in `run_floss.py` at it.
 
 </details>

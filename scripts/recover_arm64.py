@@ -35,10 +35,16 @@ def _x(name):
 
 
 def _resolve_pageadd(insns, i, reg, back=80):
-    """Walk back from index i to resolve an `adrp Xr,#P; add Xr,Xr,#O` pair into P+O."""
+    """Walk back from index i to the address loaded into register `reg`.
+
+    Handles the usual `adrp Xr,#P; add Xr,Xr,#O` pair (P+O) and the single `adr Xr,#A`
+    that linkers such as lld relax it into when the target is within +-1 MiB (`nop; adr`).
+    """
     want = _x(reg)
     for j in range(i, max(0, i - back), -1):
         pj = insns[j]
+        if pj.mnemonic == "adr" and pj.operands and _x(_rn(pj, pj.operands[0].reg)) == want:
+            return next((o.imm for o in pj.operands if o.type == CS_OP_IMM), None)
         if pj.mnemonic == "add" and pj.operands and _rn(pj, pj.operands[0].reg) == want:
             src = _rn(pj, pj.operands[1].reg) if len(pj.operands) > 1 else None
             off = next((o.imm for o in pj.operands if o.type == CS_OP_IMM), None)
@@ -62,8 +68,8 @@ def recover_litcrypt2_arm64(binary, insns, canaries):
 
         add  Xnxt, Xidx, #STRIDE      ; idx + stride
         cmp  Xnxt, #KEYLEN            ; == key length?
-        cset Wc, eq                   ; c = (nxt == keylen)
-        csel Xidx, Xnxt, Wc, lo       ; idx = (nxt < keylen) ? nxt : (1 if ==keylen else 0)
+        cset Wc, eq                   ; c = (nxt == keylen)   (or `ne`: the mirror image)
+        csel Xidx, Xnxt, Wc, lo       ; idx = (nxt < keylen) ? nxt : c
 
     with `ldrb Wk,[Xkeybase, Xidx]` loading the key byte. The decoder is a shared function
     (one process-wide key, so byte0 const-folds to `cipher[0] ^ key[0]`); each `lc!` site is
@@ -87,11 +93,14 @@ def recover_litcrypt2_arm64(binary, insns, canaries):
         idx_reg = _x(_rn(ins, ins.operands[0].reg))
         nxt_reg = _x(_rn(ins, ins.operands[1].reg))
         c_reg = _x(_rn(ins, ins.operands[2].reg))
-        if not any(insns[j].mnemonic == "cset"
-                   and _x(_rn(insns[j], insns[j].operands[0].reg)) == c_reg
-                   and insns[j].op_str.split(",")[-1].strip() == "eq"
-                   for j in range(max(0, i - 4), i)):
+        # `cset Wc, eq` wraps idx+STRIDE == KEYLEN to 1 and past it to 0; `cset Wc, ne` is the
+        # mirror image. rustc picks one depending on version and key length, so accept both.
+        cond = next((insns[j].op_str.split(",")[-1].strip() for j in range(i - 1, max(0, i - 4) - 1, -1)
+                     if insns[j].mnemonic == "cset"
+                     and _x(_rn(insns[j], insns[j].operands[0].reg)) == c_reg), None)
+        if cond not in ("eq", "ne"):
             continue
+        wrap_eq, wrap_past = (1, 0) if cond == "eq" else (0, 1)
         keylen = None
         for j in range(max(0, i - 5), i):
             if insns[j].mnemonic == "cmp" and _x(_rn(insns[j], insns[j].operands[0].reg)) == nxt_reg:
@@ -140,7 +149,7 @@ def recover_litcrypt2_arm64(binary, insns, canaries):
             seq, k = [], init_k
             for _ in range(1, ln):
                 seq.append(k); nx = k + stride
-                k = 1 if nx == keylen else (nx if nx < keylen else 0)
+                k = nx if nx < keylen else (wrap_eq if nx == keylen else wrap_past)
             return seq
 
         def decode(ct):
@@ -160,7 +169,7 @@ def recover_litcrypt2_arm64(binary, insns, canaries):
             blob = length = None
             for j in range(ci - 1, max(0, ci - 20), -1):
                 pj = insns[j]
-                if pj.mnemonic == "add" and pj.operands \
+                if pj.mnemonic in ("add", "adr") and pj.operands \
                    and _rn(pj, pj.operands[0].reg) == "x1" and blob is None:
                     t = _resolve_pageadd(insns, j, "x1")
                     if t is not None:
@@ -175,7 +184,8 @@ def recover_litcrypt2_arm64(binary, insns, canaries):
             if blob and length:
                 dec = decode(read_va(binary, blob, length))
                 if dec and looks_like_text(dec):
-                    texts.append(dec.decode("ascii", "ignore"))
+                    texts.append({"string": dec.decode("ascii", "ignore"), "decoder": entry,
+                                  "call": cins.address, "blob": blob, "method": "static-litcrypt2"})
         if len(texts) >= 2:
             out.extend(texts)
             break
@@ -193,20 +203,7 @@ def recover(path, canaries):
     idx = {ins.address: i for i, ins in enumerate(insns)}
 
     def resolve_pageadd(i, reg, back=60):
-        want = _x(reg)
-        for j in range(i, max(0, i - back), -1):
-            pj = insns[j]
-            if pj.mnemonic == "add" and pj.operands and _rn(pj, pj.operands[0].reg) == want:
-                src = _rn(pj, pj.operands[1].reg) if len(pj.operands) > 1 else None
-                off = next((o.imm for o in pj.operands if o.type == CS_OP_IMM), None)
-                for k in range(j - 1, max(0, j - back), -1):
-                    pk = insns[k]
-                    if pk.mnemonic == "adrp" and _rn(pk, pk.operands[0].reg) == src:
-                        pa = next((o.imm for o in pk.operands if o.type == CS_OP_IMM), None)
-                        if pa is not None and off is not None:
-                            return pa + off
-                break
-        return None
+        return _resolve_pageadd(insns, i, reg, back)
 
     # --- detect decoders: eor/add/sub with a masked key ldrb in the same loop body ---
     decoders = []
@@ -254,7 +251,7 @@ def recover(path, canaries):
         k = bisect.bisect_right(bl_targets, a) - 1
         return bl_targets[k] if k >= 0 else None
 
-    found = set(); texts = []
+    found = set(); texts = []; records = []
     for (kva, kl), (xaddr, opn) in seen.items():
         key = read_va(binary, kva, kl)
         if not key:
@@ -278,7 +275,7 @@ def recover(path, canaries):
                         length = imm; break
             for j in range(i - 1, max(0, i - 20), -1):
                 pj = insns[j]
-                if pj.mnemonic == "add" and pj.operands and _rn(pj, pj.operands[0].reg) == "x1":
+                if pj.mnemonic in ("add", "adr") and pj.operands and _rn(pj, pj.operands[0].reg) == "x1":
                     t = resolve_pageadd(j, "x1")
                     if t is not None:
                         blob_va = t; break
@@ -295,25 +292,23 @@ def recover(path, canaries):
                 bytes((blob[k] - key[k % kl]) & 0xff for k in range(len(blob))),
             ):
                 if looks_like_text(cand):
-                    decoder_texts.append(cand.decode("ascii", "ignore"))
+                    decoder_texts.append({"string": cand.decode("ascii", "ignore"), "decoder": entry,
+                                          "call": ins.address, "blob": blob_va, "method": "static"})
                     break
         if len(decoder_texts) >= 2:
-            for t in decoder_texts:
-                texts.append(t)
-                for c in canaries:
-                    if c in t:
-                        found.add(c)
+            records.extend(decoder_texts)
 
     # litcrypt2's stride-permutation schedule is not an `i % keylen` repeat, so the generic
     # path above resolves nothing on it; run the dedicated recogniser as a second pass.
-    for t in recover_litcrypt2_arm64(binary, insns, canaries):
-        texts.append(t)
-        for c in canaries:
-            if c in t:
-                found.add(c)
+    records.extend(recover_litcrypt2_arm64(binary, insns, canaries))
 
+    for rec in records:
+        texts.append(rec["string"])
+        for c in canaries:
+            if c in rec["string"]:
+                found.add(c)
     return {"decoders": len(seen), "recovered": sorted(found), "recovered_texts": texts,
-            "recall": len(found), "n": len(canaries)}
+            "records": records, "recall": len(found), "n": len(canaries)}
 
 
 def main():

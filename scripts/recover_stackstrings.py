@@ -40,9 +40,26 @@ def _text_gate():
         return looks_like_text, english_score
 
 
+_X86_FAMILIES = {}
+for _full, _parts in {
+    "rax": "eax ax al ah", "rbx": "ebx bx bl bh", "rcx": "ecx cx cl ch", "rdx": "edx dx dl dh",
+    "rsi": "esi si sil", "rdi": "edi di dil", "rbp": "ebp bp bpl", "rsp": "esp sp spl",
+}.items():
+    for _p in [_full] + _parts.split():
+        _X86_FAMILIES[_p] = _full
+for _n in range(8, 16):
+    for _p in (f"r{_n}", f"r{_n}d", f"r{_n}w", f"r{_n}b"):
+        _X86_FAMILIES[_p] = f"r{_n}"
+
+
+def _x86_canon(name: str) -> str:
+    """Map a sub-register (eax, al, r8d, ...) to its 64-bit register."""
+    return _X86_FAMILIES.get(name, name)
+
+
 def collect(code: bytes, text_va: int, min_len: int):
     """Disassemble .text and assemble stack strings from immediate frame stores."""
-    from capstone import (Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM, CS_OP_IMM)
+    from capstone import (Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM, CS_OP_IMM, CS_OP_REG)
     looks_like_text, english_score = _text_gate()
     md = Cs(CS_ARCH_X86, CS_MODE_64); md.detail = True
 
@@ -51,6 +68,7 @@ def collect(code: bytes, text_va: int, min_len: int):
     # buffers in different regions don't merge.
     frame: dict = {}
     found = []
+    sites: dict = {}   # string -> {"pc": last store, "base": frame register, "offset": slot}
 
     def flush():
         if not frame:
@@ -60,36 +78,61 @@ def collect(code: bytes, text_va: int, min_len: int):
             by_base.setdefault(base, {})[disp] = b
         for base, slots in by_base.items():
             offs = sorted(slots)
-            run = bytearray(); start = None; prev = None
+            run = bytearray(); start = None; prev = None; pcs = []
             def emit():
                 if len(run) >= min_len:
                     raw = bytes(run)
                     if looks_like_text(raw):
-                        found.append((english_score(raw.decode("latin-1", "ignore")),
-                                      raw.decode("latin-1", "ignore")))
+                        txt = raw.decode("latin-1", "ignore")
+                        found.append((english_score(txt), txt))
+                        sites.setdefault(txt, {"pc": max(pcs), "base": base, "offset": start})
             for o in offs:
-                c = slots[o]
+                c, pc = slots[o]
                 if prev is not None and o != prev + 1:
-                    emit(); run = bytearray()
+                    emit(); run = bytearray(); pcs = []
                 if 0x20 <= c < 0x7f or c in (9,):
-                    run.append(c)
+                    if not run:
+                        start = o
+                    run.append(c); pcs.append(pc)
                 else:
-                    emit(); run = bytearray()
+                    emit(); run = bytearray(); pcs = []
                 prev = o
             emit()
         frame.clear()
 
+    # Immediates held in registers. x86-64 has no 64-bit immediate store, so compilers build an
+    # 8-byte chunk as `movabs rax, imm64; mov [rbp-k], rax` -- the immediate reaches the frame
+    # through a register (the AArch64 path below has always had to do the same).
+    regval: dict = {}
+
     for ins in md.disasm(code, text_va):
         m = ins.mnemonic
         if m in ("call", "ret", "jmp", "leave") or m.startswith("j"):
-            flush(); continue
-        if m != "mov" or len(ins.operands) != 2:
+            flush(); regval.clear(); continue
+        ops = ins.operands
+        if m in ("mov", "movabs") and len(ops) == 2 and ops[0].type == CS_OP_REG:
+            dreg = _x86_canon(ins.reg_name(ops[0].reg))
+            if ops[1].type == CS_OP_IMM:
+                regval[dreg] = ops[1].imm & 0xFFFFFFFFFFFFFFFF
+            else:
+                regval.pop(dreg, None)
             continue
-        dst, src = ins.operands
-        if dst.type != CS_OP_MEM or src.type != CS_OP_IMM:
+        if m != "mov" or len(ops) != 2:
+            # anything else that writes a register makes its tracked immediate stale
+            if ops and ops[0].type == CS_OP_REG:
+                regval.pop(_x86_canon(ins.reg_name(ops[0].reg)), None)
+            continue
+        dst, src = ops
+        if dst.type != CS_OP_MEM:
+            continue
+        if src.type == CS_OP_IMM:
+            imm = src.imm
+        elif src.type == CS_OP_REG and _x86_canon(ins.reg_name(src.reg)) in regval:
+            imm = regval[_x86_canon(ins.reg_name(src.reg))]
+        else:
             continue
         base = dst.mem.base
-        if not base:
+        if not base or dst.mem.index:
             continue
         bname = ins.reg_name(base)
         if bname not in ("rbp", "rsp", "ebp", "esp"):
@@ -97,11 +140,12 @@ def collect(code: bytes, text_va: int, min_len: int):
         size = dst.size or 1
         if size not in (1, 2, 4, 8):
             continue
-        val = src.imm & ((1 << (size * 8)) - 1)
+        val = imm & ((1 << (size * 8)) - 1)
         data = val.to_bytes(size, "little")
         for k, b in enumerate(data):
-            frame[(bname, dst.mem.disp + k)] = b
+            frame[(bname, dst.mem.disp + k)] = (b, ins.address)
     flush()
+    collect.last_sites = sites
 
     # de-dup, rank by word-likeness
     best = {}
@@ -132,6 +176,7 @@ def collect_arm64(code: bytes, text_va: int, min_len: int):
     regval = {"zr": 0}
     frame: dict = {}
     found = []
+    sites: dict = {}   # string -> {"pc": last store, "base": frame register, "offset": slot}
 
     def flush():
         if not frame:
@@ -141,20 +186,23 @@ def collect_arm64(code: bytes, text_va: int, min_len: int):
             by_base.setdefault(base, {})[disp] = b
         for base, slots in by_base.items():
             offs = sorted(slots)
-            run = bytearray(); prev = None
+            run = bytearray(); prev = None; start = None; pcs = []
             def emit():
                 if len(run) >= min_len:
                     s = bytes(run).decode("latin-1", "ignore")
                     if looks_like_text(bytes(run)):
                         found.append((english_score(s), s))
+                        sites.setdefault(s, {"pc": max(pcs), "base": base, "offset": start})
             for o in offs:
-                c = slots[o]
+                c, pc = slots[o]
                 if prev is not None and o != prev + 1:
-                    emit(); run = bytearray()
+                    emit(); run = bytearray(); pcs = []
                 if 0x20 <= c < 0x7f or c == 9:
-                    run.append(c)
+                    if not run:
+                        start = o
+                    run.append(c); pcs.append(pc)
                 else:
-                    emit(); run = bytearray()
+                    emit(); run = bytearray(); pcs = []
                 prev = o
             emit()
         frame.clear()
@@ -179,8 +227,9 @@ def collect_arm64(code: bytes, text_va: int, min_len: int):
                 continue
             val = regval[src] & ((1 << (size * 8)) - 1)
             for k, b in enumerate(val.to_bytes(size, "little")):
-                frame[(base, ops[1].mem.disp + k)] = b
+                frame[(base, ops[1].mem.disp + k)] = (b, ins.address)
     flush()
+    collect_arm64.last_sites = sites
     best = {}
     for sc, s in found:
         if s not in best or sc > best[s]:
@@ -203,8 +252,13 @@ def recover(path: Path, min_len: int = 5):
     except Exception:
         mach = ""
     arm = "AARCH64" in mach or "ARM64" in mach
-    ss = (collect_arm64 if arm else collect)(bytes(text.content), base, min_len)
-    return {"stackstrings": [s for _, s in ss], "ranked": ss,
+    collector = collect_arm64 if arm else collect
+    ss = collector(bytes(text.content), base, min_len)
+    sites = getattr(collector, "last_sites", {})
+    # records: {"string", "pc", "base", "offset"} -- pc is the last immediate store that wrote the
+    # string, base/offset the frame register and slot it was written to
+    records = [dict(string=s, **sites[s]) for _, s in ss if s in sites]
+    return {"stackstrings": [s for _, s in ss], "ranked": ss, "records": records,
             "arch": "aarch64" if arm else "x86-64"}
 
 
