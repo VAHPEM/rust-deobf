@@ -45,6 +45,23 @@ def test_obfstr_emulation_without_canaries(fmt, ext, strip):
 
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])
 @pytest.mark.parametrize("fmt,ext", FORMATS)
+def test_tight_strings_by_emulation(fmt, ext, strip):
+    # stack buffer decoded in place by a (vectorised) loop: exact strings, nothing else
+    import recover_emulate
+    r = recover_emulate.recover(binary("tight_xor", fmt, ext, strip), [])
+    assert sorted(r["recovered_texts"]) == sorted(CANARIES), r["recovered_texts"]
+
+
+@pytest.mark.parametrize("strip", ["nostrip", "strip"])
+@pytest.mark.parametrize("fmt,ext", [("elf", ""), ("pe", ".exe")])
+def test_obfstr_exact_on_x86(fmt, ext, strip):
+    import recover_emulate
+    r = recover_emulate.recover(binary("obfstr", fmt, ext, strip), [])
+    assert sorted(r["recovered_texts"]) == sorted(CANARIES), r["recovered_texts"]
+
+
+@pytest.mark.parametrize("strip", ["nostrip", "strip"])
+@pytest.mark.parametrize("fmt,ext", FORMATS)
 def test_cryptify_default_key(fmt, ext, strip):
     import recover_cryptify
     r = recover_cryptify.recover(binary("cryptify_default", fmt, ext, strip), CANARIES)

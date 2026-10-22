@@ -97,6 +97,26 @@ fn dec(enc: &[u8]) -> String {{
     lines = ["fn main() {"] + [f"    println!(\"{{}}\", dec(&ENC_{i}));" for i in range(len(CANARIES))] + ["}"]
     VARIANTS[scheme] = {"deps": [], "header": header, "body": "\n".join(lines), "build_rs": None, "env": None}
 
+# 2c. tight string: the ciphertext is built on the stack from immediates and decoded in place
+#     by a short loop inside the caller -- no decoder function, nothing in .rodata (FLOSS calls
+#     these "tight strings"). black_box keeps rustc from folding the decode at compile time.
+tight_key = hashlib.sha256(b"tight-string-key").digest()[:4]
+tight_fns = []
+for i, c in enumerate(CANARIES):
+    enc = bytes(b ^ tight_key[k % 4] for k, b in enumerate(c.encode()))
+    tight_fns.append(f"""#[inline(never)]
+fn tight_{i}() -> String {{
+    let mut buf: [u8; {len(enc)}] = [{",".join(str(b) for b in enc)}];
+    let key: [u8; 4] = std::hint::black_box([{",".join(str(b) for b in tight_key)}]);
+    for (k, b) in buf.iter_mut().enumerate() {{ *b ^= key[k % 4]; }}
+    String::from_utf8_lossy(&buf).into_owned()
+}}""")
+VARIANTS["tight_xor"] = {
+    "deps": [], "header": "\n".join(tight_fns),
+    "body": "fn main() {\n" + "\n".join(f'    println!("{{}}", tight_{i}());' for i in range(len(CANARIES))) + "\n}",
+    "build_rs": None, "env": None,
+}
+
 # 3. obfstr (XOR, compile-time)
 VARIANTS["obfstr"] = {
     "deps": ['obfstr = "0.4"'],
@@ -170,7 +190,8 @@ for name, v in VARIANTS.items():
         "env": v["env"],
         "cipher": {"plaintext":"none","xor_custom":"xor","add_custom":"add","sub_custom":"sub",
                    "obfstr":"xor","litcrypt":"xor","litcrypt2":"xor",
-                   "cryptify":"xor-ish","cryptify_default":"xor-ish","muddy":"chacha20poly1305"}.get(name,"?"),
+                   "cryptify":"xor-ish","cryptify_default":"xor-ish","tight_xor":"xor",
+                   "muddy":"chacha20poly1305"}.get(name,"?"),
     }
 (SRC / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(f"generated {len(VARIANTS)} projects:", ", ".join(VARIANTS))

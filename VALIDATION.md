@@ -275,7 +275,7 @@ vivisect; this project uses lighter, targeted methods and adds Rust-specific str
 |---|---|---|
 | static strings | `strings(1)` baseline | FLOSS's `language/rust` splits Rust's concatenated `&str` blob by its slice lengths; **not yet ported** (open gap). |
 | stack strings | `recover_stackstrings.py` (x86-64 + **AArch64**) | immediate stores to `[rbp±k]`/`[rsp+k]`, direct or through a register (`movabs rax, imm64; mov [rbp-k], rax`) on x86, or `strb/str wN,[sp\|x29,#off]` after `mov wN,#imm` (ARM). Static (no vivisect). 0 on git/openssl/gzip at `--min-len 6`; validated on a compiled x86-64 and a compiled aarch64 fixture, and on a C program (§9). |
-| tight strings | — | a stack-string variant that decodes in a tight loop; **not yet covered**. |
+| tight strings | `recover_emulate.py` | a stack buffer decoded in place by a short loop in the caller; bench variant `tight_xor` (§9d), 5/5 exact on ELF/PE/AArch64. |
 | decoded strings (emulation) | `recover_callsite`/`recover_arm64` (keyed), `recover_emulate` (obfstr), `recover_dynamic` (frida, any cipher incl. AEAD) | FLOSS emulates with vivisect; we split static/emulation/dynamic so the cheap path runs first. |
 | language-specific (Go/Rust/.NET) | `recover_rust_meta.py` | FLOSS's Rust support is plain-string *layout*; ours goes further — crates+versions, panic `file:line:col`, types — but neither recovers *obfuscated* Rust strings except this project's recoverers. |
 
@@ -402,3 +402,26 @@ with the default key, requiring >= 2 clean call sites. New bench variant `crypti
 (built without the variable): **5/5** on x86-64 ELF and PE and on AArch64, release and debug,
 stripped and not. The custom-key variant is detected and reported as runtime-keyed rather than
 guessed at; `plaintext` and the other crates are not flagged.
+
+### 9d. Tight strings
+
+New bench variant `tight_xor`: each string is built on the stack from immediates and XORed in
+place by a loop inside the function that uses it (`std::hint::black_box` on the key keeps rustc
+from folding the decode) -- no decoder function and nothing in `.rodata`, FLOSS's "tight string"
+case. rustc vectorises the loop and schedules the stores out of order (4-, 8- and 16-byte stores
+plus single bytes patched in between), which exposed two weaknesses of the emulator's write log:
+Unicorn reports at most 8 bytes of a 16-byte SIMD store's value, and out-of-order stores were
+spliced into one run. Emulation now also records *which* bytes were written and reads them back
+from emulator memory before every call and return (when a buffer is complete and about to be
+used); the write log only extends a run on sequential stores and breaks on SIMD stores. A wrong
+prefix rule that dropped the full string when a mid-decode view of it was also seen was fixed:
+`P + tail` is treated as a stale-tail artefact only when the tail ends another recovered string.
+
+| canary-free emulation, release, stripped and not | ELF x86-64 | PE | AArch64 |
+|---|:-:|:-:|:-:|
+| tight_xor (exact strings, nothing else) | 5/5 | 5/5 | 5/5 |
+| obfstr (exact strings, nothing else) | 5/5 | 5/5 | 2/5 exact + 3 with a stale tail |
+| plaintext, muddy, xor_custom (reported strings) | 0 | 0 | 0 |
+
+Real binaries (git, curl, bash, openssl, tar, xz, gzip, perl): 1 string in total
+(`.gnu.versign_r` in curl, spliced from section names).

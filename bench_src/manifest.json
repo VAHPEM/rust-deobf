@@ -27,6 +27,11 @@
       "env": null,
       "cipher": "sub"
     },
+    "tight_xor": {
+      "crate": null,
+      "env": null,
+      "cipher": "xor"
+    },
     "obfstr": {
       "crate": "obfstr = \"0.4\"",
       "env": null,

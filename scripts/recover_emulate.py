@@ -51,6 +51,44 @@ BUDGET = 8000            # max instructions per function
 # emulation, can spin in its lock-retry loop until the time limit.
 MAX_CALL_DEPTH = 1
 
+class _WrittenMemory:
+    """Addresses written during emulation, read back on demand.
+
+    The x86 write hook sees each store's value, but SIMD stores (a vectorised XOR loop writes
+    16 bytes at a time) report at most 8 of them, and interleaved stores scramble the stream.
+    Reading the written bytes back from emulator memory just before a call -- when a decoded
+    buffer is complete and about to be printed or copied -- gives the buffer as it really is.
+    """
+
+    def __init__(self, limit=1 << 20):
+        self.addrs = set()
+        self.limit = limit
+        self.dirty = False
+
+    def add(self, address, size):
+        if len(self.addrs) < self.limit:
+            self.addrs.update(range(address, address + size))
+            self.dirty = True
+
+    def snapshot(self, uc, out):
+        if not self.dirty:
+            return
+        self.dirty = False
+        run_start = prev = None
+        for a in sorted(self.addrs) + [None]:
+            if a is not None and prev is not None and a == prev + 1:
+                prev = a
+                continue
+            if run_start is not None:
+                try:
+                    mem = bytes(uc.mem_read(run_start, prev - run_start + 1))
+                except Exception:
+                    mem = b""
+                for m in _PRINTABLE_RUN.finditer(mem):
+                    out.add(m.group().decode("ascii"))
+            run_start = prev = a
+
+
 def map_image(uc, binary):
     """Map every section at its virtual address (rebased under BASE window)."""
     pages = {}
@@ -123,6 +161,8 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
     seen = set()
     hits = set()
     strings_out = emulate_capture.last_strings = set()
+    written = _WrittenMemory()
+    last_end = [None]
     try:
         uc = Uc(UC_ARCH_X86, UC_MODE_64)
         map_image(uc, binary)
@@ -154,11 +194,14 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
             b0 = raw[j]
             lo = BASE + text_lo; hi = BASE + text_hi
             if b0 in (0xc3, 0xc2):          # ret / ret imm16
+                written.snapshot(uc, strings_out)
                 if depth[0] == 0:
                     uc.emu_stop()           # returned from the top-level function
                 else:
                     depth[0] -= 1           # returning from an intra-text callee: let it continue
                 return
+            if b0 == 0xe8 or (b0 == 0xff and j + 1 < len(raw) and (raw[j + 1] >> 3) & 7 in (2, 3)):
+                written.snapshot(uc, strings_out)   # a buffer handed to a callee is complete now
             if b0 == 0xe8:                  # call rel32
                 import struct
                 rel = struct.unpack("<i", raw[j + 1:j + 5])[0]
@@ -175,7 +218,19 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
                 uc.reg_write(UC_X86_REG_RAX, 0); return
 
         def hook_write(uc, access, address, size, value, _):
-            off = address
+            written.add(address, size)
+            # only sequential stores extend the current run: a decoder writing front to back
+            # yields the string, while scheduled/vectorised code storing pieces out of order
+            # would splice unrelated bytes together (the read-back covers those buffers)
+            if address != last_end[0]:
+                writes.append(0)
+            last_end[0] = address + size
+            if size > 8:
+                # a SIMD store: Unicorn reports at most 8 bytes of its value, so it would put
+                # scrambled bytes into the stream. End the current run instead; the read-back
+                # of written memory recovers the buffer whole.
+                writes.append(0)
+                return
             try:
                 b = value.to_bytes(size, "little")
             except (OverflowError, AttributeError):
@@ -206,8 +261,10 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
             uc.emu_start(start, BASE + text_va + len(code), timeout=3_000_000, count=BUDGET)
         except UcError:
             pass
+        written.snapshot(uc, strings_out)
 
-        # scan the recorded writes for canaries; also scan scratch + stack memory
+        # scan the recorded write stream (byte-wise decoders write front to back, which gives
+        # exact strings) plus scratch + stack memory; SIMD stores are left to the read-back
         blobs = [bytes(writes)]
         for region in (SCRATCH, STACK + STACK_SIZE // 2 - 0x4000):
             try: blobs.append(bytes(uc.mem_read(region, 0x8000)))
@@ -219,6 +276,10 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
         # also surface general printable runs (for analysts without known canaries)
         for m in _PRINTABLE_RUN.finditer(text):
             strings_out.add(m.group().decode("ascii"))
+        for st in strings_out:
+            for c in canaries:
+                if c in st:
+                    hits.add(c)
     except Exception:
         pass
     return hits
@@ -254,6 +315,7 @@ def emulate_capture_arm64(binary, code, text_va, func_va, canaries):
     (`blr`) are stubbed. Printable runs from those snapshots are the recovered strings.
     """
     from unicorn import (Uc, UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, UcError, UC_HOOK_CODE, UC_HOOK_INTR,
+                         UC_HOOK_MEM_WRITE,
                          UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
                          UC_HOOK_MEM_FETCH_UNMAPPED)
     from unicorn.arm64_const import (UC_ARM64_REG_SP, UC_ARM64_REG_PC, UC_ARM64_REG_X0,
@@ -275,7 +337,13 @@ def emulate_capture_arm64(binary, code, text_va, func_va, canaries):
                   UC_ARM64_REG_X4, UC_ARM64_REG_X5, UC_ARM64_REG_X6, UC_ARM64_REG_X7):
             uc.reg_write(r, SCRATCH + 0x8000)
 
+        written = _WrittenMemory()
+
+        def hook_write(uc, access, address, size, value, _):
+            written.add(address, size)
+
         def snap():
+            written.snapshot(uc, strings_out)
             # the whole live frame: from just below SP up to the stack pointer we started with,
             # so a function that reserves a large frame (`sub sp, sp, #N` before its `stp`) still
             # has its decoded buffers inside the window
@@ -325,6 +393,7 @@ def emulate_capture_arm64(binary, code, text_va, func_va, canaries):
 
         uc.hook_add(UC_HOOK_CODE, hook_code)
         uc.hook_add(UC_HOOK_INTR, hook_svc)
+        uc.hook_add(UC_HOOK_MEM_WRITE, hook_write)
         uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, hook_inv)
         try:
             uc.emu_start(func_va, text_hi, timeout=3_000_000, count=BUDGET)
@@ -372,9 +441,9 @@ def _score_function(md, code, text_va, fva, size, arm):
         else:
             if mn == "movabs" and "0x" in ops:
                 imm64 += 1
-            elif mn == "xor":
+            elif mn in ("xor", "pxor", "xorps", "xorpd", "vpxor", "vxorps", "vpxord", "vpxorq"):
                 parts = [p.strip() for p in ops.split(",")]
-                if len(parts) == 2 and parts[0] != parts[1]:
+                if len(set(parts)) > 1:
                     xors += 1
     return 2 * imm64 + xors
 
@@ -393,6 +462,15 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
     def explained(st):
         b = st.encode("ascii", "ignore")
         if b in file_bytes:
+            return True
+        # a fake argument the emulator passed (out-pointers point into SCRATCH) that the code
+        # formatted into text, e.g. "/proc/self/fd/268468224"
+        if any(a in st for a in _EMULATOR_VALUES):
+            return True
+        # static text plus a number the emulator made up (a fake pointer or fd formatted into a
+        # path, e.g. "/proc/self/fd/" + the scratch address) is static too
+        stem = b.rstrip(b"0123456789abcdefABCDEFx")
+        if len(stem) >= 6 and len(stem) < len(b) and stem in file_bytes:
             return True
         i, pieces = 0, []
         while i < len(b):
@@ -417,23 +495,39 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
     return explained
 
 
-def _drop_overlap_artifacts(records):
-    """Drop views of a buffer that was partially overwritten (Rust strings are not NUL-terminated).
+_EMULATOR_VALUES = tuple(
+    fmt % v for v in (SCRATCH, SCRATCH + 0x8000, STACK, STACK + STACK_SIZE // 2)
+    for fmt in ("%d", "%x", "%#x"))
 
-    - `X + tail` when X itself was recovered: a shorter string written over a longer one leaves
-      the longer one's tail behind (`...version-4` + `lemetry-offbin`).
-    - a proper suffix of another recovered string: the same buffer seen mid-write.
+
+def _drop_overlap_artifacts(records):
+    """Resolve views of a buffer that was partially overwritten or seen mid-write.
+
+    Rust strings are not NUL-terminated, so when P is a prefix of S, either
+      - S = P + a stale tail: a shorter string was written over a longer one, and the tail is
+        the end of another recovered string (`...version-4` + `lemetry-offbin`) -> drop S and
+        the shorter views of S's buffer (its suffixes); or
+      - P is S seen before its decode finished (`canary::alpha::7f3c-`)          -> drop P.
+    Then pieces of a surviving string (a suffix or the middle, from out-of-order stores) go.
     """
-    texts = [r["string"] for r in records]
-    keep = []
-    for r in records:
-        t = r["string"]
-        if any(o != t and len(o) >= 6 and t.startswith(o) for o in texts):
+    texts = {r["string"] for r in records}
+    stale, partial = set(), set()
+    for p in texts:
+        if len(p) < 6:
             continue
-        if any(o != t and o.endswith(t) for o in texts):
-            continue
-        keep.append(r)
-    return keep
+        for s in texts:
+            if s == p or not s.startswith(p):
+                continue
+            tail = s[len(p):]
+            if any(o.endswith(tail) and o != tail and not o.startswith(p) for o in texts):
+                stale.add(s)
+            else:
+                partial.add(p)
+    drop = stale | partial
+    drop |= {t for t in texts for s in stale if t != s and s.endswith(t)}
+    keep = [r for r in records if r["string"] not in drop]
+    alive = {r["string"] for r in keep}
+    return [r for r in keep if not any(o != r["string"] and r["string"] in o for o in alive)]
 
 
 def _static_bytes(path):

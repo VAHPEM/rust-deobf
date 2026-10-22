@@ -27,6 +27,7 @@ release builds):
 | litcrypt | XOR, runtime key | 0/5 | 0/5 | **5/5** | **5/5** |
 | litcrypt2 | XOR, stride-permuted key | 0/5 | 0/5 | **5/5** | **5/5** |
 | obfstr | XOR+ADD, inlined | 0/5 | 0/5 | **5/5** (emulation) | **5/5** |
+| tight strings | stack buffer XORed in place by a (vectorised) loop | 0/5 | 0/5 | **5/5** (emulation) | **5/5** |
 | cryptify (default key) | XOR, crate-default key | 0/5 | 0/5 | **5/5** | **5/5** |
 | cryptify (custom key) | XOR, key from env at build *and* run time | 0/5 | 0/5 | —¹ | **5/5**¹ |
 | muddy | ChaCha20-Poly1305 (AEAD) | 0/5 | 0/5 | — | **5/5** |
