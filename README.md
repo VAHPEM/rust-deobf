@@ -95,7 +95,10 @@ FLOSS cannot recover from Rust show up in `floss`, `floss --html` and the FLOSS 
 the file's static strings.
 
 Static recovery needs only `lief` + `capstone`; `unicorn` is for emulation, `z3-solver` for
-expression analysis, `frida` for the dynamic tools. Every script ships a `--selftest`.
+expression analysis, `frida` for the dynamic tools (`pip install -r requirements.txt` covers all
+but frida). Every script ships a `--selftest`, and `pytest tests` checks the README's recall and
+precision claims on the benchmark — CI rebuilds it with the current stable rustc every week,
+because a new compiler can change the decoder idioms the recoverers key on.
 
 ---
 

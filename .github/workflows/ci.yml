@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # weekly: a new stable rustc can change the decoder idioms the recoverers key on
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Rust toolchain (current stable) + targets
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add x86_64-pc-windows-gnu aarch64-unknown-linux-musl
+          rustc --version
+
+      - name: mingw-w64 (PE target linker)
+        run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64 llvm
+
+      - name: Build the benchmark (x86-64 ELF + PE, AArch64 via rust-lld)
+        run: ARM64=1 bash scripts/build_all.sh
+
+      - name: Self-tests and benchmark recall/precision
+        run: python -m pytest tests -q -rs
