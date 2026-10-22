@@ -36,6 +36,11 @@ Across **every** release configuration — ELF and PE, stripped and not — and 
 and AArch64**. As far as an Oct-2026 survey found, this is the **first string-deobfuscation
 tooling to target ARM64 Rust** at all.
 
+The strings Rust does *not* hide come out right too: literals are packed without terminators,
+and `recover_rust_strings` cuts them at their real (pointer, length) boundaries — the five
+canaries of the `plaintext` control come out exact on ELF, PE and AArch64, where FLOSS's Rust
+extractor gets 0/5 exact (`VALIDATION.md` §9e).
+
 <sub>¹ cryptify reads `CRYPTIFY_KEY` again at runtime: with a custom key the sample only decrypts
 when run with that variable set, and the key is not in the binary. `recover_cryptify` detects
 the crate and says so.</sub>
@@ -64,6 +69,13 @@ Three recoverers, picked by how hard the target is — run the cheap one first:
   cross-host, so no ARM machine needed.
 - **Stack strings** (`recover_stackstrings.py`) — immediates written to the stack frame, including
   the `movabs reg, imm64; mov [rbp-k], reg` form compilers use for 8-byte chunks.
+- **Rust literals** (`recover_rust_strings.py`) — the *plain* strings, done right. Rust literals
+  are not NUL-terminated, so `strings` sees `permission deniedconnection refusednetwork
+  unreachable…` as one run. Every use of a literal carries its exact length, so the module
+  collects the (pointer, length) pairs — `&str` fields in constant tables, `lea`/`adrp` + length
+  register at call sites, `match`→`&str` lookup tables (relative and absolute) — plus the pieces of
+  rustc's new compact `format_args!` templates, and cuts the runs at the true boundaries. ELF, PE
+  and AArch64; results go to the FLOSS document as language strings.
 - **Dynamic recovery** (`recover_dynamic.py`, Frida) — runs the sample in a sandbox and diffs
   decrypted memory against the static strings. Cipher- and arch-agnostic, so it even handles
   AEAD (muddy) and inlined (obfstr). **Isolated analysis VM only.**
@@ -90,7 +102,8 @@ python3 scripts/recover.py samples/ --jsonl triage.jsonl          # triage a who
 python3 scripts/recover_dynamic.py path/to/binary [-- arg1 arg2 ...]
 ```
 
-Strings shaped like indicators are tagged (`[url]`, `[ip]`, `[domain]`, `[path]`, `[registry]`,
+Plain Rust literals are counted, and the ones shaped like indicators printed (`--literals`
+prints all). Strings shaped like indicators are tagged (`[url]`, `[ip]`, `[domain]`, `[path]`, `[registry]`,
 `[email]`). Every recovered string comes with where it came from: decoder function, call site and ciphertext
 address for call-site recovery, the emulated function for inlined decoders, the store instruction
 for stack strings. `--floss-json` writes them as a **FLOSS results document**, so the strings

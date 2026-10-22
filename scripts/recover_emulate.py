@@ -34,6 +34,8 @@ import lief
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 from unicorn import *
 from unicorn.x86_const import *
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from disasm import linear  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # printable ASCII runs (space..~) of 6+ bytes: the candidate strings in emulated memory
@@ -147,7 +149,7 @@ def function_ranges(binary, code, text_va):
             funcs.append((v, min(nxt - v, 0x4000)))
     else:
         # stripped: window the whole .text in overlapping chunks from each `push rbp`
-        addrs = [ins.address for ins in md.disasm(code, text_va)
+        addrs = [ins.address for ins in linear(md, code, text_va)
                  if ins.mnemonic == "push" and ins.op_str in ("rbp", "r15")]
         for a in addrs:
             funcs.append((a, 0x2000))
@@ -258,7 +260,7 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
 
         start = BASE + func_va
         try:
-            uc.emu_start(start, BASE + text_va + len(code), timeout=3_000_000, count=BUDGET)
+            uc.emu_start(start, BASE + text_va + len(code), timeout=0, count=BUDGET)
         except UcError:
             pass
         written.snapshot(uc, strings_out)
@@ -297,7 +299,7 @@ def function_ranges_arm64(binary, code, text_va):
         for (v, _), nxt in zip(syms, [s[0] for s in syms[1:]] + [text_va + len(code)]):
             funcs.append((v, min(nxt - v, 0x8000)))
     else:
-        for ins in md.disasm(code, text_va):
+        for ins in linear(md, code, text_va):
             if ins.mnemonic == "stp" and "x29, x30" in ins.op_str and "[sp" in ins.op_str:
                 funcs.append((ins.address, 0x4000))
     return funcs
@@ -396,7 +398,7 @@ def emulate_capture_arm64(binary, code, text_va, func_va, canaries):
         uc.hook_add(UC_HOOK_MEM_WRITE, hook_write)
         uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, hook_inv)
         try:
-            uc.emu_start(func_va, text_hi, timeout=3_000_000, count=BUDGET)
+            uc.emu_start(func_va, text_hi, timeout=0, count=BUDGET)
         except UcError:
             pass
         snap()
@@ -504,11 +506,15 @@ def _drop_overlap_artifacts(records):
     """Resolve views of a buffer that was partially overwritten or seen mid-write.
 
     Rust strings are not NUL-terminated, so when P is a prefix of S, either
-      - S = P + a stale tail: a shorter string was written over a longer one, and the tail is
-        the end of another recovered string (`...version-4` + `lemetry-offbin`) -> drop S and
-        the shorter views of S's buffer (its suffixes); or
+      - S = P + a stale tail: a shorter string was written over a longer one, or into memory
+        that held another string (stubbed allocators hand out the same block), and the tail is
+        a piece of another recovered string (`...version-4` + `lemetry-offbin`,
+        `...telemetry-off` + `lpha::7`) -> drop S and the shorter views of S's buffer; or
       - P is S seen before its decode finished (`canary::alpha::7f3c-`)          -> drop P.
-    Then pieces of a surviving string (a suffix or the middle, from out-of-order stores) go.
+    A view that diverges from a longer string only in its last few characters is the same
+    buffer read mid-decode with ciphertext after the decoded part (`canary::echo::sc%{` next
+    to `canary::echo::schema-version-4`) -> drop it. Then pieces of a surviving string (a
+    suffix or the middle, from out-of-order stores) go.
     """
     texts = {r["string"] for r in records}
     stale, partial = set(), set()
@@ -519,11 +525,21 @@ def _drop_overlap_artifacts(records):
             if s == p or not s.startswith(p):
                 continue
             tail = s[len(p):]
-            if any(o.endswith(tail) and o != tail and not o.startswith(p) for o in texts):
+            if any(tail in o and o not in (s, tail) and not o.startswith(p) for o in texts):
                 stale.add(s)
             else:
                 partial.add(p)
-    drop = stale | partial
+    garbled = set()
+    for x in texts:
+        for y in texts:
+            if x == y or len(y) <= len(x) or y.startswith(x) or x.startswith(y):
+                continue
+            k = 0
+            while k < len(x) and x[k] == y[k]:
+                k += 1
+            if k >= 12 and len(x) - k <= 3 and len(y) - k > len(x) - k:
+                garbled.add(x)
+    drop = stale | partial | garbled
     drop |= {t for t in texts for s in stale if t != s and s.endswith(t)}
     keep = [r for r in records if r["string"] not in drop]
     alive = {r["string"] for r in keep}
@@ -573,10 +589,16 @@ def recover(path, canaries, max_funcs=400, time_budget=None):
     import time as _time
     deadline = _time.monotonic() + time_budget if time_budget else None
     timed_out = False
+    import gc
     for (fva, _) in order[:max_funcs]:
         if deadline is not None and _time.monotonic() > deadline:
             timed_out = True
             break
+        if tried % 16 == 0:
+            # each emulation's Uc sits in a reference cycle (hook closures); collect them
+            # before their native memory runs out (UC_ERR_NOMEM on mem_map, which made
+            # later functions -- and later binaries in the same process -- yield nothing)
+            gc.collect()
         tried += 1
         found |= capture(binary, code, text_va, fva, canaries)
         for st in sorted(getattr(capture, "last_strings", ()) or ()):

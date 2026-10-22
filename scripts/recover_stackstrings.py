@@ -21,10 +21,11 @@ it; `measure_fp.py`-style review on real binaries still applies.
     python recover_stackstrings.py --selftest
 """
 from __future__ import annotations
-import argparse, json, struct, sys
+import argparse, json, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from disasm import linear  # noqa: E402
 
 
 def _text_gate():
@@ -105,7 +106,7 @@ def collect(code: bytes, text_va: int, min_len: int):
     # through a register (the AArch64 path below has always had to do the same).
     regval: dict = {}
 
-    for ins in md.disasm(code, text_va):
+    for ins in linear(md, code, text_va):
         m = ins.mnemonic
         if m in ("call", "ret", "jmp", "leave") or m.startswith("j"):
             flush(); regval.clear(); continue
@@ -207,7 +208,7 @@ def collect_arm64(code: bytes, text_va: int, min_len: int):
             emit()
         frame.clear()
 
-    for ins in md.disasm(code, text_va):
+    for ins in linear(md, code, text_va):
         m = ins.mnemonic
         if m in ("bl", "blr", "b", "br", "ret", "cbz", "cbnz", "tbz", "tbnz") or m.startswith("b."):
             flush(); continue
@@ -265,7 +266,7 @@ def recover(path: Path, min_len: int = 5):
 def _selftest():
     # synthesise .text that builds "secret_on_stack!" via packed dword/byte stores to [rbp-k],
     # bracketed by a ret so the region flushes, and check we read it back.
-    from capstone import Cs  # ensure capstone present
+    import capstone  # noqa: F401  (ensure capstone is present)
     import struct as _s
     s = b"secret_on_stack!"
     code = bytearray()

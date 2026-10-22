@@ -107,3 +107,42 @@ def test_floss_document(fmt, ext, tmp_path):
     decoded = {d["string"] for d in doc["strings"]["decoded_strings"]}
     assert set(CANARIES) <= decoded
     assert all(d["decoding_routine"] and d["decoded_at"] for d in doc["strings"]["decoded_strings"])
+
+
+@pytest.mark.parametrize("fmt,ext", FORMATS)
+def test_rust_literals(fmt, ext):
+    # plain &str literals split out of the packed string section at their exact length
+    import recover_rust_strings
+    r = recover_rust_strings.recover(binary("plaintext", fmt, ext, "strip"), min_len=4)
+    lits = {x["string"] for x in r["strings"]}
+    assert {c + "\n" for c in CANARIES} <= lits                     # println!("{}", "...")
+    assert {"permission denied", "connection refused"} <= lits      # io::ErrorKind lookup table
+    assert "memory allocation of " in lits                          # format_args! template piece
+    assert not any(x.startswith("& is not a char boundary") for x in lits)  # no glued length byte
+    raw = binary("plaintext", fmt, ext, "strip").read_bytes()
+    assert all(raw[x["offset"]:x["offset"] + x["length"]].decode() == x["string"] for x in r["strings"])
+
+
+@pytest.mark.parametrize("fmt,ext", FORMATS)
+@pytest.mark.parametrize("crate", STATIC + ["obfstr", "cryptify_default", "muddy"])
+def test_literals_do_not_leak_obfuscated_canaries(crate, fmt, ext):
+    import recover_rust_strings
+    r = recover_rust_strings.recover(binary(crate, fmt, ext, "strip"), min_len=4)
+    assert not any(c in x["string"] for c in CANARIES for x in r["strings"] + r["missed"])
+
+
+@pytest.mark.parametrize("fmt,ext", FORMATS)
+def test_linear_disassembly_covers_text(fmt, ext):
+    # capstone stops at the first undecodable word (AArch64 literal pools): every recoverer
+    # must see the whole of .text, not the first two thirds
+    import lief
+    from capstone import Cs, CS_ARCH_ARM64, CS_ARCH_X86, CS_MODE_64, CS_MODE_LITTLE_ENDIAN
+    from disasm import linear
+    b = lief.parse(str(binary("plaintext", fmt, ext, "strip")))
+    text = next(s for s in b.sections if s.name == ".text")
+    code = bytes(text.content)
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN) if fmt == "elf-arm64" else Cs(CS_ARCH_X86, CS_MODE_64)
+    last = None
+    for last in linear(md, code, text.virtual_address):
+        pass
+    assert last.address + last.size >= text.virtual_address + len(code) - 16

@@ -17,6 +17,8 @@ Mapping onto FLOSS's string types:
                                 frame_offset = slot offset from the frame register
   static strings             -> static_strings, extracted here (ASCII + UTF-16LE), so the
                                 document is complete without running FLOSS
+  Rust literals              -> language_strings (+ language_strings_missed), the &str
+                                literals recover_rust_strings split out of .rodata/.rdata
 
 No FLOSS import is needed; the schema is plain JSON. Only `floss` >= 4 reads these documents.
 
@@ -80,8 +82,13 @@ def _stack(record: dict) -> dict:
     }
 
 
+def _language(record: dict) -> dict:
+    return {"string": record["string"], "offset": int(record.get("offset") or 0), "encoding": "UTF-8"}
+
+
 def build_document(path: Path, decoded: list, stack: list, min_length: int = 4,
-                   imagebase: int = 0, language: str = "rust", tool_version: str = "rust-deobf") -> dict:
+                   imagebase: int = 0, language: str = "rust", tool_version: str = "rust-deobf",
+                   literals: list | None = None, literals_missed: list | None = None) -> dict:
     """A FLOSS ResultDocument (as plain JSON) for `path` with the given recovery records."""
     buf = Path(path).read_bytes()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat("T").replace("+00:00", "Z")
@@ -112,7 +119,7 @@ def build_document(path: Path, decoded: list, stack: list, min_length: int = 4,
             "enable_stack_strings": True,
             "enable_tight_strings": False,
             "enable_decoded_strings": True,
-            "enable_language_strings": False,
+            "enable_language_strings": literals is not None,
             "enable_layout": False,
             "enable_tags": False,
             "functions": {
@@ -130,8 +137,9 @@ def build_document(path: Path, decoded: list, stack: list, min_length: int = 4,
             "stack_strings": [_stack(r) for r in stack if len(r["string"]) >= min_length],
             "tight_strings": [],
             "decoded_strings": [d for d in decoded_strings if len(d["string"]) >= min_length],
-            "language_strings": [],
-            "language_strings_missed": [],
+            "language_strings": [_language(r) for r in literals or [] if len(r["string"]) >= min_length],
+            "language_strings_missed": [_language(r) for r in literals_missed or []
+                                        if len(r["string"]) >= min_length],
         },
     }
 
@@ -151,6 +159,8 @@ def _selftest():
                       "method": "static"},
                      {"string": "decoded-by-emulation", "function": 0x1500, "method": "emulation"}],
             stack=[{"string": "stack-built", "pc": 0x1600, "base": "rbp", "offset": -0x40}],
+            literals=[{"string": "permission denied", "offset": 0x30, "address": 0x401030}],
+            literals_missed=[{"string": "0123456789abcdef", "offset": 0x50, "address": 0x401050}],
         )
         assert [s["string"] for s in doc["strings"]["static_strings"]] == ["plain-static-string", "wide-one"]
         d0, d1 = doc["strings"]["decoded_strings"]
@@ -158,9 +168,14 @@ def _selftest():
             (0x2000, 0x1100, 0x1000, "GLOBAL")
         assert (d1["decoded_at"], d1["address_type"]) == (0x1500, "STACK")
         assert doc["strings"]["stack_strings"][0]["frame_offset"] == 0x40
+        assert doc["strings"]["language_strings"] == [
+            {"string": "permission denied", "offset": 0x30, "encoding": "UTF-8"}]
+        assert doc["analysis"]["enable_language_strings"] and doc["metadata"]["language"] == "rust"
+        assert len(doc["strings"]["language_strings_missed"]) == 1
         assert set(doc) == {"metadata", "analysis", "strings"}
         json.dumps(doc)
-    print("selftest OK: FLOSS document with static, decoded (call-site + emulation) and stack strings")
+    print("selftest OK: FLOSS document with static, decoded (call-site + emulation), stack and "
+          "language strings")
 
 
 if __name__ == "__main__":

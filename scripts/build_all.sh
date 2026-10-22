@@ -2,8 +2,10 @@
 # Build every benchmark project across the config matrix: {ELF, PE} x {debug, release} x {strip, nostrip}
 set -u
 ROOT="$(cd "$(dirname "$0")/.."; pwd)"
-SRC="$ROOT/bench_src"; OUT="$ROOT/build"; mkdir -p "$OUT"
-MANIFEST="$ROOT/build/build_manifest.jsonl"; : > "$MANIFEST"
+SRC="$ROOT/bench_src"; OUT="${BUILD_DIR:-$ROOT/build}"; mkdir -p "$OUT"
+# BUILD_DIR=... builds elsewhere (e.g. with RUSTUP_TOOLCHAIN=1.99.1 next to the default build);
+# the tests read RUST_DEOBF_BUILD
+MANIFEST="$OUT/build_manifest.jsonl"; : > "$MANIFEST"
 
 targets=( "x86_64-unknown-linux-gnu:elf" "x86_64-pc-windows-gnu:pe" )
 # ARM64=1 also cross-builds AArch64 ELF (static musl, linked by rust-lld): no ARM machine or

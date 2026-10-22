@@ -27,6 +27,8 @@ import json, re, sys, string
 from pathlib import Path
 import lief
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM, CS_OP_IMM, CS_OP_REG
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from disasm import linear  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PRINT = set(bytes(string.printable, "ascii")) - set(b"\x0b\x0c")
@@ -357,7 +359,7 @@ def recover(path, canaries):
     if loaded is None: return {"error": "no .text", "recall": 0, "n": len(canaries)}
     binary, code, base = loaded
     md = Cs(CS_ARCH_X86, CS_MODE_64); md.detail = True
-    insns = list(md.disasm(code, base))
+    insns = list(linear(md, code, base))
     idx = {ins.address: i for i, ins in enumerate(insns)}
 
     decoders = []  # (loop_xor_addr, key_va, keylen)

@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from disasm import linear  # noqa: E402
 
 MARKER = b"CRYPTIFY_KEY"
 DEFAULT_KEYS = ["xnasff3wcedj"]  # labyrinth_macros / cryptify default (3.x)
@@ -111,11 +112,11 @@ def recover(path, canaries=()):
     if "AARCH64" in mach or "ARM64" in mach:
         from recover_arm64 import _resolve_pageadd
         md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN); md.detail = True
-        insns = list(md.disasm(code, base))
+        insns = list(linear(md, code, base))
         sites = list(_arm64_sites(binary, insns, _resolve_pageadd))
     else:
         md = Cs(CS_ARCH_X86, CS_MODE_64); md.detail = True
-        insns = list(md.disasm(code, base))
+        insns = list(linear(md, code, base))
         sites = list(_x86_sites(binary, insns, read_va, rip_target, _canon_reg))
 
     best = []

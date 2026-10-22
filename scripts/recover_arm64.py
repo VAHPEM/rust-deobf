@@ -24,6 +24,7 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, CS_OP_REG, CS_OP_
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from recover_callsite import looks_like_text, read_va
+from disasm import linear  # noqa: E402
 
 
 def _rn(ins, rid):
@@ -199,7 +200,7 @@ def recover(path, canaries):
         return {"error": "no .text", "recall": 0, "n": len(canaries), "decoders": 0, "recovered_texts": []}
     code = bytes(text.content); base = text.virtual_address
     md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN); md.detail = True
-    insns = list(md.disasm(code, base))
+    insns = list(linear(md, code, base))
     idx = {ins.address: i for i, ins in enumerate(insns)}
 
     def resolve_pageadd(i, reg, back=60):

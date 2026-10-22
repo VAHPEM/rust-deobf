@@ -425,3 +425,80 @@ prefix rule that dropped the full string when a mid-decode view of it was also s
 
 Real binaries (git, curl, bash, openssl, tar, xz, gzip, perl): 1 string in total
 (`.gnu.versign_r` in curl, spliced from section names).
+
+### 9e. Plain Rust literals: splitting the packed string section
+
+`recover_rust_strings.py` recovers the literals a Rust binary does *not* hide. They are the bulk
+of what an analyst reads, and `strings` (and FLOSS's static pass) gets them wrong because the
+linker packs them back to back without terminators. Every `&str` is a (pointer, length) pair, so
+the module collects pairs and cuts at the real boundaries:
+
+- `&str` fields in constant data (`.data.rel.ro`, `.rdata`, panic `Location`s), with ELF
+  `R_*_RELATIVE` relocations applied for PIE tables that are zero until load;
+- call sites: `lea R,[rip+S]` with the length in the next argument register (SysV / Win64),
+  both halves stored to adjacent stack slots, `push N; pop reg`, and shared panic tails reached
+  by `jmp` (`lea rdi,msg; lea rdx,loc; jmp tail` / `tail: mov esi,N`); AArch64 `adrp+add`/`adr`
+  with the length in x(N+1), following `b tail` the same way;
+- `match` arms returning `&str` compiled to lookup tables: i32 offsets from the table (LLVM
+  relative lookup tables, rustc 1.97) or relocated pointers (rustc 1.88, 1.99), each next to a
+  length table (u64, or u8 in 1.99) -- `io::ErrorKind`'s descriptions are the familiar case;
+- two rustc 1.97 encodings: `fmt::Arguments` for a lone literal passes the length as
+  `(len << 1) | 1` (both readings are candidates; a candidate that ends where another literal
+  starts wins, ties go by what the callee takes elsewhere), and `format_args!` templates are
+  compact byte strings -- `\x15memory allocation of \xc0\x0e bytes failed\n\x00`: a byte
+  < 0x80 is the length of the next piece, `0xC0` a `{}` argument, `0x00` the end.
+
+`plaintext` benchmark, `-n 6` (literals recovered / printable runs left unexplained):
+
+| rustc | ELF x86-64 | PE | AArch64 |
+|---|:-:|:-:|:-:|
+| 1.88 | 274 / 47 | | |
+| 1.97 | 273 / 26 | 1002 / 157 | 248 / 313 |
+| 1.99 | 274 / 17 | 1115 / 144 | 246 / 302 |
+
+The 5 canaries and the `io::ErrorKind` descriptions come out exact in every cell. What stays
+unexplained is mostly not literals: digit and hex lookup tables, section-name lists, and on
+AArch64 musl the C strings of libunwind. rustc 1.99 narrows the ErrorKind length table to `u8`
+(`movzx edx, byte [rax+rcx]`), which the table pairing reads at any element size.
+
+Against FLOSS's Rust extractor (`floss/language/rust`, PE only) on the same PE: FLOSS gets
+**0/5** canaries exact (`canary::alpha::7f3c-config-endpointc` -- it deletes `\n` before
+splitting at cross-references, so every split after a newline is off by one), **0/8** of the
+sampled `io::ErrorKind` strings (the lookup table is not a cross-reference, the 40 descriptions
+stay one run), and 33 of the 129 template pieces carry the printable length byte glued in front
+(`& is not a char boundary; it is inside `). rust-deobf: 5/5, 8/8, 0. Literal offsets are
+checked byte-for-byte against the file in the tests.
+
+### 9f. AArch64: the recoverers were reading two thirds of `.text`
+
+capstone's `disasm()` stops at the first word it cannot decode. AArch64 `.text` contains literal
+pools and padding, so on every stripped AArch64 benchmark build a single pass ended at ~67% of
+the section -- the call-site recoverer, cryptify, stack strings and the emulator's function
+discovery never saw the last third of the program (the benchmark passed only because the test
+programs' own code sits near the start). `scripts/disasm.py: linear()` resumes after
+undecodable words; all recoverers use it, and a test checks that every format's `.text` is
+covered to the end. False positives stay at 0 on a real AArch64 binary (`libstd` for
+aarch64-musl, 5.6 MB: static 0, stack strings 0, emulation of 400 functions 0).
+
+Two causes of flaky emulation results are gone. The per-function limit is the instruction
+budget alone (a 3-second wall-clock limit on top of it made results depend on machine load).
+And each function's Unicorn instance sits in a reference cycle through its hook closures, so it
+was freed only when Python's cycle collector happened to run, while its native memory (image,
+stack, scratch, translation cache) stayed mapped: after a few hundred functions `mem_map` failed
+with `UC_ERR_NOMEM`, the error was swallowed, and every later function yielded nothing -- so
+`tight_xor` PE recovered 1/5 when obfstr PE had been analysed first in the same process, which is
+what the test suite does. The emulation loop now collects every 16 functions.
+
+### 9g. rustc 1.99 (current stable)
+
+CI builds the benchmark with the current stable compiler, which had moved to 1.99.1 while the
+local build was still 1.97, and CI failed on `tight_xor` PE: rustc 1.99 writes the decoded
+copy into memory that held another string (the emulator's stubbed allocator hands out the same
+block), giving `canary::delta::feature-flag-telemetry-off` + `lpha::7` and a mid-decode view
+`canary::echo::sc%{`. The overlap rules now treat a tail that is a piece of another recovered
+string (not only its end) as stale, and drop a view that diverges from a longer string only in
+its last 1-3 characters after a shared prefix of 12 or more. `scripts/build_all.sh` takes
+`BUILD_DIR` and the tests `RUST_DEOBF_BUILD`, so a second toolchain can be checked side by side:
+
+    RUSTUP_TOOLCHAIN=1.99.1 BUILD_DIR=/tmp/b199 ARM64=1 bash scripts/build_all.sh
+    RUST_DEOBF_BUILD=/tmp/b199 python -m pytest tests

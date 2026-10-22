@@ -23,6 +23,8 @@ Observational: reads the binary, runs nothing.
 from __future__ import annotations
 import argparse, sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from disasm import linear  # noqa: E402
 
 M = 0xFFFFFFFF
 
@@ -110,7 +112,7 @@ def scan_constants(path: Path):
         return set()
     md = Cs(CS_ARCH_X86, CS_MODE_64); md.detail = True
     consts = set()
-    for ins in md.disasm(bytes(text.content), base + text.virtual_address):
+    for ins in linear(md, bytes(text.content), base + text.virtual_address):
         if ins.mnemonic in ("cmp", "sub", "xor", "mov", "add", "lea"):
             for op in ins.operands:
                 if op.type == CS_OP_IMM:
