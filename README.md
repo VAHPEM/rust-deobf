@@ -46,8 +46,11 @@ FLOSS recovers **0/5** canaries on every Rust obfuscator and cannot open ELF at 
   call-site tool cannot: obfstr embeds per-literal keys as immediates and hides the data
   pointer behind an `xref::inner` call, so there is no static key to read. Emulating each
   function (executing the intra-`.text` `xref` helper, stubbing external/formatter calls)
-  and scanning the bytes written to memory recovers **5/5** on obfstr, x86-64, stripped and
-  not — no execution of the whole program, no known plaintext.
+  and scanning the bytes written to memory recovers **5/5** on obfstr, stripped and not, on
+  **both x86-64 and AArch64** — no execution of the whole program, no known plaintext. (On a
+  static ELF the ARM64 print is an intra-text `bl` into the in-`.text` fmt runtime, so the
+  ARM path snapshots the stack right before each call instead of relying on an external-call
+  stub; Unicorn emulates AArch64 cross-host, so this runs without an ARM machine.)
 - **Dynamic recovery** (`recover_dynamic.py`, Frida memory scan) recovers **every**
   obfuscator including inlined (obfstr) and AEAD (muddy), because at runtime all strings are
   decrypted in memory — at the cost of executing the sample (**sandbox/VM only**), needing

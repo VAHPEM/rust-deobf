@@ -189,18 +189,138 @@ def emulate_capture(binary, code, text_va, func_va, canaries, block_heads=None):
         pass
     return hits
 
+def function_ranges_arm64(binary, code, text_va):
+    """ARM64 function starts: prefer symbols, else `stp x29, x30, [sp...]` prologues."""
+    from capstone import CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    syms = [(s.value, s.name) for s in binary.symbols
+            if s.value and getattr(s, "is_function", False)]
+    syms = [(v, n) for v, n in syms if text_va <= v < text_va + len(code)]
+    funcs = []
+    if syms:
+        syms.sort()
+        for (v, _), nxt in zip(syms, [s[0] for s in syms[1:]] + [text_va + len(code)]):
+            funcs.append((v, min(nxt - v, 0x8000)))
+    else:
+        for ins in md.disasm(code, text_va):
+            if ins.mnemonic == "stp" and "x29, x30" in ins.op_str and "[sp" in ins.op_str:
+                funcs.append((ins.address, 0x4000))
+    return funcs
+
+
+def emulate_capture_arm64(binary, code, text_va, func_va, canaries):
+    """AArch64 analogue of emulate_capture.
+
+    obfstr inlines its decode as immediate `movz`/`movk` key arithmetic and materialises the
+    plaintext on the stack, then calls the formatter. On a *static* ELF the Rust fmt runtime
+    lives in `.text`, so that print is an *intra-text* `bl` (not x86's GOT `call r15`): we must
+    still execute intra-text calls (some are load-bearing before the decode completes), but we
+    snapshot the live stack window *before every call* -- that is exactly when the decoded
+    buffer is complete and not yet clobbered by the formatter. External/register-indirect calls
+    (`blr`) are stubbed. Printable runs from those snapshots are the recovered strings.
+    """
+    import string as _s
+    from unicorn import (Uc, UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, UcError, UC_HOOK_CODE,
+                         UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
+                         UC_HOOK_MEM_FETCH_UNMAPPED)
+    from unicorn.arm64_const import (UC_ARM64_REG_SP, UC_ARM64_REG_PC, UC_ARM64_REG_X0,
+        UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X5,
+        UC_ARM64_REG_X6, UC_ARM64_REG_X7)
+    import struct as _struct
+
+    text_lo = text_va; text_hi = text_va + len(code)
+    depth = [0]; hits = set()
+    strings_out = emulate_capture_arm64.last_strings = set()
+    PR = set(bytes(_s.printable, "ascii")) - set(b"\x0b\x0c\r\n\t")
+
+    try:
+        uc = Uc(UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN)
+        map_image(uc, binary)
+        uc.mem_map(STACK, STACK_SIZE); uc.mem_map(SCRATCH, 0x1000000)
+        uc.reg_write(UC_ARM64_REG_SP, STACK + STACK_SIZE // 2)
+        for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3,
+                  UC_ARM64_REG_X4, UC_ARM64_REG_X5, UC_ARM64_REG_X6, UC_ARM64_REG_X7):
+            uc.reg_write(r, SCRATCH + 0x8000)
+
+        def snap():
+            try: sp = uc.reg_read(UC_ARM64_REG_SP)
+            except UcError: return
+            try: mem = bytes(uc.mem_read((sp - 0x200) & ~0xf, 0xA00))
+            except UcError: return
+            cur = bytearray()
+            for by in mem:
+                if by in PR: cur.append(by)
+                else:
+                    if len(cur) >= 6: strings_out.add(bytes(cur).decode("ascii", "ignore"))
+                    cur = bytearray()
+            if len(cur) >= 6: strings_out.add(bytes(cur).decode("ascii", "ignore"))
+
+        def hook_code(uc, address, size, _):
+            try: insn = _struct.unpack("<I", uc.mem_read(address, 4))[0]
+            except UcError: return
+            if (insn & 0xFFFFFC1F) == 0xD65F0000:          # ret {Xn}
+                snap()
+                if depth[0] == 0: uc.emu_stop()
+                else: depth[0] -= 1
+                return
+            if (insn & 0xFC000000) == 0x94000000:          # bl imm26
+                snap()
+                imm = insn & 0x03FFFFFF
+                if imm & 0x02000000: imm -= 0x04000000
+                tgt = (address + imm * 4) & 0xffffffffffffffff
+                if text_lo <= tgt < text_hi:
+                    depth[0] += 1; return                  # intra-text: execute
+                uc.reg_write(UC_ARM64_REG_X0, 0)
+                uc.reg_write(UC_ARM64_REG_PC, address + 4); return
+            if (insn & 0xFFFFFC1F) == 0xD63F0000:          # blr Xn -> external
+                snap()
+                uc.reg_write(UC_ARM64_REG_X0, 0)
+                uc.reg_write(UC_ARM64_REG_PC, address + 4); return
+
+        def hook_inv(uc, access, address, size, value, _):
+            try: uc.mem_map(address & ~0xfff, 0x1000)
+            except UcError: pass
+            return True
+
+        uc.hook_add(UC_HOOK_CODE, hook_code)
+        uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, hook_inv)
+        try:
+            uc.emu_start(func_va, text_hi, timeout=3_000_000, count=BUDGET)
+        except UcError:
+            pass
+        snap()
+        text = b"\x00".join(s.encode() for s in strings_out)
+        for c in canaries:
+            if c.encode() in text:
+                hits.add(c)
+    except Exception:
+        pass
+    return hits
+
+
+def _machine(binary):
+    try:
+        return (binary.header.machine_type.name if hasattr(binary.header, "machine_type")
+                else str(binary.header.machine)).upper()
+    except Exception:
+        return ""
+
+
 def recover(path, canaries, max_funcs=400):
     binary = lief.parse(str(path))
     text = next((s for s in binary.sections if s.name == ".text"), None)
     if text is None: return {"error": "no .text", "recall": 0, "n": len(canaries)}
     code = bytes(text.content); text_va = text.virtual_address
-    funcs = function_ranges(binary, code, text_va)
+    arm = "AARCH64" in _machine(binary) or "ARM64" in _machine(binary)
+    ranges = function_ranges_arm64 if arm else function_ranges
+    capture = emulate_capture_arm64 if arm else emulate_capture
+    funcs = ranges(binary, code, text_va)
     found = set()
     for (fva, _) in funcs[:max_funcs]:
-        found |= emulate_capture(binary, code, text_va, fva, canaries)
+        found |= capture(binary, code, text_va, fva, canaries)
         if len(found) == len(canaries): break
     return {"functions_tried": min(len(funcs), max_funcs), "recovered": sorted(found),
-            "recall": len(found), "n": len(canaries)}
+            "recall": len(found), "n": len(canaries), "arch": "aarch64" if arm else "x86-64"}
 
 def main():
     man = json.loads((ROOT/"bench_src"/"manifest.json").read_text()); can = man["canaries"]

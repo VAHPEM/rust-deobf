@@ -99,7 +99,11 @@ is documented as out of scope, not a central result.
   x86-64, stripped and not: it executes the intra-`.text` `xref::inner` helper (which rebuilds
   the pointer) but stubs the external formatter call — a REX-prefixed `call r15` (`41 ff d7`)
   that the opcode test must skip the REX byte to catch; missing it followed a zeroed GOT slot
-  into garbage after the first literal, which was the old 1/5.
+  into garbage after the first literal, which was the old 1/5. The emulator now also dispatches
+  to an **AArch64** Unicorn path (**5/5** on obfstr arm64): there the print is an intra-text
+  `bl` into the statically-linked fmt runtime, so instead of a GOT stub the ARM path snapshots
+  the stack window right before every call — the moment the decoded buffer is complete and not
+  yet clobbered (VALIDATION §6).
 ⁵ muddy uses an AEAD cipher (ChaCha20-Poly1305) with an embedded key; a single static decode
   is cryptographically out of reach. Correctly reported as unrecoverable, not a miss.
 

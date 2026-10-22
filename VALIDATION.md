@@ -207,6 +207,27 @@ key/enc `ldrb` loads sit *after* the decode op in the loop body (loop-carried), 
 scans both sides of the op; and ops in a loop share a key region, so the recoverer tries all
 three keyed ops per blob and keeps whichever yields clean text (the cipher self-identifies); litcrypt's index wrap is a cmp+csel modulo rather than an and-mask, handled alongside the x86-style mask.
 
+obfstr (inlined decode, no callable decoder) needs the emulation path on ARM64 just as on
+x86-64, and `scripts/recover_emulate.py` now dispatches on machine type to a Unicorn **ARM64**
+emulator — run in the x86 cloud (Unicorn emulates AArch64 cross-host, so no VM is needed to
+*run* it, only to build the binary). It recovers **5/5** on obfstr arm64:
+
+| tool | obfstr x86-64 | obfstr arm64 |
+|---|---|---|
+| `recover_arm64` / `recover_callsite` (static) | 0/5 | 0/5 (inlined — no call site) |
+| `recover_emulate` (Unicorn) | **5/5** | **5/5** |
+
+The ARM idiom forced one real change from the x86 emulator. On x86 the print call is a
+GOT-indirect `call r15` (external → stubbed); on a **static** ELF the Rust fmt runtime is
+linked into `.text`, so obfstr's print is an *intra-text* `bl`. Executing it (some intra-text
+calls are load-bearing) would burn the instruction budget inside fmt and clobber the decoded
+stack buffer before capture, while stubbing every call diverges before the decode completes.
+The port keeps executing intra-text calls but **snapshots the live stack window immediately
+before each call** — exactly when obfstr has finished materialising the plaintext and is about
+to print it — and reads the printable runs from those snapshots. 5/5, and emulating a keyed
+binary (litcrypt2 arm64) still yields 0/5, confirming the path stays scoped to the inlined
+case and does not double-count what static already recovers.
+
 The coverage class is the same as x86-64: static handles simple hand-rolled keyed decoders on
 both architectures; optimised crate builds, inlining and AEAD still require the dynamic path
 (which is already architecture-agnostic — §5).
@@ -261,6 +282,8 @@ vivisect; this project uses lighter, targeted methods and adds Rust-specific str
 Still-open gaps this comparison surfaces: Rust plain-string blob splitting (by `&str` slice
 lengths — the same relocation technique §7 uses for Location pointers), tight strings, the
 rustc-commit → Rust-version map (FLOSS ships a database; we recover the commit but don't map
-it), and the ARM64 port of `recover_emulate` (obfstr inline-decode via Unicorn ARM;
-`recover_stackstrings` and `recover_litcrypt2` are now both x86-64 + AArch64). None of these
-change the headline result (FLOSS 0/5 on obfuscated Rust); they are breadth.
+it), and the plain `&str`-blob split / tight strings above. The AArch64 port is now complete
+across the recovery stack — `recover_arm64` (keyed static incl. litcrypt2), `recover_emulate`
+(obfstr inline-decode, below), `recover_stackstrings`, and the architecture-agnostic
+`recover_dynamic` all cover ARM64. None of the remaining gaps change the headline result
+(FLOSS 0/5 on obfuscated Rust); they are breadth.
