@@ -84,6 +84,7 @@ scripts/
   recover_arm64.py       static call-site dataflow recoverer (AArch64/ELF) — new, no prior tool
   recover_dynamic.py     dynamic recoverer via runtime memory scan (Frida) — works on real builds
   recover_emulate.py     emulation recoverer (Unicorn) for inlined decoders (obfstr 5/5)
+  recover_stackstrings.py static stack-string recovery (immediate stores to stack slots)
   build_all.sh           build the matrix {ELF,PE} x {debug,release} x {strip,nostrip}
   run_floss.py           baseline: strings(1) + FLOSS canary recall
   evaluate_all.py        reproducible end-to-end eval -> METRICS.md
