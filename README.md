@@ -84,12 +84,14 @@ python3 -m pip install lief capstone unicorn z3-solver frida frida-tools
 python3 scripts/recover.py path/to/binary
 python3 scripts/recover.py path/to/binary --json                  # records with addresses
 python3 scripts/recover.py path/to/binary --floss-json out.json   # open with: floss -n 6 out.json
+python3 scripts/recover.py samples/ --jsonl triage.jsonl          # triage a whole directory
 
 # AEAD / runtime-only decoders — inside an isolated analysis VM ONLY
 python3 scripts/recover_dynamic.py path/to/binary [-- arg1 arg2 ...]
 ```
 
-Every recovered string comes with where it came from: decoder function, call site and ciphertext
+Strings shaped like indicators are tagged (`[url]`, `[ip]`, `[domain]`, `[path]`, `[registry]`,
+`[email]`). Every recovered string comes with where it came from: decoder function, call site and ciphertext
 address for call-site recovery, the emulated function for inlined decoders, the store instruction
 for stack strings. `--floss-json` writes them as a **FLOSS results document**, so the strings
 FLOSS cannot recover from Rust show up in `floss`, `floss --html` and the FLOSS web viewer next to

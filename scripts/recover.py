@@ -22,6 +22,7 @@ runs single functions inside Unicorn with external calls stubbed.
     python scripts/recover.py <binary> --floss-json out.json  # a FLOSS results document:
                                                               #   floss out.json / floss --html out.json
     python scripts/recover.py <binary> --emulate always --time-budget 300
+    python scripts/recover.py samples/ --jsonl triage.jsonl    # every binary under a directory
 """
 from __future__ import annotations
 import argparse
@@ -121,6 +122,9 @@ def run(path: Path, emulate: str = "auto", stackstrings: bool = True, min_len: i
     if not result["decoded"]:
         result["notes"].append("no decoded strings: for AEAD (e.g. muddy) or decoders that only run at "
                                "runtime, use recover_dynamic.py inside an isolated analysis VM")
+    from recover_callsite import ioc_tags
+    for x in result["decoded"] + result["stack"]:
+        x["tags"] = ioc_tags(x["string"])
     return result
 
 
@@ -142,15 +146,49 @@ def print_text(result: dict) -> None:
                 where = f"decoder {_hex(x['decoder'])}  call {_hex(x['call'])}  data {_hex(x['blob'])}"
             else:
                 where = f"function {_hex(x['function'])}  (emulation)"
-            print(f"  {x['string']}\n      {where}")
+            print(f"  {x['string']}{_tags(x)}\n      {where}")
     if result["stack"]:
         print("\n== stack strings ==")
         for x in result["stack"]:
-            print(f"  {x['string']}\n      store {_hex(x['pc'])}  [{x['base']}{x['offset']:+#x}]")
+            print(f"  {x['string']}{_tags(x)}\n      store {_hex(x['pc'])}  [{x['base']}{x['offset']:+#x}]")
     for n in result["notes"]:
         print(f"\nnote: {n}")
     if not result["decoded"]:
         print(f"  python {Path(__file__).parent}/recover_dynamic.py {result['file']}")
+
+
+def _tags(x):
+    return "   " + " ".join(f"[{t}]" for t in x.get("tags", [])) if x.get("tags") else ""
+
+
+def run_dir(root: Path, out_jsonl: Path | None, **kw) -> None:
+    """Triage every file under a directory: one JSON line per file, a summary table at the end."""
+    files = sorted(p for p in root.rglob("*") if p.is_file())
+    rows = []
+    sink = out_jsonl.open("w", encoding="utf-8") if out_jsonl else None
+    try:
+        for p in files:
+            fmt, arch, _ = detect(p)
+            if arch not in ("x86_64", "aarch64"):
+                continue
+            try:
+                res = run(p, **kw)
+            except Exception as e:      # one malformed sample must not stop the batch
+                res = {"file": str(p), "format": fmt, "arch": arch, "decoded": [], "stack": [],
+                       "engines": [], "notes": [f"error: {e}"]}
+            if sink:
+                sink.write(json.dumps(res) + "\n")
+            iocs = sorted({t for x in res["decoded"] + res["stack"] for t in x.get("tags", [])})
+            rows.append((p, res, iocs))
+    finally:
+        if sink:
+            sink.close()
+    width = max((len(str(p.relative_to(root))) for p, _, _ in rows), default=4)
+    print(f"{'file':<{width}}  fmt  arch     decoded  stack  indicators")
+    for p, res, iocs in rows:
+        print(f"{str(p.relative_to(root)):<{width}}  {str(res['format'])[:4]:<4} {res['arch']:<8} "
+              f"{len(res['decoded']):>7}  {len(res['stack']):>5}  {', '.join(iocs)}")
+    print(f"\n{len(rows)} binaries" + (f"; records: {out_jsonl}" if out_jsonl else ""))
 
 
 def _rebase(records, imagebase, keys):
@@ -168,7 +206,8 @@ def _rebase(records, imagebase, keys):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("binary")
+    ap.add_argument("binary", help="a binary, or a directory to triage every binary in it")
+    ap.add_argument("--jsonl", metavar="OUT", help="directory mode: write one JSON record per file to OUT")
     ap.add_argument("--json", action="store_true", help="print the results as JSON")
     ap.add_argument("--floss-json", metavar="OUT", help="also write a FLOSS results document to OUT")
     ap.add_argument("--emulate", choices=("auto", "always", "never"), default="auto",
@@ -180,10 +219,15 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     path = Path(args.binary)
-    if not path.is_file():
-        ap.error(f"no such file: {path}")
     if args.min_length < 1:
         ap.error("--min-length must be a positive integer")
+    if path.is_dir():
+        run_dir(path, Path(args.jsonl) if args.jsonl else None, emulate=args.emulate,
+                stackstrings=not args.no_stackstrings, min_len=args.min_length,
+                time_budget=args.time_budget, max_funcs=args.max_funcs)
+        return
+    if not path.is_file():
+        ap.error(f"no such file: {path}")
 
     result = run(path, emulate=args.emulate, stackstrings=not args.no_stackstrings,
                  min_len=args.min_length, time_budget=args.time_budget, max_funcs=args.max_funcs)

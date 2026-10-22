@@ -76,9 +76,17 @@ _IOC_PATTERNS = [
 ]
 
 
+_IOC_KINDS = ("url", "ip", "domain", "path", "path", "registry", "email")
+
+
 def looks_like_ioc(t: str) -> bool:
     """Whether a string has the shape of a network/host indicator."""
     return any(p.match(t) for p in _IOC_PATTERNS)
+
+
+def ioc_tags(t: str) -> list:
+    """Indicator kinds a string matches, e.g. ["url"], ["ip"], ["path"]."""
+    return sorted({kind for kind, p in zip(_IOC_KINDS, _IOC_PATTERNS) if p.match(t)})
 
 
 def looks_like_text(dec: bytes) -> bool:
