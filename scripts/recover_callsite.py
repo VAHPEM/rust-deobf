@@ -180,6 +180,13 @@ def _canon_reg(name):
     return name
 
 
+def _is_pe(binary) -> bool:
+    try:
+        return binary.format.name == "PE"
+    except Exception:
+        return False
+
+
 def recover_litcrypt2(binary, insns, canaries):
     """Recover strings from litcrypt2's `lc!`, whose index idiom differs from litcrypt v1.
 
@@ -302,6 +309,9 @@ def recover_litcrypt2(binary, insns, canaries):
                 o.append(ct[p] ^ key[kk])
             return bytes(o)
 
+        # lc!(..) calls decrypt_bytes(out, ptr, len): ptr/len are the 2nd/3rd arguments, i.e.
+        # rsi/rdx under SysV (ELF) and rdx/r8 under the Win64 ABI (PE)
+        blob_reg, len_reg = ("rdx", "r8") if _is_pe(binary) else ("rsi", "rdx")
         texts = []
         for ci, cins in enumerate(insns):
             if cins.mnemonic != "call":
@@ -312,12 +322,12 @@ def recover_litcrypt2(binary, insns, canaries):
             for j in range(ci - 1, max(0, ci - 20), -1):
                 pj = insns[j]
                 if pj.mnemonic == "lea" and pj.operands \
-                   and pj.reg_name(pj.operands[0].reg) == "rsi" and blob is None:
+                   and pj.reg_name(pj.operands[0].reg) == blob_reg and blob is None:
                     t = rip_target(pj)
                     if t is not None:
                         blob = t
                 if pj.mnemonic in ("mov", "lea") and pj.operands \
-                   and _canon_reg(pj.reg_name(pj.operands[0].reg)) == "rdx" and length is None:
+                   and _canon_reg(pj.reg_name(pj.operands[0].reg)) == len_reg and length is None:
                     im = next((op.imm for op in pj.operands if op.type == CS_OP_IMM), None)
                     if im is not None and 0 < im <= 4096:
                         length = im

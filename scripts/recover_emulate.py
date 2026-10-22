@@ -70,9 +70,36 @@ def map_image(uc, binary):
             try: uc.mem_write(BASE + s.virtual_address, c)
             except UcError: pass
 
+def pdata_ranges(binary, code, text_va):
+    """PE x64: every non-leaf function has a RUNTIME_FUNCTION entry in .pdata (begin, end,
+    unwind info as RVAs), stripped or not -- the same table Windows uses to unwind the stack.
+    COFF symbol values, by contrast, are offsets into their section, not addresses."""
+    import struct
+    pdata = next((s for s in binary.sections if s.name == ".pdata"), None)
+    if pdata is None:
+        return []
+    raw = bytes(pdata.content)
+    lo, hi = text_va, text_va + len(code)
+    seen, funcs = set(), []
+    for k in range(0, len(raw) - 11, 12):
+        begin, end, _unwind = struct.unpack_from("<III", raw, k)
+        if lo <= begin < hi and begin < end and begin not in seen:
+            seen.add(begin)
+            funcs.append((begin, min(end - begin, 0x4000)))
+    funcs.sort()
+    return funcs
+
+
 def function_ranges(binary, code, text_va):
-    """Yield (start_va, size) for functions: prefer symbols, else split on `ret`+prologue."""
+    """Yield (start_va, size) for functions: .pdata on PE, else symbols, else split on prologues."""
     md = Cs(CS_ARCH_X86, CS_MODE_64)
+    try:
+        if binary.format.name == "PE":
+            funcs = pdata_ranges(binary, code, text_va)
+            if funcs:
+                return funcs
+    except Exception:
+        pass
     funcs = []
     syms = [(s.value, s.name) for s in binary.symbols if s.value and getattr(s, "is_function", False)]
     syms = [(v, n) for v, n in syms if text_va <= v < text_va + len(code)]

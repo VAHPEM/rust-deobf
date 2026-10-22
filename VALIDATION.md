@@ -356,3 +356,33 @@ given until FLOSS stops applying its default minimum length to loaded documents)
 | debug builds | release builds |
 |---|---|
 | 0/5 for every family, static and emulation — not claimed (release is what ships) | 5/5 for xor/add/sub_custom, litcrypt, litcrypt2 (static) and obfstr (emulation), x86-64 and AArch64, stripped and not |
+
+### 9b. Windows (PE) builds and Rust metadata
+
+The PE half of the matrix (x86_64-pc-windows-gnu, mingw-w64) had two failures of its own:
+
+| finding | before | after |
+|---|:-:|:-:|
+| litcrypt2 PE: its call-site pass read the ciphertext/length from `rsi`/`rdx` (SysV); Win64 passes them in `rdx`/`r8` | 0/5 | **5/5** |
+| obfstr PE: COFF symbol values are offsets into their section, not RVAs, so emulation started at the wrong address; functions now come from `.pdata` (RUNTIME_FUNCTION), which also covers stripped PE | 0/5 | **5/5** (2 functions emulated) |
+
+PE release, stripped and not: 5/5 for xor/add/sub_custom, litcrypt, litcrypt2 (static) and obfstr
+(emulation); canary-free emulation reports nothing on muddy, cryptify and plaintext. A stress run
+emulating 5,700+ functions across ARM64, PE and python3.13 completed without a Unicorn crash.
+
+`recover_rust_meta.py`:
+
+- **Rust release** from the rustc commit: `scripts/data/rust_versions.json` maps 118 stable
+  releases (1.22.0 – 1.99.1) to their commit, built by `gen_rust_versions.py` from the official
+  channel manifests (`rustc commit: 2d8144b… -> Rust 1.97.0 (2026-07-09)`).
+- **Own source tree** reported `src/inflate/core.rs`, `src/read/line.rs`, … — crates vendored
+  into std (`/rust/deps/<crate>-<ver>/`, reported separately now), relative `library/core/...`
+  std paths (windows-gnu), DWARF file-table names, and paths with rodata glued on
+  (`valuesrc/main.rs`). Every build of every bench project (ELF/PE/ARM64, debug/release,
+  stripped or not) now reports exactly `src/main.rs`.
+- Location records may point inside a longer regex match (the glued case): PE panic sites
+  recovered for litcrypt 310 → 395.
+- Crate paths under `cargo/registry/src` without the dot (Docker's `/usr/local/cargo`) and
+  `vendor/<crate>-<ver>/` are recognised; DWARF sections (including PE `/N` long names, resolved
+  through the COFF string table) are no longer scanned — that removed `windows-sys`, a crate not
+  in meta_probe's Cargo.lock (PE precision 20/21 → 20/20). ELF precision: 17/17, unchanged.
