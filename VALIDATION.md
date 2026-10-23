@@ -502,3 +502,139 @@ its last 1-3 characters after a shared prefix of 12 or more. `scripts/build_all.
 
     RUSTUP_TOOLCHAIN=1.99.1 BUILD_DIR=/tmp/b199 ARM64=1 bash scripts/build_all.sh
     RUST_DEOBF_BUILD=/tmp/b199 python -m pytest tests
+
+## 10. Generalisation: held-out shapes and malware build profiles (Oct 2026)
+
+An external review rebuilt all 144 benchmark binaries with rustc 1.97 (x86-64 ELF/PE and
+ARM64), reproduced `pytest` 107/107 and the self-tests 10/10, and read the code for cheating:
+canaries are used for scoring and early exit only, never as known plaintext. It then wrote its
+own held-out programs — eight benign strings spread over several functions: in a struct, in a
+`match`, compared but never printed, on a branch that never runs — and found the recoverers
+overfitted to the benchmark's single shape (`main()` printing five strings) and single build
+profile:
+
+| review finding | reproduced here |
+|---|---|
+| litcrypt2, malware-style build (LTO, `opt-level="z"`, `panic=abort`): 0/8 ELF and PE — the decode loop is not recognised | yes: 0/8 on `scatter_litcrypt2` `size-lto` and `speed-lto`, ELF and PE |
+| litcrypt2, `opt-level=3`: 5/8 — all 8 decoded, the text filter dropped 3 (2 because of a `heldout::` prefix, `Global\HO-91af2` even bare) | yes: 2/8 on `scatter_litcrypt2` release (call sites outside the recogniser's window, and the mutex rejected) |
+| obfstr emulation: PE 2 full + 3 truncated, ELF 0–1, `opt-level=3` ELF 0/8 even without the 400-function cap | yes: 1/5 on the canary obfstr ELF once emulation could run the formatter, 0–6/8 on `scatter_obfstr` |
+| FLOSS 3.2.0 on the held-out PE files: 0/8 | see the FLOSS row below |
+| false positives: ripgrep 2 (static), curl 1 (`.gnu.versign_r`, emulation); bash emulation ran 400/1671 functions | the 400 cap was real |
+
+### Why: the static recogniser keys on idioms, and the idioms move with the profile
+
+`size-lto` litcrypt2, for example: lengths arrive as `push 0xf; pop rdx` instead of
+`mov edx, 0xf`; the key is stored into an iterator struct and the XOR sits in
+`Iterator::next`, two calls below the call site; `load_config` tail-calls the decoder with
+`jmp`. Each can be patched (the call-site resolver now accepts `push imm; pop reg`), but the
+next profile or rustc release moves something else. The fix is the engine that does not depend
+on the idiom: the emulator.
+
+### What the emulator had to learn
+
+Running real Rust functions (not just obfstr's inlined decode) needed a small loader and C
+runtime. Each item below was found by a failing case, not added speculatively:
+
+| problem | effect | fix |
+|---|---|---|
+| calls below the emulated function were stubbed beyond one level | out-of-line decoders never ran | callees run up to 8 levels; a per-callee instruction budget (6k, 20k for a direct callee) abandons a spinning callee and returns 0 with the caller's callee-saved registers restored |
+| allocators returned 0 | `Vec`/`String` writes went to address 0, strings overlapped | imports resolved by name; `malloc`/`calloc`/`realloc`/`HeapAlloc`/`__rust_alloc` hand out separated zeroed blocks; `memcpy`/`memmove`/`memset`/`memcmp`/`bcmp`/`strlen`, `brk`/`mmap` modelled |
+| no relocations applied | `__rust_alloc` (called through a GOT slot with an `R_X86_64_RELATIVE` entry), vtables and `call r15` all jumped to 0 | ELF `RELATIVE`/`GLOB_DAT`/`JUMP_SLOT`/`64`, PE `DIR64` base relocations; every import slot points at a named `ret` trampoline |
+| LIEF returns file bytes as the "content" of `.bss` (NOBITS) | std's `ENV_LOCK` read as locked (a `.comment` string), `getenv` spun in `RwLock::read_contended` | NOBITS sections are zero |
+| no thread pointer | `fs:[0]` read 0, `[rax-8]` faulted, the run ended | fs/gs base (x86-64, a Windows TEB with a TLS array) and `TPIDR_EL0` |
+| `GetEnvironmentVariableW` stub returned 0 with `GetLastError()` 0 | Rust read it as "set to the empty string": cryptify decrypted with an empty key (PE 0/8) | unset variables report `ERROR_ENVVAR_NOT_FOUND` |
+| ARM64 LSE atomics (`casa`, `swp`) | undefined-instruction exception | CPU model `ARM64_MAX` |
+| stripped static musl: `mallocng` cannot run without `__init_libc` (auxv, page size) | every allocation failed | FLIRT-style masked byte signatures for musl's malloc/free/realloc/memcpy/memset/memmove/memcmp/strlen (`gen_runtime_sigs.py`, `scripts/data/runtime_sigs.json`); found among call targets because musl's functions carry no unwind info |
+| function starts: `.pdata` only (PE), push-prologue scan (stripped ELF) | leaf functions without unwind info (`settings_key` under `opt-level="z"`) were never emulated | `.eh_frame_hdr` table (kept when stripped), symbols, and every direct call target |
+| one path per function, fake arguments | `match` arms and never-taken branches were unreachable | path exploration: forward conditional branches in the emulated function are forced the other way, breadth-first, up to 8 runs and 3 run budgets of instructions per function |
+| runs shared state | a store through a fake pointer into `.rodata` (zeroed afterwards) destroyed the next function's ciphertext; after the periodic Unicorn re-creation the reset went to the old instance (also the source of rare segfaults) | written image pages are restored from the loaded image, other written pages zeroed, auto-mapped pages unmapped after every run |
+| per-instruction Python hook | ~3.5 µs per instruction | block hook: calls, returns and branch forcing at basic-block boundaries, 1.6–2× faster |
+
+### Exact strings without known plaintext
+
+Rust strings are not NUL-terminated, so reading text back from memory cannot say where a string
+ends, and a shorter string decoded over a longer one keeps its tail (the AArch64 `…-20261018int`
+limitation the README used to list). Three signals now decide it:
+
+- every write is tagged with its *capture generation*; a run is cut where the generation goes
+  **down** (the rest is older than the string in front of it);
+- the **(pointer, length)** pairs the code passes on — in two argument registers, or inside the
+  `fmt::Arguments` / `&str` structures the arguments point to (followed three levels) — give the
+  exact string; when the byte after it is printable and older, the string is complete and longer
+  views of it are stale;
+- strings that only a **forced** path produced lose to the natural run's when they are a near
+  copy (`…telemetry-ofF`) or a piece of one plus junk.
+
+Static explanations were widened the same way: printf templates in the file (`Assertion failed:
+%s (%s: %s: %d)` formatted with empty arguments, including views that start inside the template),
+static pieces glued with short glue (`23 GNU.sparse.offset=0`), identifiers re-cased at run time
+(git's `BAD_DATE_OVERFLOW` → `badDateOverflow`), AArch64 constants built with `movz`/`movk` and
+stored to the stack (musl's `/proc/self/fd/`), and fake values the emulator itself made up.
+
+### Text filter
+
+Indicator shapes are accepted before the English-trigram gate, now including kernel-object
+names (`Global\…`, `Local\…`, `Session\N\…`, `BaseNamedObjects\…` → `[mutex]`), hive-less
+registry keys (`Software\…`), UNC and `%VAR%` paths, and an indicator **inside** a longer string
+(`heldout::10.13.37.42:8443`, `cfg=C:\ProgramData\x.db`) when the rest of the string is plain
+text.
+
+### Results
+
+**Scatter suite, stripped, default `recover.py` pipeline** (`scripts/eval_scatter.py`; exact matches of 8; `+n` = extra strings; `plaintext` counts every reported string as a false positive). Toolchain: rustc 1.97.0.
+
+Before (the code the review tested):
+
+| scatter program | ELF x86-64<br>release | ELF x86-64<br>size-lto | ELF x86-64<br>speed-lto | PE x86-64<br>release | PE x86-64<br>size-lto | PE x86-64<br>speed-lto | ELF AArch64<br>release | ELF AArch64<br>size-lto | ELF AArch64<br>speed-lto |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `xor_custom` | 3/8 | 1/8 | 2/8 | 3/8 | 3/8 | 2/8 | 3/8 | 2/8 | 2/8 |
+| `litcrypt` | 2/8 | 0/8 | 0/8 | 2/8 | 0/8 | 0/8 | 2/8 | 0/8 | 0/8 |
+| `litcrypt2` | 3/8 | 0/8 | 2/8 | 3/8 | 0/8 | 2/8 | 3/8 | 0/8 | 2/8 |
+| `obfstr` | 1/8 | 1/8 | 1/8 | 1/8 | 3/8 +3 | 1/8 | 5/8 | 3/8 +1 | 5/8 |
+| `cryptify` | 4/8 | 0/8 | 0/8 | 3/8 | 3/8 | 3/8 | 3/8 | 0/8 | 0/8 |
+| `plaintext` | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** |
+
+79/360 exact, 4 false positives
+
+After:
+
+| scatter program | ELF x86-64<br>release | ELF x86-64<br>size-lto | ELF x86-64<br>speed-lto | PE x86-64<br>release | PE x86-64<br>size-lto | PE x86-64<br>speed-lto | ELF AArch64<br>release | ELF AArch64<br>size-lto | ELF AArch64<br>speed-lto |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `xor_custom` | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** |
+| `litcrypt` | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** |
+| `litcrypt2` | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** |
+| `obfstr` | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** |
+| `cryptify` | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** | **8/8** |
+| `plaintext` | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** |
+
+360/360 exact, 0 false positives
+
+The same 54 binaries, before → after: **79/360 → 360/360** exact strings, 4 → 0 extra strings. `tests/test_scatter.py` asserts every cell (recall *and* that nothing else is reported), plus all eight canary crates under both LTO profiles, ELF/PE/AArch64: 156 tests.
+
+**Canary benchmark** (`tests/test_benchmark.py`, unchanged assertions plus one): still passes in
+full (109 tests). One expectation changed because the emulator got better: muddy
+(ChaCha20-Poly1305) used to be "AEAD: dynamic only"; emulation now runs its decrypt path and
+recovers exactly the five canaries, ELF, PE and AArch64. The canary programs rebuilt `size-lto` and
+`speed-lto` (8 crates × 3 formats × 2 profiles) recover 5/5 each.
+
+**Precision on real binaries** (`scripts/measure_fp.py --pipeline`, the whole default pipeline):
+
+| binary | `.text` | functions emulated (120 s budget) | time | false positives |
+|---|--:|--:|--:|:-:|
+| bash | 945 KB | 2343 / 2343 | 59 s | **0** |
+| tar | 292 KB | 607 / 607 | 37 s | **0** |
+| xz | 41 KB | 76 / 76 | 9 s | **0** |
+| git | 3077 KB | 604 / 4473 (budget) | 138 s | **0** |
+| curl | 107 KB | 121 / 121 | 2 s | **0** |
+| ripgrep 14.1.1 (Rust, musl, stripped) | 4078 KB | 365 / 8558 (budget) | 151 s | **0** |
+
+Two static-recoverer bugs behind the review's ripgrep garbage were fixed on the way: a decoder whose
+function entry could not be resolved had `entry = None`, which matched every register-indirect
+`call` as one of its call sites (`RelebsAHAb0i!` from `ReverseHybridGro…`), and a "key" that is
+mostly zero bytes was accepted although it leaves the data unchanged (`z4Yaused8by:` from
+`caused by:`). Emulation-side noise found on the way and removed: `rep stos` over a fake length
+(now a per-run store budget), a page-faulting walk across memory (a per-run cap on auto-mapped
+pages), git's fsck message ids re-cased at run time, tar's pax records, printf-formatted runtime
+messages. Coverage is reported, not hidden: the large binaries are emulated in decoder-score order
+until the budget runs out.
+

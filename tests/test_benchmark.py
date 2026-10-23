@@ -8,7 +8,7 @@ from conftest import BUILD, CANARIES
 
 FORMATS = [("elf", ""), ("pe", ".exe"), ("elf-arm64", "")]
 STATIC = ["xor_custom", "add_custom", "sub_custom", "litcrypt", "litcrypt2"]
-NO_STRINGS = ["plaintext", "muddy"]   # nothing obfuscated to recover / AEAD: out of scope statically
+NO_STRINGS = ["plaintext", "muddy"]   # nothing obfuscated / AEAD: no static decoder to read
 
 
 def binary(crate, fmt, ext, strip, profile="release"):
@@ -82,7 +82,12 @@ def test_no_false_positives(crate, fmt, ext):
     import recover_emulate
     path = binary(crate, fmt, ext, "strip")
     assert static_recover(path, fmt)["recovered_texts"] == []
-    assert recover_emulate.recover(path, [])["recovered_texts"] == []
+    emulated = recover_emulate.recover(path, [])["recovered_texts"]
+    if crate == "muddy":
+        # emulation runs muddy's ChaCha20-Poly1305 decrypt: the canaries, and nothing else
+        assert sorted(emulated) == sorted(CANARIES), emulated
+    else:
+        assert emulated == []
     assert recover_cryptify.recover(path)["recovered_texts"] == []
 
 

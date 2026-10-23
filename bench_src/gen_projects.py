@@ -173,13 +173,156 @@ VARIANTS["litcrypt2"] = {
     "build_rs": None, "env": ("LITCRYPT_ENCRYPT_KEY", "benchmark-fixed-key-2"),
 }
 
-manifest = {"canaries": CANARIES, "variants": {}}
+
+# ---------------------------------------------------------------------------------------------
+# "scatter" suite: the same obfuscators, used the way real programs use strings.
+#
+# The canary suite above prints five strings from main(), which is the friendliest possible
+# shape: every literal flows straight into println!, all from one function, one build profile.
+# Real code keeps strings in structs, picks them in a `match`, only *compares* against them
+# (an argv flag, a mutex name) and keeps some on paths that never run. These programs put eight
+# benign, indicator-shaped strings in exactly those places, and the build matrix adds the
+# size-optimised, fat-LTO, panic=abort profiles release malware tends to ship with, which change
+# the decoder idioms (inlining, loop shape, index wrap) the recoverers key on.
+SCATTER = [
+    "10.66.12.7:8443",                                              # struct field, ip:port
+    "C:\\ProgramData\\NorthwindSvc\\state.db",                      # struct field, Windows path
+    "Global\\NW-5c1e9a",                                            # compared only (mutex name)
+    "https://telemetry.northwind.example/api/v3/beacon",            # match arm, URL
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NorthwindAgent/2.1", # struct field, user agent
+    "--skip-update-check",                                          # compared only (argv flag)
+    "Software\\Northwind\\Agent\\Settings",                         # branch that never runs
+    "nw-agent::stage=collect",                                      # match arm, prefixed id
+]
+
+
+def lit(c):
+    """A Rust literal for c. Raw strings for anything with a backslash: litcrypt/litcrypt2 encrypt
+    the literal's source text, escapes included (their README tells users to write paths as raw
+    strings), so `lc!("C:\\x")` really holds a doubled backslash at run time."""
+    return f'r"{c}"' if "\\" in c else f'"{esc(c)}"'
+
+
+def scatter_body(s, eq):
+    """s(i) -> expression yielding String for SCATTER[i]; eq(var, i) -> bool comparing &str var."""
+    return f"""struct Config {{
+    c2: String,
+    cache: String,
+    agent: String,
+}}
+
+#[inline(never)]
+fn load_config() -> Config {{
+    Config {{ c2: {s(0)}, cache: {s(1)}, agent: {s(4)} }}
+}}
+
+#[inline(never)]
+fn already_running(name: &str) -> bool {{
+    let name = std::hint::black_box(name);
+    {eq("name", 2)}
+}}
+
+#[inline(never)]
+fn endpoint(kind: usize) -> String {{
+    match kind {{
+        0 => {s(3)},
+        1 => {s(7)},
+        _ => String::new(),
+    }}
+}}
+
+#[inline(never)]
+fn skip_update(args: &[String]) -> bool {{
+    args.iter().any(|a| {{ let a = a.as_str(); {eq("a", 5)} }})
+}}
+
+#[inline(never)]
+fn settings_key() -> String {{
+    {s(6)}
+}}
+
+fn main() {{
+    let args: Vec<String> = std::env::args().collect();
+    let cfg = load_config();
+    let busy = already_running(args.first().map(|a| a.as_str()).unwrap_or(""));
+    let ep = endpoint(std::hint::black_box(args.len() - 1));
+    let skip = skip_update(&args);
+    if std::hint::black_box(args.len()) > 4096 {{
+        // never taken: the key is only ever built on a path that does not run
+        std::process::exit(settings_key().len() as i32);
+    }}
+    // the strings themselves are never printed, only facts about them
+    println!("{{}} {{}} {{}} {{}} {{}}", cfg.c2.len() + cfg.cache.len() + cfg.agent.len(), busy, ep.len(), skip, args.len());
+}}"""
+
+
+# hand-rolled XOR decoder, same key and function as xor_custom
+_sx_decls = "\n".join(
+    f"static SENC_{i}: [u8; {len(c.encode())}] = {xor_blob(c)};" for i, c in enumerate(SCATTER))
+VARIANTS["scatter_xor_custom"] = {
+    "deps": [], "header": xor_header.split("\n")[0] + "\n" + _sx_decls + "\n" + "\n".join(xor_header.split("\n")[len(CANARIES) + 1:]),
+    "body": scatter_body(lambda i: f"dex(&SENC_{i})", lambda v, i: f"{v} == dex(&SENC_{i})"),
+    "build_rs": None, "env": None, "suite": "scatter",
+}
+VARIANTS["scatter_litcrypt"] = {
+    "deps": ['litcrypt = "0.4"'],
+    "header": "#[macro_use]\nextern crate litcrypt;\nuse_litcrypt!();",
+    "body": scatter_body(lambda i: f'lc!({lit(SCATTER[i])})', lambda v, i: f'{v} == lc!({lit(SCATTER[i])})'),
+    "build_rs": None, "env": ("LITCRYPT_ENCRYPT_KEY", "benchmark-fixed-key-do-not-reuse"), "suite": "scatter",
+}
+VARIANTS["scatter_litcrypt2"] = {
+    "deps": ['litcrypt2 = "0.1"'],
+    "header": "extern crate alloc;\n#[macro_use]\nextern crate litcrypt2;\nuse_litcrypt!();",
+    "body": scatter_body(lambda i: f'lc!({lit(SCATTER[i])})', lambda v, i: f'{v} == lc!({lit(SCATTER[i])})'),
+    "build_rs": None, "env": ("LITCRYPT_ENCRYPT_KEY", "benchmark-fixed-key-2"), "suite": "scatter",
+}
+VARIANTS["scatter_obfstr"] = {
+    "deps": ['obfstr = "0.4"'],
+    "header": "use obfstr::obfstr;",
+    "body": scatter_body(lambda i: f'obfstr!({lit(SCATTER[i])}).to_string()',
+                         lambda v, i: f'{v} == obfstr!({lit(SCATTER[i])})'),
+    "build_rs": None, "env": None, "suite": "scatter",
+}
+VARIANTS["scatter_cryptify"] = {
+    "deps": ['cryptify = "3"'],
+    "header": "",
+    "body": scatter_body(lambda i: f'cryptify::encrypt_string!({lit(SCATTER[i])})',
+                         lambda v, i: f'{v} == cryptify::encrypt_string!({lit(SCATTER[i])})'),
+    "build_rs": None, "env": None, "suite": "scatter",
+}
+VARIANTS["scatter_plaintext"] = {
+    "deps": [], "header": "",
+    "body": scatter_body(lambda i: f'{lit(SCATTER[i])}.to_string()', lambda v, i: f'{v} == {lit(SCATTER[i])}'),
+    "build_rs": None, "env": None, "suite": "scatter",
+}
+
+# Build profiles. `release` is the original benchmark profile; the two LTO profiles are what
+# shipped Rust malware commonly uses (opt-level="z"/"s", lto, codegen-units=1, panic=abort) and
+# they change inlining and loop shape. scripts/build_all.sh builds the profiles a variant lists.
+PROFILES_EXTRA = """
+[profile.size-lto]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.speed-lto]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+"""
+
+manifest = {"canaries": CANARIES, "scatter": SCATTER, "variants": {}}
 for name, v in VARIANTS.items():
     d = SRC / name
     (d / "src").mkdir(parents=True, exist_ok=True)
     cargo = [f'[package]', f'name = "{name}"', 'version = "0.1.0"', 'edition = "2021"', "", "[dependencies]"]
     cargo += v["deps"]
     cargo += ["", "[profile.release]", "strip = false", "opt-level = 3"]
+    cargo += PROFILES_EXTRA.splitlines()
     (d / "Cargo.toml").write_text("\n".join(cargo) + "\n")
     src = (v["header"] + "\n\n" + v["body"] + "\n") if v["header"] else (v["body"] + "\n")
     (d / "src" / "main.rs").write_text(src)
@@ -188,11 +331,24 @@ for name, v in VARIANTS.items():
     manifest["variants"][name] = {
         "crate": (v["deps"][0] if v["deps"] else None),
         "env": v["env"],
+        "suite": v.get("suite", "canary"),
         "cipher": {"plaintext":"none","xor_custom":"xor","add_custom":"add","sub_custom":"sub",
                    "obfstr":"xor","litcrypt":"xor","litcrypt2":"xor",
                    "cryptify":"xor-ish","cryptify_default":"xor-ish","tight_xor":"xor",
-                   "muddy":"chacha20poly1305"}.get(name,"?"),
+                   "muddy":"chacha20poly1305"}.get(name.replace("scatter_", "").replace("cryptify", "cryptify_default") if name.startswith("scatter_") else name, "?"),
     }
+# What each scatter program really holds at run time. litcrypt (v1) strips one character from
+# each end of the literal's *source text*, so a raw string r"C:\x" becomes `"C:\x` -- a crate
+# bug the recovered strings faithfully show. The other crates hold the literal's value.
+def runtime_value(variant, c):
+    if variant == "scatter_litcrypt" and lit(c).startswith('r"'):
+        return '"' + c
+    return c
+
+
+manifest["scatter_expected"] = {name: [runtime_value(name, c) for c in SCATTER]
+                                for name, v in VARIANTS.items()
+                                if v.get("suite") == "scatter" and name != "scatter_plaintext"}
 (SRC / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(f"generated {len(VARIANTS)} projects:", ", ".join(VARIANTS))
 print(f"{len(CANARIES)} canaries each")

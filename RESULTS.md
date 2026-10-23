@@ -1,5 +1,7 @@
 # Results
 
+> **Oct 2026 update:** these tables are the original canary benchmark (five printed strings, one build profile) and its static method. Generalisation to held-out program shapes and to `size-lto`/`speed-lto` builds, the rebuilt emulation engine, and the numbers for both are in `VALIDATION.md` §10 and the README.
+
 Canary recall = how many of the 5 known ground-truth strings a tool reproduces from a
 built binary. `strings`/FLOSS are baselines; `ours` is `scripts/recover_callsite.py`
 (static) unless noted. Full run: `bash scripts/build_all.sh && python3 scripts/run_floss.py && python3 scripts/recover_callsite.py build/*`.

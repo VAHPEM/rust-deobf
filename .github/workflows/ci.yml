@@ -11,9 +11,27 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  selftest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - name: Self-tests (no binaries needed)
+        run: python -m pytest tests/test_selftests.py -q
+
+  benchmark:
+    # one job per output format: the build matrix (canary + scatter suites, release and the
+    # size/speed fat-LTO profiles) and the emulation-heavy tests are too long for one runner
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [elf, pe, elf-arm64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -32,10 +50,15 @@ jobs:
           rustc --version
 
       - name: mingw-w64 (PE target linker)
-        run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64 llvm
+        if: matrix.format == 'pe'
+        run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64
 
-      - name: Build the benchmark (x86-64 ELF + PE, AArch64 via rust-lld)
-        run: ARM64=1 bash scripts/build_all.sh
+      - name: llvm-strip (AArch64)
+        if: matrix.format == 'elf-arm64'
+        run: sudo apt-get update -q && sudo apt-get install -y -q llvm
 
-      - name: Self-tests and benchmark recall/precision
-        run: python -m pytest tests -q -rs
+      - name: Build the benchmark for ${{ matrix.format }}
+        run: FORMATS=${{ matrix.format }} bash scripts/build_all.sh
+
+      - name: Recall and precision (canary + scatter suites)
+        run: python -m pytest tests/test_benchmark.py tests/test_scatter.py -q -rs

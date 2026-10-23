@@ -6,35 +6,51 @@
     "canary::delta::feature-flag-telemetry-off",
     "canary::echo::schema-version-4"
   ],
+  "scatter": [
+    "10.66.12.7:8443",
+    "C:\\ProgramData\\NorthwindSvc\\state.db",
+    "Global\\NW-5c1e9a",
+    "https://telemetry.northwind.example/api/v3/beacon",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NorthwindAgent/2.1",
+    "--skip-update-check",
+    "Software\\Northwind\\Agent\\Settings",
+    "nw-agent::stage=collect"
+  ],
   "variants": {
     "plaintext": {
       "crate": null,
       "env": null,
+      "suite": "canary",
       "cipher": "none"
     },
     "xor_custom": {
       "crate": null,
       "env": null,
+      "suite": "canary",
       "cipher": "xor"
     },
     "add_custom": {
       "crate": null,
       "env": null,
+      "suite": "canary",
       "cipher": "add"
     },
     "sub_custom": {
       "crate": null,
       "env": null,
+      "suite": "canary",
       "cipher": "sub"
     },
     "tight_xor": {
       "crate": null,
       "env": null,
+      "suite": "canary",
       "cipher": "xor"
     },
     "obfstr": {
       "crate": "obfstr = \"0.4\"",
       "env": null,
+      "suite": "canary",
       "cipher": "xor"
     },
     "litcrypt": {
@@ -43,6 +59,7 @@
         "LITCRYPT_ENCRYPT_KEY",
         "benchmark-fixed-key-do-not-reuse"
       ],
+      "suite": "canary",
       "cipher": "xor"
     },
     "cryptify": {
@@ -51,16 +68,19 @@
         "CRYPTIFY_KEY",
         "benchmark-fixed-key"
       ],
+      "suite": "canary",
       "cipher": "xor-ish"
     },
     "cryptify_default": {
       "crate": "cryptify = \"3\"",
       "env": null,
+      "suite": "canary",
       "cipher": "xor-ish"
     },
     "muddy": {
       "crate": "muddy = \"0.3\"",
       "env": null,
+      "suite": "canary",
       "cipher": "chacha20poly1305"
     },
     "litcrypt2": {
@@ -69,7 +89,102 @@
         "LITCRYPT_ENCRYPT_KEY",
         "benchmark-fixed-key-2"
       ],
+      "suite": "canary",
       "cipher": "xor"
+    },
+    "scatter_xor_custom": {
+      "crate": null,
+      "env": null,
+      "suite": "scatter",
+      "cipher": "xor"
+    },
+    "scatter_litcrypt": {
+      "crate": "litcrypt = \"0.4\"",
+      "env": [
+        "LITCRYPT_ENCRYPT_KEY",
+        "benchmark-fixed-key-do-not-reuse"
+      ],
+      "suite": "scatter",
+      "cipher": "xor"
+    },
+    "scatter_litcrypt2": {
+      "crate": "litcrypt2 = \"0.1\"",
+      "env": [
+        "LITCRYPT_ENCRYPT_KEY",
+        "benchmark-fixed-key-2"
+      ],
+      "suite": "scatter",
+      "cipher": "xor"
+    },
+    "scatter_obfstr": {
+      "crate": "obfstr = \"0.4\"",
+      "env": null,
+      "suite": "scatter",
+      "cipher": "xor"
+    },
+    "scatter_cryptify": {
+      "crate": "cryptify = \"3\"",
+      "env": null,
+      "suite": "scatter",
+      "cipher": "xor-ish"
+    },
+    "scatter_plaintext": {
+      "crate": null,
+      "env": null,
+      "suite": "scatter",
+      "cipher": "none"
     }
+  },
+  "scatter_expected": {
+    "scatter_xor_custom": [
+      "10.66.12.7:8443",
+      "C:\\ProgramData\\NorthwindSvc\\state.db",
+      "Global\\NW-5c1e9a",
+      "https://telemetry.northwind.example/api/v3/beacon",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NorthwindAgent/2.1",
+      "--skip-update-check",
+      "Software\\Northwind\\Agent\\Settings",
+      "nw-agent::stage=collect"
+    ],
+    "scatter_litcrypt": [
+      "10.66.12.7:8443",
+      "\"C:\\ProgramData\\NorthwindSvc\\state.db",
+      "\"Global\\NW-5c1e9a",
+      "https://telemetry.northwind.example/api/v3/beacon",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NorthwindAgent/2.1",
+      "--skip-update-check",
+      "\"Software\\Northwind\\Agent\\Settings",
+      "nw-agent::stage=collect"
+    ],
+    "scatter_litcrypt2": [
+      "10.66.12.7:8443",
+      "C:\\ProgramData\\NorthwindSvc\\state.db",
+      "Global\\NW-5c1e9a",
+      "https://telemetry.northwind.example/api/v3/beacon",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NorthwindAgent/2.1",
+      "--skip-update-check",
+      "Software\\Northwind\\Agent\\Settings",
+      "nw-agent::stage=collect"
+    ],
+    "scatter_obfstr": [
+      "10.66.12.7:8443",
+      "C:\\ProgramData\\NorthwindSvc\\state.db",
+      "Global\\NW-5c1e9a",
+      "https://telemetry.northwind.example/api/v3/beacon",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NorthwindAgent/2.1",
+      "--skip-update-check",
+      "Software\\Northwind\\Agent\\Settings",
+      "nw-agent::stage=collect"
+    ],
+    "scatter_cryptify": [
+      "10.66.12.7:8443",
+      "C:\\ProgramData\\NorthwindSvc\\state.db",
+      "Global\\NW-5c1e9a",
+      "https://telemetry.northwind.example/api/v3/beacon",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NorthwindAgent/2.1",
+      "--skip-update-check",
+      "Software\\Northwind\\Agent\\Settings",
+      "nw-agent::stage=collect"
+    ]
   }
 }

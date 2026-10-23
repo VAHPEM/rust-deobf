@@ -16,6 +16,9 @@ binary here contains the benchmark canaries, so the ideal result is 0 FP.
     python scripts/measure_fp.py                     # auto-discover real system binaries
     python scripts/measure_fp.py --bins /usr/bin/git /tmp/rg/bin/rg
     python scripts/measure_fp.py --json              # machine-readable + writes build/fp_results.json
+    python scripts/measure_fp.py --pipeline          # the whole recover.py pipeline (static +
+                                                     # emulation), as a user runs it; writes
+                                                     # build/fp_pipeline_results.json with --json
 
 Only x86-64 ELF/PE that LIEF can parse are scanned (the static engine is x86-64). This is
 a defensive, read-only measurement: it disassembles binaries and prints statistics.
@@ -70,6 +73,28 @@ def discover(globs) -> list[Path]:
     return out
 
 
+def measure_pipeline(path: Path, time_budget: float):
+    """Every decoded string the full recover.py pipeline reports is a FP on a benign binary."""
+    import time
+    import recover
+    t0 = time.monotonic()
+    res = recover.run(path, emulate="always", stackstrings=False, literals=False,
+                      time_budget=time_budget)
+    by_engine = {}
+    for x in res["decoded"]:
+        by_engine.setdefault(x.get("method", "?"), []).append(x["string"])
+    emu = next((e for e in res["engines"] if e["engine"].startswith("emulation")), {})
+    fp = sorted({x["string"] for x in res["decoded"]})
+    return {"binary": str(path), "text_bytes": text_size(path),
+            "emulated_functions": emu.get("functions", "-"), "timed_out": emu.get("timed_out", False),
+            "seconds": round(time.monotonic() - t0, 1),
+            "false_positives": len(fp), "fp_strings": fp[:20],
+            "fp_by_method": {k: len(v) for k, v in by_engine.items()},
+            "decoder_candidates": next((e.get("decoders", 0) for e in res["engines"]
+                                        if e["engine"].startswith("static")), 0),
+            "error": None}
+
+
 def measure(path: Path):
     import recover_callsite as R
     r = R.recover(path, [])            # no canaries -> every recovered text is a FP
@@ -86,6 +111,10 @@ def main():
     ap.add_argument("--bins", nargs="*", help="explicit binary paths to measure")
     ap.add_argument("--glob", nargs="*", default=[], help="glob(s) of binaries to add")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--pipeline", action="store_true",
+                    help="measure the whole recover.py pipeline instead of static recovery alone")
+    ap.add_argument("--time-budget", type=float, default=120.0,
+                    help="emulation time budget per binary with --pipeline (default 120 s)")
     a = ap.parse_args()
 
     cands = [Path(b) for b in a.bins] if a.bins else [Path(p) for p in DEFAULT_CANDIDATES]
@@ -97,11 +126,34 @@ def main():
             rp = p.resolve()
         except Exception:
             continue
-        if rp in seen or not rp.exists() or not is_x86_64(rp):
+        if rp in seen or not rp.exists() or not (is_x86_64(rp) or a.pipeline):
             continue
         seen.add(rp); bins.append(rp)
     if not bins:
         sys.exit("no x86-64 binaries found to measure (pass --bins or --glob)")
+
+    if a.pipeline:
+        rows = []
+        for p in bins:
+            r = measure_pipeline(p, a.time_budget)
+            rows.append(r)
+            if not a.json:
+                print(f"{p.name:<40} {r['text_bytes'] // 1024:>7} KB  emulated {r['emulated_functions']:>11}"
+                      f"{' (budget)' if r['timed_out'] else ''}  {r['seconds']:>5}s  FP {r['false_positives']}"
+                      f"  {r['fp_by_method'] or ''}", flush=True)
+                for st in r["fp_strings"]:
+                    print(f"      FP: {st!r}")
+        tot = sum(r["false_positives"] for r in rows)
+        summary = {"binaries": len(rows), "clean_binaries": sum(1 for r in rows if not r["false_positives"]),
+                   "false_positives_total": tot, "time_budget_s": a.time_budget}
+        if a.json:
+            (ROOT / "build").mkdir(exist_ok=True)
+            out = json.dumps({"summary": summary, "rows": rows}, indent=2)
+            (ROOT / "build" / "fp_pipeline_results.json").write_text(out)
+            print(out)
+        else:
+            print(f"{summary['clean_binaries']}/{len(rows)} binaries with zero FP, {tot} FP total")
+        return
 
     rows = [measure(p) for p in bins]
     n = len(rows)

@@ -7,9 +7,11 @@ Detects the binary's architecture and format, then runs the recoverers that appl
                                   x86-64 ELF/PE: recover_callsite.py   AArch64 ELF: recover_arm64.py
                                   cryptify: recover_cryptify.py (default key; a custom key is
                                   runtime-only and is reported as such)
-  2. emulation                  - inlined decoders (obfstr): recover_emulate.py (Unicorn).
-                                  Runs automatically when the static pass finds nothing
-                                  (`--emulate auto`), always with `--emulate always`.
+  2. emulation                  - every decoder the static pass cannot read: recover_emulate.py
+                                  (Unicorn; real calls, heap, relocations, path exploration).
+                                  Runs by default (`--emulate always`), bounded by
+                                  --time-budget; `--emulate auto` only when the static pass
+                                  found nothing, `--emulate never` skips it.
   3. static stack strings       - immediates stored to the frame: recover_stackstrings.py
   4. Rust literals              - the plain, unobfuscated &str literals split out of the packed
                                   string section: recover_rust_strings.py (FLOSS's "language
@@ -25,7 +27,8 @@ runs single functions inside Unicorn with external calls stubbed.
     python scripts/recover.py <binary> --json                 # machine-readable records
     python scripts/recover.py <binary> --floss-json out.json  # a FLOSS results document:
                                                               #   floss out.json / floss --html out.json
-    python scripts/recover.py <binary> --emulate always --time-budget 300
+    python scripts/recover.py <binary> --time-budget 300         # emulate longer (big binaries)
+    python scripts/recover.py <binary> --emulate never           # static passes only, seconds
     python scripts/recover.py samples/ --jsonl triage.jsonl    # every binary under a directory
 """
 from __future__ import annotations
@@ -66,8 +69,8 @@ def detect(path):
     return fmt, arch, imagebase
 
 
-def run(path: Path, emulate: str = "auto", stackstrings: bool = True, min_len: int = 6,
-        time_budget: float = 120.0, max_funcs: int = 400, literals: bool = True) -> dict:
+def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len: int = 6,
+        time_budget: float = 120.0, max_funcs: int = 0, literals: bool = True) -> dict:
     """Run the applicable recoverers and return {"format", "arch", "decoded", "stack", ...}."""
     fmt, arch, imagebase = detect(path)
     result = {"file": str(path), "format": fmt, "arch": arch, "imagebase": imagebase,
@@ -244,14 +247,16 @@ def main(argv=None):
     ap.add_argument("--jsonl", metavar="OUT", help="directory mode: write one JSON record per file to OUT")
     ap.add_argument("--json", action="store_true", help="print the results as JSON")
     ap.add_argument("--floss-json", metavar="OUT", help="also write a FLOSS results document to OUT")
-    ap.add_argument("--emulate", choices=("auto", "always", "never"), default="auto",
-                    help="run emulation: when the static pass finds nothing (default), always, or never")
+    ap.add_argument("--emulate", choices=("auto", "always", "never"), default="always",
+                    help="run emulation always (default, bounded by --time-budget), only when the "
+                         "static pass finds nothing (auto), or never")
     ap.add_argument("--no-stackstrings", action="store_true", help="skip static stack-string recovery")
     ap.add_argument("--no-literals", action="store_true", help="skip splitting the plain Rust literals")
     ap.add_argument("--literals", action="store_true", help="print every Rust literal, not only indicators")
     ap.add_argument("-n", "--min-length", type=int, default=6, help="minimum string length (default 6)")
     ap.add_argument("--time-budget", type=float, default=120.0, help="emulation time budget in seconds")
-    ap.add_argument("--max-funcs", type=int, default=400, help="maximum functions to emulate")
+    ap.add_argument("--max-funcs", type=int, default=0,
+                    help="maximum functions to emulate (default 0: no cap, the time budget decides)")
     args = ap.parse_args(argv)
 
     path = Path(args.binary)

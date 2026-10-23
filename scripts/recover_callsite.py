@@ -64,21 +64,35 @@ TEXT_CHARS = set(bytes(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     " ._/:@%+=-", "ascii"))
 
-_IOC_PATTERNS = [
-    re.compile(r"^[a-z][a-z0-9+.-]{1,15}://[^\s/$.?#][^\s]*$", re.I),                # scheme://host...
-    re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
-               r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?::\d{1,5})?$"),                 # IPv4[:port]
-    re.compile(r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-               r"(?:com|net|org|io|ru|cn|xyz|top|info|biz|onion|dev|app|cc|tk|site|online|club)"
-               r"(?::\d{1,5})?(?:/\S*)?$", re.I),                                       # domain
-    re.compile(r"^[A-Za-z]:\\(?:[\w .$()-]+\\)*[\w .$()-]+$"),                       # C:\path
-    re.compile(r"^/(?:[\w.-]+/)+[\w.-]*$"),                                            # /unix/path
-    re.compile(r"^(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU)(?:\\[\w .{}-]+)+$", re.I),         # registry
-    re.compile(r"^[\w.+-]+@[\w-]+\.[\w.-]+$"),                                         # e-mail
+_IP = r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+_TLD = r"(?:com|net|org|io|ru|cn|xyz|top|info|biz|onion|dev|app|cc|tk|site|online|club|example|local|lan|corp|internal)"
+_REG = r"(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU)(?:\\[\w .{}$-]+)+"
+_REG_NOHIVE = r"(?:SOFTWARE|Software|SYSTEM|System)\\[\w .{}$-]+(?:\\[\w .{}$-]+)+"
+# Windows kernel-object names: mutexes, events, sections in the Global/Local/Session namespaces
+_KOBJ = r"(?:Global|Local|Session\\\d+|\\?BaseNamedObjects)\\[\w.{}$#@+-]{3,}"
+_WINPATH = r"(?:[A-Za-z]:|\\\\[\w.$-]+\\[\w.$-]+|%[A-Za-z_]+%)\\(?:[\w .$()~-]+\\)*[\w .$()~-]+"
+
+# (kind, pattern). Each pattern describes the whole indicator; looks_like_ioc() matches it
+# against the whole string, contains_ioc() finds it inside a longer one.
+_IOC_RULES = [
+    ("url", r"[a-z][a-z0-9+.-]{1,15}://[^\s/$.?#][^\s]*"),
+    ("ip", _IP + r"(?::\d{1,5})?"),
+    ("domain", r"(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+" + _TLD + r"(?::\d{1,5})?(?:/\S*)?"),
+    ("path", _WINPATH),
+    ("path", r"/(?:[\w.-]+/)+[\w.-]*"),
+    ("registry", _REG),
+    ("registry", _REG_NOHIVE),
+    ("mutex", _KOBJ),
+    ("email", r"[\w.+-]+@[\w-]+\.[\w.-]+"),
 ]
-
-
-_IOC_KINDS = ("url", "ip", "domain", "path", "path", "registry", "email")
+_IOC_PATTERNS = [re.compile("^" + p + "$", re.I if k in ("url", "domain", "registry") else 0)
+                 for k, p in _IOC_RULES]
+_IOC_KINDS = tuple(k for k, _ in _IOC_RULES)
+# inside a longer string: not glued to a neighbouring word character on either side
+_IOC_SEARCH = [re.compile(r"(?<![\w.\\])" + p.replace("(?=.{4,253}$)", "") + r"(?![\w\\])",
+                          re.I if k in ("url", "domain", "registry") else 0)
+               for k, p in _IOC_RULES if k != "domain"]
+_IOC_SEARCH_KINDS = tuple(k for k, _ in _IOC_RULES if k != "domain")
 
 
 def looks_like_ioc(t: str) -> bool:
@@ -86,9 +100,31 @@ def looks_like_ioc(t: str) -> bool:
     return any(p.match(t) for p in _IOC_PATTERNS)
 
 
+def contains_ioc(t: str) -> bool:
+    """An indicator embedded in a longer, otherwise ordinary string (`agent::10.1.2.3:443`,
+    `cfg=C:\\ProgramData\\x.db`). The indicator must be a substantial part of the string and the
+    rest must be plain text, so a stray dotted quad in random bytes does not qualify."""
+    if not all(32 <= ord(c) < 127 for c in t):
+        return False
+    for p in _IOC_SEARCH:
+        for m in p.finditer(t):
+            span = m.end() - m.start()
+            if span < 7:
+                continue
+            rest = t[:m.start()] + t[m.end():]
+            if span / len(t) >= 0.5:
+                return True
+            if rest and sum(c.isalnum() or c in " _-:/=.,;@#" for c in rest) / len(rest) >= 0.9:
+                return True
+    return False
+
+
 def ioc_tags(t: str) -> list:
-    """Indicator kinds a string matches, e.g. ["url"], ["ip"], ["path"]."""
-    return sorted({kind for kind, p in zip(_IOC_KINDS, _IOC_PATTERNS) if p.match(t)})
+    """Indicator kinds a string matches or contains, e.g. ["url"], ["ip"], ["mutex"]."""
+    kinds = {kind for kind, p in zip(_IOC_KINDS, _IOC_PATTERNS) if p.match(t)}
+    if not kinds and contains_ioc(t):
+        kinds = {kind for kind, p in zip(_IOC_SEARCH_KINDS, _IOC_SEARCH) if p.search(t)}
+    return sorted(kinds)
 
 
 def looks_like_text(dec: bytes) -> bool:
@@ -105,7 +141,7 @@ def looks_like_text(dec: bytes) -> bool:
     # Indicators (URLs, domains, IPs, paths, registry keys) are what triage is after; they are
     # often short, not English (`http://c2.example`) or letter-free (an IP), so the checks below
     # would reject them. Their shape is specific enough to accept them directly.
-    if looks_like_ioc(t):
+    if looks_like_ioc(t) or contains_ioc(t):
         return True
     texty = sum(1 for c in dec if c in TEXT_CHARS)
     alnum = sum(1 for c in t if c.isalnum())
@@ -188,6 +224,21 @@ def _canon_reg(name):
     if name.startswith("r") and (name[-1] in "dwb") and name[1:2].isdigit():
         return name[:-1]            # r14d/r14w/r14b -> r14
     return name
+
+
+def _imm_into(insns, j, regs):
+    """Immediate loaded into one of `regs` by insns[j]: `mov r, imm`, or the size-optimised
+    `push imm; pop r` pair that opt-level="z" emits for small constants."""
+    pj = insns[j]
+    if not pj.operands or pj.operands[0].type != CS_OP_REG:
+        return None
+    if _canon_reg(pj.reg_name(pj.operands[0].reg)) not in {_canon_reg(r) for r in regs}:
+        return None
+    if pj.mnemonic == "mov":
+        return next((op.imm for op in pj.operands if op.type == CS_OP_IMM), None)
+    if pj.mnemonic == "pop" and j > 0 and insns[j - 1].mnemonic == "push":
+        return next((op.imm for op in insns[j - 1].operands if op.type == CS_OP_IMM), None)
+    return None
 
 
 def _is_pe(binary) -> bool:
@@ -336,9 +387,8 @@ def recover_litcrypt2(binary, insns, canaries):
                     t = rip_target(pj)
                     if t is not None:
                         blob = t
-                if pj.mnemonic in ("mov", "lea") and pj.operands \
-                   and _canon_reg(pj.reg_name(pj.operands[0].reg)) == len_reg and length is None:
-                    im = next((op.imm for op in pj.operands if op.type == CS_OP_IMM), None)
+                if length is None:
+                    im = _imm_into(insns, j, (len_reg,))
                     if im is not None and 0 < im <= 4096:
                         length = im
                 if blob and length:
@@ -434,7 +484,13 @@ def recover(path, canaries):
     for (kva, kl), (xaddr, opn) in seen.items():
         key = read_va(binary, kva, kl)
         if not key: continue
+        # a "key" that is mostly zero bytes leaves the data as it was: the loop is not a decoder,
+        # and what it "decodes" is ordinary text with a few bytes flipped (ripgrep's
+        # `caused by:` came out as `z4Yaused8by:`)
+        if 2 * key.count(0) >= len(key): continue
         entry = func_entry(xaddr)
+        if entry is None:
+            continue    # (a None entry matched every register-indirect call as a "call site")
         # Collect this decoder's clean decodes, then require corroboration: a genuine
         # string decryptor is called repeatedly and EVERY call decodes to clean text.
         # A byte-loop misclassified as a decoder (common in real binaries) will not have
@@ -457,9 +513,9 @@ def recover(path, canaries):
                 if pj.mnemonic == "lea" and pj.operands and pj.reg_name(pj.operands[0].reg) in blob_regs:
                     t = rip_target(pj)
                     if t is not None and blob_va is None: blob_va = t
-                if pj.mnemonic == "mov" and pj.operands and pj.reg_name(pj.operands[0].reg) in len_regs:
-                    imm = next((op.imm for op in pj.operands if op.type == CS_OP_IMM), None)
-                    if imm is not None and length is None: length = imm
+                if length is None:
+                    imm = _imm_into(insns, j, len_regs)
+                    if imm is not None: length = imm
                 if blob_va is not None and length is not None: break
 
             if blob_va is None or length is None:
