@@ -26,9 +26,15 @@ if [ -n "${FORMATS:-}" ]; then
   for t in "${all[@]}"; do case " $FORMATS " in *" ${t##*:} "*) targets+=( "$t" );; esac; done
   case " $FORMATS " in *" elf-arm64 "*) export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld;; esac
 fi
-# NATIVE_ARM64=1 (on an AArch64 Linux host) also builds aarch64-unknown-linux-gnu: glibc, dynamic,
-# imports through the PLT -- the shape of an ARM64 Rust binary built on the machine itself
-if [ "${NATIVE_ARM64:-0}" = 1 ]; then targets+=( "aarch64-unknown-linux-gnu:elf-arm64gnu" ); fi
+# ARM64_GNU=1 also builds aarch64-unknown-linux-gnu: glibc, dynamic, imports through the PLT --
+# the shape of an ARM64 Rust binary built on an ARM64 Linux machine. Natively on such a host, or
+# cross with gcc-aarch64-linux-gnu (used automatically when present). NATIVE_ARM64=1 is an alias.
+if [ "${ARM64_GNU:-${NATIVE_ARM64:-0}}" = 1 ]; then
+  targets+=( "aarch64-unknown-linux-gnu:elf-arm64gnu" )
+  if [ "$(uname -m)" != aarch64 ] && command -v aarch64-linux-gnu-gcc >/dev/null; then
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+  fi
+fi
 # ARM64=1 also cross-builds AArch64 ELF (static musl, linked by rust-lld): no ARM machine or
 # cross gcc needed, only `rustup target add aarch64-unknown-linux-musl`. rust-lld relaxes
 # adrp+add pairs into `adr`, a codegen shape the static ARM64 recoverer has to handle.
@@ -55,6 +61,8 @@ e=v.get('env');print((f'{e[0]}={e[1]}' if e else '-'), v.get('suite','canary'))"
         continue
       fi
       case "$profile" in debug) flags="";; release) flags="--release";; *) flags="--profile $profile";; esac
+      # a project without this profile (meta_probe has no LTO profiles): nothing to build
+      case "$profile" in debug|release) ;; *) grep -q "^\[profile\.$profile\]" "$pdir/Cargo.toml" || continue;; esac
       ( cd "$pdir"
         env ${env_line:+$env_line} cargo build $flags --target "$triple" >/dev/null 2>&1
       )

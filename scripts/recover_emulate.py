@@ -160,6 +160,31 @@ class Image:
         self.patches = {}   # va -> 8-byte value written after mapping (relocations, import slots)
         self.tramp = []     # import names; import i lives at TRAMP + 16*i
         self._relocate()
+        self.lse_flags = self._lse_flags() if self.arm else []
+
+    def _lse_flags(self):
+        """Addresses of the `__aarch64_have_lse_atomics` byte the outlined-atomic helpers test.
+
+        Each `__aarch64_cas4_acq`-style helper starts `adrp x16, flag; ldrb w16, [x16, #lo];
+        cbz w16, <LL/SC loop>`. The flag is set by a constructor reading AT_HWCAP, which never
+        runs here; left at 0, every atomic takes the `ldaxr`/`stxr` path, whose exclusive access
+        to a fake pointer raises a data abort and ends the run inside std's locks. Setting it
+        selects the LSE instruction (`casa`, `swpal`, ...), which the ARM64_MAX CPU executes."""
+        out = set()
+        words = struct.unpack_from(f"<{len(self.code) // 4}I", self.code)
+        for i in range(len(words) - 2):
+            w0 = words[i]
+            if (w0 & 0x9f00001f) != 0x90000010:            # adrp x16
+                continue
+            w1, w2 = words[i + 1], words[i + 2]
+            if (w1 & 0xffc003ff) != 0x39400210 or (w2 & 0xff00001f) != 0x34000010:
+                continue                                    # ldrb w16, [x16, #imm]; cbz w16
+            imm = (((w0 >> 5) & 0x7ffff) << 2) | ((w0 >> 29) & 3)
+            if imm & (1 << 20):
+                imm -= 1 << 21
+            pc = self.text_va + 4 * i
+            out.add((pc & ~0xfff) + (imm << 12) + ((w1 >> 10) & 0xfff))
+        return sorted(out)[:4]
 
     def _import(self, name):
         self.tramp.append(name or "?")
@@ -888,6 +913,9 @@ class Emulator:
                     for va, v in self.img.patches.items():
                         if lo <= va and va + 8 <= lo + len(c):
                             c[va - lo:va - lo + 8] = struct.pack("<Q", v & 0xffffffffffffffff)
+                    for va in self.img.lse_flags:
+                        if lo <= va < lo + len(c):
+                            c[va - lo] = 1
                     out.append((BASE + lo, bytes(c)))
             self._image_snapshot = out
         return self._image_snapshot
@@ -967,6 +995,14 @@ class Emulator:
             if n == "strlen":
                 s = bytes(uc.mem_read(arg(0), 0x1000))
                 return s.index(0) if 0 in s else 0x1000
+            # output succeeds: a `write` that returns 0 is io::ErrorKind::WriteZero, and std's
+            # print! panics ("failed printing to stdout") after the first line, ending the run
+            if n == "write":
+                return arg(2)
+            if n == "writev":
+                iov, cnt = arg(1), min(arg(2), 64)
+                return sum(struct.unpack_from("<Q", uc.mem_read(iov + 16 * i + 8, 8))[0]
+                           for i in range(cnt)) & 0x7fffffffffffffff
             if n == "getprocessheap":
                 return 0x1000
             if n in ("errno_location", "errno", "error"):
@@ -995,7 +1031,12 @@ class Emulator:
 
     def _on_intr(self, uc, intno, _):
         self._capture()
-        if intno != 2:                       # not `svc`: an undefined instruction, brk, ...
+        if intno != 2:
+            # not `svc`: an undefined instruction, `brk`, an exclusive-monitor exception. Inside a
+            # callee, give up on that callee; in the emulated function itself, stop
+            # (stopped here and handled by run(), like a memory fault: changing PC from inside an
+            # exception hook does not reliably leave the faulting function)
+            self.fault = True
             uc.emu_stop()
             return
         nr = uc.reg_read(A.UC_ARM64_REG_X8)
@@ -1296,8 +1337,11 @@ class Emulator:
         faults = {}
         for _ in range(64):
             try:
+                self.fault = False
                 self.uc.emu_start(pc, 0, timeout=0, count=max(1, BUDGET - self.count))
-                break
+                if not self.fault:
+                    break
+                raise UcError(0)
             except UcError:
                 # a fault (unmappable address, invalid instruction) inside a callee: give up on
                 # that callee and return 0 to its caller. A call from the emulated function that
@@ -1703,20 +1747,22 @@ def _drop_overlap_artifacts(records):
                 garbled.add(x)
             # y is what the code passed on, at its length; x differs only in its last few
             # characters (`...telemetry-ofF` against `...telemetry-off`): a half-decoded view
-            elif y in used and x not in used and k >= 12 and len(x) - k <= 3:
+            elif y in used and x not in used and k >= 12 and len(x) - k <= 4:
                 garbled.add(x)
     # a forced path that cut a decode short or ran it on half-initialised state: a near copy of a
     # string the natural run produced (`...telemetry-ofF`), or a piece from inside one plus junk
     # (`ture-fla` + `eett`). Strings only a forced path reaches (another match arm) are kept.
     natural = {r["string"] for r in records if not r.get("forced")}
     for f in {r["string"] for r in records if r.get("forced")} - natural - used:
+        if len(f) < 8:
+            garbled.add(f)    # short text only a forced path built (`lib`+`map`): too little evidence
+            continue
         for n in natural | used:
-            if n not in natural and len(n) < len(f):
-                continue      # a shorter used string is a prefix seen on the way, not the truth
             k = 0
             while k < min(len(f), len(n)) and f[k] == n[k]:
                 k += 1
-            if k >= 12 and len(f) - k <= 4:
+            # (a shorter string is a prefix seen on the way, not the truth)
+            if len(n) >= len(f) and k >= 12 and len(f) - k <= 4:
                 garbled.add(f)
                 break
             head = f[:8]
@@ -1733,6 +1779,19 @@ def _drop_overlap_artifacts(records):
                 if all(len(x) <= 3 or any(x in o for o in texts if o not in (c,)) for x in rest):
                     padded.add(c)
                     break
+    # a view starting inside a used string plus a few bytes of junk (`bravo::build-id-20261018xK`
+    # from `canary::bravo::build-id-20261018`)
+    for x in texts - used - exact:
+        for y in used:
+            if len(y) < 12 or x == y:
+                continue
+            m = len(x) - 1
+            while m >= 12 and y.find(x[:m], 1) < 0:
+                m -= 1
+            # (inside, not at the start: a used prefix of x is the decode seen half-way through)
+            if m >= 12 and 0 < len(x) - m <= 3:
+                garbled.add(x)
+                break
     drop = stale | partial | garbled | padded
     drop |= {t for t in texts - used - exact for s in stale if t != s and s.endswith(t)}
     keep = [r for r in records if r["string"] not in drop]

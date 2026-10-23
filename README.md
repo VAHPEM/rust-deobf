@@ -94,8 +94,18 @@ detects the crate and says so.</sub>
 `scripts/measure_fp.py --pipeline` (static + emulation, default 120 s budget): **0** false
 positives on bash, tar, xz, git, curl and ripgrep 14.1.1. Small binaries are emulated completely
 (bash: all 2343 functions — the old code stopped at 400); git and ripgrep are covered in
-decoder-score order until the budget runs out (604/4473 and 365/8558 functions), which the output
+decoder-score order until the budget runs out (580/4473 and 365/8558 functions), which the output
 reports.
+
+### Second machine, second toolchain
+
+Everything was re-run outside the development container on the two VMs of
+[dual-vm-ai-agent](https://github.com/VAHPEM/dual-vm-ai-agent) (Kali Linux and Windows, ARM64): on Kali with rustc
+**1.99.1** (current stable), including a new target, **AArch64 glibc** (dynamically linked, the
+default Linux target); on Windows, the self-tests and the FLOSS 3.2.0 baseline (0 decoded strings
+on every canary and scatter PE file). The test suite passes on both toolchains (1.97: 289 tests; 1.99 glibc AArch64: 149). The glibc build needed two emulator fixes —
+libgcc's outlined atomics (`__aarch64_cas4_acq` & co.) and a `write` import that must report
+success — see [VALIDATION.md §10b](VALIDATION.md).
 
 ---
 
@@ -117,7 +127,7 @@ reports.
     and returns 0, with the caller's registers restored;
   - *a loader*: relocations applied (ELF `RELATIVE`/`GLOB_DAT`/`JUMP_SLOT`, PE base
     relocations), every import pointed at a named trampoline, `.bss` zeroed, thread-local
-    storage (fs/gs/`TPIDR_EL0`) set up;
+    storage (fs/gs/`TPIDR_EL0`) set up, AArch64 outlined atomics switched to their LSE path;
   - *a C runtime*: allocators (`malloc`, `HeapAlloc`, `__rust_alloc`, …) hand out separated
     zeroed blocks; `memcpy`/`memmove`/`memset`/`memcmp`/`bcmp`/`strlen`, `brk`/`mmap`, environment
     lookups and `GetLastError` behave; in stripped static (musl) builds the runtime functions are
@@ -206,7 +216,8 @@ generalisation work: `VALIDATION.md` (§10) · artifact tiers: `ARTIFACT_TIERS.m
 python3 bench_src/gen_projects.py                 # (re)generate bench_src from the canaries
 ARM64=1 bash scripts/build_all.sh                 # all crates x {ELF, PE, AArch64} x profiles
 FORMATS=pe bash scripts/build_all.sh              # one format (CI runs one job per format)
-NATIVE_ARM64=1 bash scripts/build_all.sh          # on an AArch64 Linux host: + glibc/dynamic
+ARM64_GNU=1 bash scripts/build_all.sh             # + AArch64 glibc (dynamic); cross linker
+                                                  # aarch64-linux-gnu-gcc unless on AArch64
 python3 -m pytest tests -q                        # recall and precision, canary + scatter
 python3 scripts/eval_scatter.py                   # the scatter table above
 python3 scripts/measure_fp.py --pipeline          # false positives on real binaries
@@ -215,7 +226,9 @@ python3 scripts/measure_fp.py --pipeline          # false positives on real bina
 `build_all.sh` profiles: `debug`, `release`, `size-lto`, `speed-lto` (canary suite) and
 `release`, `size-lto`, `speed-lto` (scatter suite); `PROFILES=...` and `ONLY=...` narrow it,
 `SKIP_EXISTING=1` keeps what is built. Rust targets: `x86_64-pc-windows-gnu` (with the
-`mingw-w64` linker) and `aarch64-unknown-linux-musl` (linked by the bundled `rust-lld`).
+`mingw-w64` linker), `aarch64-unknown-linux-musl` (linked by the bundled `rust-lld`) and, with
+`ARM64_GNU=1`, `aarch64-unknown-linux-gnu`. `BUILD_DIR=...` builds elsewhere and
+`RUST_DEOBF_BUILD=...` points the tests at it, so two toolchains can be compared side by side.
 FLOSS is only needed to reproduce the baseline column (`scripts/run_floss.py`).
 
 Dynamic recovery must run inside a dedicated, isolated VM (Kali or Windows), never on your

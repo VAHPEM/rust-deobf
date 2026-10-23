@@ -621,12 +621,12 @@ recovers exactly the five canaries, ELF, PE and AArch64. The canary programs reb
 
 | binary | `.text` | functions emulated (120 s budget) | time | false positives |
 |---|--:|--:|--:|:-:|
-| bash | 945 KB | 2343 / 2343 | 59 s | **0** |
-| tar | 292 KB | 607 / 607 | 37 s | **0** |
-| xz | 41 KB | 76 / 76 | 9 s | **0** |
-| git | 3077 KB | 604 / 4473 (budget) | 138 s | **0** |
+| bash | 945 KB | 2343 / 2343 | 65 s | **0** |
+| tar | 292 KB | 607 / 607 | 40 s | **0** |
+| xz | 41 KB | 76 / 76 | 8 s | **0** |
+| git | 3077 KB | 580 / 4473 (budget) | 139 s | **0** |
 | curl | 107 KB | 121 / 121 | 2 s | **0** |
-| ripgrep 14.1.1 (Rust, musl, stripped) | 4078 KB | 365 / 8558 (budget) | 151 s | **0** |
+| ripgrep 14.1.1 (Rust, musl, stripped) | 4078 KB | 365 / 8558 (budget) | 156 s | **0** |
 
 Two static-recoverer bugs behind the review's ripgrep garbage were fixed on the way: a decoder whose
 function entry could not be resolved had `entry = None`, which matched every register-indirect
@@ -638,3 +638,36 @@ pages), git's fsck message ids re-cased at run time, tar's pax records, printf-f
 messages. Coverage is reported, not hidden: the large binaries are emulated in decoder-score order
 until the budget runs out.
 
+
+**FLOSS 3.2.0** (`floss.exe -q --json`, run on the Windows VM, every PE of both suites, stripped):
+0 decoded strings on all 12 canary PE files and all 18 scatter PE files (release, `size-lto`,
+`speed-lto`). Its static pass finds the plaintext programs' literals (5/5; 7/8 to 8/8 on
+`scatter_plaintext`) and nothing on the obfuscated ones. FLOSS 4.0.0-alpha.2 could not be measured
+there: its Windows build stops with `ArchNotImplemented('ARM64')` on an ARM64 Windows host.
+
+### 10b. Second machine and toolchain: the two VMs
+
+Everything above was also run away from the development container, on the two VMs of
+`dual-vm-ai-agent` (Kali Linux and Windows, both ARM64 guests on an Apple-silicon Mac):
+
+- **Kali, rustc 1.99.1** (current stable, native `aarch64-unknown-linux-gnu`): the canary and scatter
+  suites rebuilt for PE (mingw), AArch64 musl and — new — AArch64 **glibc** (dynamically linked,
+  the default Linux target), every profile. The glibc AArch64 builds rebuilt with the same compiler in the development container pass
+  the whole suite (`RUST_DEOBF_BUILD=... pytest tests`: 149 passed, the rest skipped as not built
+  there); the 1.97 build passes in full (289 passed).
+- **Windows** (Python 3.14): the self-tests pass (12); the FLOSS column above comes from there.
+
+The glibc AArch64 build is the one that taught the emulator something new. Its binaries call
+atomics through libgcc's outlined helpers (`__aarch64_cas4_acq`, `__aarch64_swp4_rel`, ...), which
+test a `__aarch64_have_lse_atomics` byte set by a constructor reading `AT_HWCAP`. The
+constructor never runs under emulation, so the helpers took the `ldaxr`/`stxr` path, whose
+exclusive access raised a data abort inside std's locks and ended the run after the first
+`println!`; and `write` from the dynamically linked libc was an unmodelled import returning 0,
+which std reports as `WriteZero` and turns into a "failed printing to stdout" panic. The loader
+now finds the flag from the helpers' `adrp x16; ldrb w16; cbz w16` prologue and sets it (the LSE
+instructions run on the `ARM64_MAX` CPU), `write`/`writev` report the bytes as written, and a CPU
+exception (data abort, undefined instruction) inside a callee abandons that callee like a memory
+fault instead of ending the run. Before → after on the glibc AArch64 canary programs under
+`size-lto`: obfstr, litcrypt and litcrypt2 1/5 → 5/5. `ARM64_GNU=1 bash scripts/build_all.sh`
+builds this target (cross linker `aarch64-linux-gnu-gcc` when not on an AArch64 host) and CI has
+a job for it.

@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        format: [elf, pe, elf-arm64]
+        format: [elf, pe, elf-arm64, elf-arm64gnu]
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
@@ -57,8 +57,19 @@ jobs:
         if: matrix.format == 'elf-arm64'
         run: sudo apt-get update -q && sudo apt-get install -y -q llvm
 
+      - name: AArch64 glibc cross linker
+        if: matrix.format == 'elf-arm64gnu'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+
       - name: Build the benchmark for ${{ matrix.format }}
-        run: FORMATS=${{ matrix.format }} bash scripts/build_all.sh
+        run: |
+          if [ "${{ matrix.format }}" = elf-arm64gnu ]; then
+            FORMATS=none ARM64_GNU=1 bash scripts/build_all.sh
+          else
+            FORMATS=${{ matrix.format }} bash scripts/build_all.sh
+          fi
 
       - name: Recall and precision (canary + scatter suites)
         run: python -m pytest tests/test_benchmark.py tests/test_scatter.py -q -rs

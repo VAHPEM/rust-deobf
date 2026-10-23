@@ -16,7 +16,7 @@ from conftest import BUILD, CANARIES, ROOT
 _MAN = json.loads((ROOT / "bench_src" / "manifest.json").read_text())
 SCATTER = _MAN["scatter"]
 EXPECTED = _MAN["scatter_expected"]      # run-time values (litcrypt v1 mangles raw literals)
-FORMATS = [("elf", ""), ("pe", ".exe"), ("elf-arm64", "")]
+FORMATS = [("elf", ""), ("pe", ".exe"), ("elf-arm64", ""), ("elf-arm64gnu", "")]
 PROFILES = ["release", "size-lto", "speed-lto"]
 CRATES = ["xor_custom", "litcrypt", "litcrypt2", "obfstr", "cryptify"]
 _cache = {}
