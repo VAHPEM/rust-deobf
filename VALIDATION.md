@@ -732,6 +732,8 @@ none of them is explained away.
 | set 2: `opt-level=2`, 1 CGU; `opt-level="z"`, no LTO, `panic=unwind` (ELF, PE, ARM64 musl; 96) | 500/510, +3 *(first measured after the set-1 fixes)* | 510/510, +0 |
 | set 3: `opt-level=3`, no LTO, 16 CGU, `panic=unwind`; `opt-level="s"`, fat LTO (ELF, PE, ARM64 glibc; 96) | 504/510, +8 *(first measured after the set-2 fixes)* | 510/510, +0 |
 | canary + scatter suites, rustc 1.97 / 1.99 (`pytest tests`) | 289 / 149 passed | 289 / 149 passed |
+| Kali VM, rustc 1.99.1, PE + ARM64 musl + ARM64 glibc (`pytest tests`) | 232 passed | 232 passed (the round's first version failed 2 there: the stray-tail case below) |
+| Windows VM, `recover.py` on the 18 stripped scatter PE files | 120/120, +0 | 120/120, +0 |
 | static stage on git | 3661 MB | 249 MB |
 | cargo, gdb, cmake (whole pipeline) | out of memory (5.5–6 GB) | gdb 0.5 GB; cargo 1.0–1.1 GB per process |
 | gdb, functions emulated in 120 s | 136 / 15,760 | ≈2,000 / 15,760 (2 CPUs) |
@@ -769,7 +771,11 @@ a CI job, informational):
 | cargo | Rust | 19,594 KB | 3528/43240 | 5 |
 | rustdoc | Rust | 5,894 KB | 8531/8531 | 0 |
 
-29 in all (C/C++ 12, Go 5, Rust 12), 11 binaries clean. One lesson worth recording: rustfmt had
+29 in all (C/C++ 12, Go 5, Rust 12), 11 binaries clean. The CI job's own run on GitHub's
+ubuntu runner (other versions of the same programs, 4 CPUs, 60 s) gave 32 on 20 binaries, 13
+clean, with more on that runner's Rust toolchain binaries (rustfmt 9, cargo-fmt 6) and none on
+kubectl, docker or gh — an independent replication, and a reminder that the figure moves with
+the binaries' versions. One lesson worth recording: rustfmt had
 **0** when only 990 of its functions fitted in the budget, and 23 once all 4,545 did; coverage and
 noise grow together, so a precision figure means little without the coverage next to it. The
 remainder is text assembled at run time from the program's own pieces in ways the filters do not

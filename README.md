@@ -156,6 +156,7 @@ model (`File/Glob.pm`, `lib/rustlib/src/rust/`, a regex help line), symbol names
 inserted as well as changed (``PyGIL`EmSure``), and a few reshuffles. Each is reported as decoded,
 so a result list on a non-obfuscated binary is not empty — but it is short, and the previous
 code reported 68 on Xvfb alone. Coverage grows with CPUs and `--time-budget`, and so can noise.
+The CI job on GitHub's runner (other versions of these programs) measured 32 on 20 binaries.
 
 ### Second machine, second toolchain
 
