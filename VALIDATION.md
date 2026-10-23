@@ -652,10 +652,15 @@ Everything above was also run away from the development container, on the two VM
 
 - **Kali, rustc 1.99.1** (current stable, native `aarch64-unknown-linux-gnu`): the canary and scatter
   suites rebuilt for PE (mingw), AArch64 musl and — new — AArch64 **glibc** (dynamically linked,
-  the default Linux target), every profile. The glibc AArch64 builds rebuilt with the same compiler in the development container pass
-  the whole suite (`RUST_DEOBF_BUILD=... pytest tests`: 149 passed, the rest skipped as not built
-  there); the 1.97 build passes in full (289 passed).
-- **Windows** (Python 3.14): the self-tests pass (12); the FLOSS column above comes from there.
+  the default Linux target), every profile. `pytest tests` on the VM: **232 passed**, 85 skipped (the
+  x86-64 ELF builds, which an AArch64 host does not make), 0 failed — once `z3-solver` from
+  `requirements.txt` was installed there; without it only `deobf_expr.py --selftest` fails. In the
+  development container the same suite passes on the rustc 1.97 build (289 passed) and on a
+  rustc 1.99 glibc AArch64 build (149 passed, the formats not built there skipped).
+- **Windows** (Python 3.14, no Rust toolchain): the self-tests pass (12), and `recover.py` run
+  on the Windows host over the 18 stripped scatter PE files built on Kali recovers **120/120**
+  strings with 0 extra (`plaintext`: nothing) — the files on which FLOSS 3.2.0, run on the same
+  machine, decodes 0 (the FLOSS paragraph above).
 
 The glibc AArch64 build is the one that taught the emulator something new. Its binaries call
 atomics through libgcc's outlined helpers (`__aarch64_cas4_acq`, `__aarch64_swp4_rel`, ...), which

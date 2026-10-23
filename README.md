@@ -99,13 +99,18 @@ reports.
 
 ### Second machine, second toolchain
 
-Everything was re-run outside the development container on the two VMs of
-[dual-vm-ai-agent](https://github.com/VAHPEM/dual-vm-ai-agent) (Kali Linux and Windows, ARM64): on Kali with rustc
-**1.99.1** (current stable), including a new target, **AArch64 glibc** (dynamically linked, the
-default Linux target); on Windows, the self-tests and the FLOSS 3.2.0 baseline (0 decoded strings
-on every canary and scatter PE file). The test suite passes on both toolchains (1.97: 289 tests; 1.99 glibc AArch64: 149). The glibc build needed two emulator fixes —
-libgcc's outlined atomics (`__aarch64_cas4_acq` & co.) and a `write` import that must report
-success — see [VALIDATION.md §10b](VALIDATION.md).
+Everything was re-run outside the development container, on the two ARM64 VMs of
+[dual-vm-ai-agent](https://github.com/VAHPEM/dual-vm-ai-agent):
+
+- **Kali Linux, rustc 1.99.1** (current stable): both suites rebuilt for PE, AArch64 musl and a
+  new target, **AArch64 glibc** (dynamically linked, the default Linux target), every profile.
+  `pytest tests`: 232 passed, 0 failed (x86-64 ELF skipped on an AArch64 host).
+- **Windows**: `recover.py` on the 18 stripped scatter PE files recovers **120/120** strings
+  with 0 extra; FLOSS 3.2.0 on the same machine and files decodes **0**.
+- Development container, rustc 1.97: 289 tests pass.
+
+The glibc build needed two emulator fixes — libgcc's outlined atomics (`__aarch64_cas4_acq` &
+co.) and a `write` import that must report success — see [VALIDATION.md §10b](VALIDATION.md).
 
 ---
 
