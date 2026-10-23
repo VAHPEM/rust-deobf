@@ -44,7 +44,7 @@ from bisect import bisect_right
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from disasm import linear  # noqa: E402
+from disasm import Insns, linear  # noqa: E402
 
 MAX_LEN = 4096
 TABLE = "table"   # callee marker for lookup-table pairs
@@ -184,7 +184,7 @@ def _x86_pairs(binary, insns, strs: _Ranges, base: int):
     from recover_callsite import _canon_reg, rip_target
     nxt = WIN64_NEXT if binary.format.name == "PE" else SYSV_NEXT
     n_ins = len(insns)
-    addr_index = {ins.address: k for k, ins in enumerate(insns)}
+    addr_index = insns.index_map()
 
     def writes(pj, reg):
         try:
@@ -372,7 +372,7 @@ def _arm64_pairs(insns, strs: _Ranges):
     from capstone import CS_OP_IMM, CS_OP_REG
     from recover_arm64 import _resolve_pageadd, _rn
     n_ins = len(insns)
-    addr_index = {ins.address: k for k, ins in enumerate(insns)}
+    addr_index = insns.index_map()
     for i, ins in enumerate(insns):
         if ins.mnemonic not in ("add", "adr") or not ins.operands or ins.operands[0].type != CS_OP_REG:
             continue
@@ -421,7 +421,7 @@ def code_pairs(binary, strs: _Ranges, base: int):
     for s in binary.sections:
         if s.name != ".text":
             continue
-        insns = list(linear(md, bytes(s.content), base + s.virtual_address))
+        insns = Insns(md, bytes(s.content), base + s.virtual_address)
         if arm:
             yield from _arm64_pairs(insns, strs)
             yield from _pair_tables(_arm64_indexed_loads(insns), img, strs)

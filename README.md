@@ -43,6 +43,20 @@ profiles that exposed the problem, so it cannot silently overfit again:
 `tests/test_scatter.py` holds recall **and precision** on all of it in CI (one job per
 format).
 
+### Second round: what the first round still overfitted
+
+Re-evaluating the result the same way turned up three more problems
+([VALIDATION.md §11](VALIDATION.md)):
+
+| finding | before | now |
+|---|:-:|:-:|
+| build profiles nobody tuned for (3 sets, 256 binaries) | 98–99 % exact, +18 junk | **1360/1360**, 0 junk (see below for what that number means) |
+| real binaries outside the development set: Xvfb (C) / age (Go) | 68 / 17 false positives | **1 / 2**; 29 on a 21-binary corpus |
+| cargo, gdb, cmake | killed at 5.5–6 GB of memory | run: gdb 0.5 GB, cargo (19 MB `.text`) ≈1.1 GB per process |
+| gdb's 15,760 functions in the 120 s budget | 136 emulated | ≈2,000 (2 CPUs) |
+
+A CI job now measures false positives on a C/C++, Go and Rust corpus found on the runner.
+
 ---
 
 ## Results
@@ -89,13 +103,59 @@ isolated VM.
 decrypts when run with that variable set, and the key is not in the binary. `recover_cryptify`
 detects the crate and says so.</sub>
 
+### Build profiles nobody tuned for
+
+The benchmark's own programs rebuilt with release settings the benchmark never uses, stripped
+(`CARGO_PROFILE_RELEASE_*` overrides). Exact strings; `+n` = junk strings reported.
+
+| set | profiles | formats | first measured | now |
+|---|---|---|:-:|:-:|
+| 1 | `opt-level="s"` + thin LTO + 16 CGU + `panic=unwind`; `opt-level=1` | ELF, PE | 338/340 +7 | **340/340** +0 |
+| 2 | `opt-level=2`, 1 CGU, no LTO; `opt-level="z"`, no LTO, `panic=unwind` | ELF, PE, ARM64 musl | 500/510 +3 | **510/510** +0 |
+| 3 | `opt-level=3`, no LTO, 16 CGU, `panic=unwind`; `opt-level="s"`, fat LTO | ELF, PE, ARM64 glibc | 504/510 +8 | **510/510** +0 |
+
+Each set was built after the fixes for the previous one, measured once ("first measured": the
+honest held-out number, 98–99 % exact with a few junk strings), and then used to find and fix
+its failures — so the "now" column is no longer held-out. The next independent review will say
+how the current code does on what nobody has seen.
+
 ### Precision on real, unobfuscated binaries
 
-`scripts/measure_fp.py --pipeline` (static + emulation, default 120 s budget): **0** false
-positives on bash, tar, xz, git, curl and ripgrep 14.1.1. Small binaries are emulated completely
-(bash: all 2343 functions — the old code stopped at 400); git and ripgrep are covered in
-decoder-score order until the budget runs out (580/4473 and 365/8558 functions), which the output
-reports.
+`scripts/measure_fp.py --pipeline --corpus` (static + emulation, 120 s budget): every decoded
+string reported is a false positive. The corpus mixes C/C++, Go and Rust binaries, because the six
+binaries the filters were developed against (bash, tar, xz, git, curl, ripgrep: 0) overstated
+precision — Xvfb and a Go binary had 68 and 17 before this round.
+
+| binary | language | `.text` | functions emulated (120 s, 2 CPUs) | false positives |
+|---|---|--:|--:|:-:|
+| bash | C/C++ | 945 KB | 2343/2343 | **0** |
+| tar | C/C++ | 292 KB | 607/607 | **0** |
+| xz | C/C++ | 41 KB | 76/76 | **0** |
+| git | C/C++ | 3,077 KB | 4473/4473 | **0** |
+| curl | C/C++ | 107 KB | 121/121 | **0** |
+| gdb | C/C++ | 5,693 KB | 2022/15760 (budget) | **0** |
+| cmake | C/C++ | 9,318 KB | 4305/18830 (budget) | **1** |
+| Xvfb | C/C++ | 1,435 KB | 5038/5038 | **1** |
+| openssl | C/C++ | 415 KB | 535/535 | **0** |
+| perl | C/C++ | 1,858 KB | 2240/2240 | **3** |
+| python3.13 | C/C++ | 3,039 KB | 10767/11510 (budget) | **0** |
+| vim | C/C++ | 3,110 KB | 5302/5302 | **7** |
+| age | Go | 1,631 KB | 2353/2353 | **2** |
+| gh | Go | 16,710 KB | 1718/13720 (budget) | **0** |
+| docker | Go | 13,379 KB | 1498/35916 (budget) | **1** |
+| go (toolchain) | Go | 6,351 KB | 2115/13835 (budget) | **2** |
+| ripgrep (Debian) | Rust | 3,075 KB | 4947/8530 (budget) | **3** |
+| rustfmt | Rust | 2,849 KB | 4545/4545 | **4** |
+| cargo-fmt | Rust | 874 KB | 1280/1280 | **0** |
+| cargo | Rust | 19,594 KB | 3528/43240 (budget) | **5** |
+| rustdoc | Rust | 5,894 KB | 8531/8531 | **0** |
+
+**29 false positives on 21 binaries** (C/C++ 12, Go 5, Rust 12); 11 have none. Not zero: what
+is left is text the program assembles at run time from its own pieces in ways the filters do not
+model (`File/Glob.pm`, `lib/rustlib/src/rust/`, a regex help line), symbol names with letters
+inserted as well as changed (``PyGIL`EmSure``), and a few reshuffles. Each is reported as decoded,
+so a result list on a non-obfuscated binary is not empty — but it is short, and the previous
+code reported 68 on Xvfb alone. Coverage grows with CPUs and `--time-budget`, and so can noise.
 
 ### Second machine, second toolchain
 
@@ -140,12 +200,17 @@ co.) and a `write` import that must report success — see [VALIDATION.md §10b]
   - *path exploration*: decoder-like functions are re-run with forward branches forced the
     other way, so strings built only in one `match` arm or on a branch that never runs are
     reached;
+  - *scheduling*: a first pass runs every function once with a small budget (most decoders
+    finish in a few thousand instructions), the second gives full budgets and explores; a run or
+    callee still writing text when its budget ends gets more; allocator wrappers and import stubs
+    run at any call depth; large binaries are split across processes;
   - *capture*: every store is tracked with its age; written bytes are read back before calls
     and on returns, extended through neighbouring written bytes and cut where writes of
     different ages meet (a short string written over a long one), and the (pointer, length)
     pairs the code passes on give the exact end of a Rust string.
   Reported: text-like strings (including indicator shapes) that are not in the file, not
-  stitched from static pieces or printf templates, and not artefacts of a forced path.
+  stitched from static pieces, printf templates or static text with numbers formatted in, and
+  not artefacts of a forced path or of out-of-order stores.
 - **Stack strings** (`recover_stackstrings.py`) and **Rust literals**
   (`recover_rust_strings.py`) — the plain strings, cut at their real (pointer, length)
   boundaries instead of `strings`' glued runs.
@@ -192,15 +257,19 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   inputs (a key from the network, a path that depends on the environment) can be missed; path
   exploration flips branches one at a time inside the function it starts from, within budgets
   (8 runs per function, instruction budgets per run and per callee).
-- **Large binaries need a larger time budget**: emulation is in Python-hooked Unicorn
-  (≈10–40 s for a small Rust binary); with the default 120 s budget a large binary is covered in
-  decoder-score order, not completely. The output reports the coverage.
+- **Large binaries are covered partly**: emulation runs Unicorn with Python hooks (≈30k
+  instructions/s per process). A first pass runs every function once with a small budget, a
+  second explores decoder-like functions, and binaries with 2,000+ functions are split over
+  processes (`RUST_DEOBF_WORKERS`), but within 120 s gdb (15,760 functions) is still covered only
+  in part (≈2,000 of its 15,760 functions on 2 CPUs). The output reports the coverage; give a larger `--time-budget` for more.
 - **Static recovery is idiom-bound** by design; it covers the release idioms of the benchmark
   crates. Under `size-lto` most keyed decoders are recovered by emulation, not statically.
 - **musl runtime signatures** describe the musl that current rustc bundles; another version may
   need `gen_runtime_sigs.py` re-run on an unstripped build.
 - **Custom-key cryptify** and anything keyed from the environment at run time needs dynamic
   recovery with that environment.
+- **Precision is good, not perfect**: 29 false positives on a 21-binary C/C++, Go and Rust
+  corpus (see Results) — run-time assembled text the filters do not model.
 - **Benign corpus only**: the benchmark is synthetic. It now covers the shapes and profiles the
   review asked for, but real malware will find shapes it does not — please report them.
 

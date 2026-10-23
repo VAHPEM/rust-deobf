@@ -676,3 +676,104 @@ fault instead of ending the run. Before → after on the glibc AArch64 canary pr
 `size-lto`: obfstr, litcrypt and litcrypt2 1/5 → 5/5. `ARM64_GNU=1 bash scripts/build_all.sh`
 builds this target (cross linker `aarch64-linux-gnu-gcc` when not on an AArch64 host) and CI has
 a job for it.
+
+## 11. Second evaluation: unseen profiles, a mixed-language corpus, large binaries (Oct 2026)
+
+A re-evaluation after §10 asked the same question of the new code that the external review had
+asked of the old: what happens on inputs nobody tuned for? Three findings, then the fixes.
+
+**Findings.**
+
+1. *Build profiles the benchmark never uses* (the benchmark's own programs rebuilt with release
+   overridden by `CARGO_PROFILE_RELEASE_*`, stripped, x86-64 ELF and PE): `opt-level="s"` + thin LTO +
+   16 codegen units + `panic=unwind`, and `opt-level=1`. 338/340 strings exact, 7 junk strings in 4
+   of 64 binaries: obfstr at `-O1` stores a string's 8-byte chunks to scratch out of order before
+   the final copy (`C:\ProgrSvc\stat`), litcrypt under thin LTO left `abravo::b`, a mutex came out as
+   `Global\NW-5c1e9a0`, one litcrypt2 PE string was dropped as a "partial" of a glued copy.
+2. *Precision on binaries the filters were not developed against*: rustfmt 0 and cargo-fmt 0, but
+   **age (Go) 17 and Xvfb (C) 68** false positives — run-time formatted messages
+   (`(EE) BUG: ../dix/devices.c:1367 in InitValuatorClassDeviceStruct()`,
+   `runtime: typeOff 0x40a120 base 0x0`). The "0 FP on six binaries" of §10 was true and overfitted:
+   those six were the development set.
+3. *Large binaries*: cargo (43 MB), gdb and cmake were killed by the out-of-memory killer at
+   5.5–6 GB. The static recoverers built `list(capstone.disasm(.text))` with full details,
+   about 1 GB per MB of `.text`. And emulation covered gdb's 15,760 functions at **136** in the
+   120 s budget: it explored the first decoder-like functions with full budgets and never reached
+   the rest.
+
+**Fixes.**
+
+| problem | fix |
+|---|---|
+| static stage memory | `disasm.Insns`: a compact table (address, size, mnemonic, operand text) from chunked `disasm_lite`; full capstone details decoded on demand for the few instructions a recogniser inspects. Identical output on all 58 release builds; git 3661 MB → 249 MB and faster; gdb 424 MB, cmake 672 MB |
+| capstone decodes a whole buffer before yielding | `linear()` walks 64 KB chunks (an instruction cut by a chunk boundary is decoded again at the next chunk's start; identical instruction stream on x86-64 and AArch64 `.text`) |
+| formatted messages reported | numbers (decimal, float, 0x-hex) are taken out and every remaining piece must be static on its own; a printf template in the file whose `%s` arguments are themselves file strings (`BUG: %s:%u in %s()`), behind a prefix of up to 8 static bytes; a message ≥ 90 % covered by static pieces of 4+ bytes. Checked against every expected string of all 320 benchmark binaries: none is explained away |
+| 136 of 15,760 functions | two passes: every function once, unforced, 10,000 instructions, in score order, using up to 40 % of the budget; then full budgets and path exploration. Plus processes for binaries with 2,000+ functions (`RUST_DEOBF_WORKERS`, default min(4, CPUs)), direct libunicorn register/memory accessors (the binding spends ~3 µs per register), and argument scans limited to the few calls after text was written |
+| out-of-order chunks, junk heads | a string made only of 2–5 non-contiguous pieces of another surviving string is a scramble of it |
+| `…5c1e9a` + `0`, an AEAD tag after a plaintext | a string complete in one function, followed by up to 8 characters in a copy from another function, keeps its length |
+| used prefix + another whole string (`…endpoint` + `canary::bravo::…`) | glued, not a longer string |
+| memcpy/realloc modelled by the emulator marked the whole copy as new | the copy keeps the source bytes' write ages, so a plaintext and the older tag bytes after it stay apart (muddy PE at `opt-level="z"`) |
+| `opt-level="z"` without inlining: allocators 8+ calls below a decoder hit the depth limit, `alloc` returned 0 | import jump stubs and functions that reach an allocation import within three calls run at any depth |
+| ChaCha20 at `opt-level="z"` runs past the per-run budget (only 2/5 decrypted) | a run or callee that is still writing text when its budget ends gets half a budget more, up to 3–4 times |
+| a decode attempt and the decode written side by side (`--skip-update-ch--skip-update-check`), or a forced string behind the start of another (`Mozilla/5.0 (Win` + `Software\…`) | a *stutter* (2–4 pieces of one string, longer than it) and a *glued head* (another string's piece in front of a recovered string) are dropped, and never serve as the yardstick that declares the real string garbled |
+| the stale/partial decisions depended on set iteration order (Python's per-process string hashing) and the first pass's extent on the machine's load | two rounds (all stale reasons, then partial views); a binary under 2,000 functions is always swept completely |
+| full coverage of large binaries exposed new noise: a static symbol name with a few bytes changed by a loop on fake arguments (vim: `PyFloau_Type`), a piece appended forever (`/usr/share/vimusr/share/vim…`), and one rustfmt function whose forced paths reshuffle .rodata (17 strings like `  secs in tarsihe phaseng pd `) | near-static strings (aligned to a file string, a quarter of the bytes or fewer differ, or a 60 % prefix does) are static; periodic text is degenerate; a function with 6+ forced-only strings, most of them 85 %+ file pieces, loses its forced-only strings that are 60 %+ file pieces |
+| the static recognisers decoded every call in full once per decoder | a direct-call index from the operand text (gh: 16 s, docker: 13 s for the static stage) |
+
+Every explanation rule was checked against the expected strings of all 488 benchmark binaries
+(both suites, every format and profile, rustc 1.97 and 1.99, and the three held-out sets below):
+none of them is explained away.
+
+**Re-measured.**
+
+| | before this round | now |
+|---|:-:|:-:|
+| set 1: `opt-level="s"` + thin LTO + 16 CGU + `panic=unwind`; `opt-level=1` (ELF, PE; 64 binaries) | 338/340, +7 junk | 340/340, +0 |
+| set 2: `opt-level=2`, 1 CGU; `opt-level="z"`, no LTO, `panic=unwind` (ELF, PE, ARM64 musl; 96) | 500/510, +3 *(first measured after the set-1 fixes)* | 510/510, +0 |
+| set 3: `opt-level=3`, no LTO, 16 CGU, `panic=unwind`; `opt-level="s"`, fat LTO (ELF, PE, ARM64 glibc; 96) | 504/510, +8 *(first measured after the set-2 fixes)* | 510/510, +0 |
+| canary + scatter suites, rustc 1.97 / 1.99 (`pytest tests`) | 289 / 149 passed | 289 / 149 passed |
+| static stage on git | 3661 MB | 249 MB |
+| cargo, gdb, cmake (whole pipeline) | out of memory (5.5–6 GB) | gdb 0.5 GB; cargo 1.0–1.1 GB per process |
+| gdb, functions emulated in 120 s | 136 / 15,760 | ≈2,000 / 15,760 (2 CPUs) |
+| Xvfb / age, false positives | 68 / 17 | 1 / 2 |
+
+The "first measured" figures are the held-out numbers: each set was built after the fixes for the
+previous one and measured once, then its failures were fixed too, so the "now" column is tuned.
+Set 3's failures were all obfstr under `opt-level="s"` with fat LTO (a string decoded right behind
+the start of another, and a decode attempt written next to the decode) and one tight-XOR view.
+
+**Precision on a mixed corpus** (`scripts/measure_fp.py --pipeline --corpus`, 120 s, 2 CPUs; also
+a CI job, informational):
+
+| binary | language | `.text` | functions emulated | false positives |
+|---|---|--:|--:|:-:|
+| bash | C/C++ | 945 KB | 2343/2343 | 0 |
+| tar | C/C++ | 292 KB | 607/607 | 0 |
+| xz | C/C++ | 41 KB | 76/76 | 0 |
+| git | C/C++ | 3,077 KB | 4473/4473 | 0 |
+| curl | C/C++ | 107 KB | 121/121 | 0 |
+| gdb | C/C++ | 5,693 KB | 2022/15760 | 0 |
+| cmake | C/C++ | 9,318 KB | 4305/18830 | 1 |
+| Xvfb | C/C++ | 1,435 KB | 5038/5038 | 1 |
+| openssl | C/C++ | 415 KB | 535/535 | 0 |
+| perl | C/C++ | 1,858 KB | 2240/2240 | 3 |
+| python3.13 | C/C++ | 3,039 KB | 10767/11510 | 0 |
+| vim | C/C++ | 3,110 KB | 5302/5302 | 7 |
+| age | Go | 1,631 KB | 2353/2353 | 2 |
+| gh | Go | 16,710 KB | 1718/13720 | 0 |
+| docker | Go | 13,379 KB | 1498/35916 | 1 |
+| go | Go | 6,351 KB | 2115/13835 | 2 |
+| ripgrep (Debian) | Rust | 3,075 KB | 4947/8530 | 3 |
+| rustfmt | Rust | 2,849 KB | 4545/4545 | 4 |
+| cargo-fmt | Rust | 874 KB | 1280/1280 | 0 |
+| cargo | Rust | 19,594 KB | 3528/43240 | 5 |
+| rustdoc | Rust | 5,894 KB | 8531/8531 | 0 |
+
+29 in all (C/C++ 12, Go 5, Rust 12), 11 binaries clean. One lesson worth recording: rustfmt had
+**0** when only 990 of its functions fitted in the budget, and 23 once all 4,545 did; coverage and
+noise grow together, so a precision figure means little without the coverage next to it. The
+remainder is text assembled at run time from the program's own pieces in ways the filters do not
+model (`File/Glob.pm`, `SV_YES:UNDEF`, `lib/rustlib/src/rust/`, `session 19700101T000000000Z-`),
+vim symbol names with letters inserted as well as changed, and a few reshuffles. Dropping those
+would take rules that also drop decoded indicators made of common words (`--skip-update-check`
+is three dictionary words), which is the wrong trade for this tool.

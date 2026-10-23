@@ -43,7 +43,9 @@ as well: the whole decrypt path is reachable from the function that uses them.
 """
 from __future__ import annotations
 from array import array
+import bisect
 import gc
+import os
 import json
 import re
 import string
@@ -55,7 +57,7 @@ from pathlib import Path
 
 import lief
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-from unicorn import (Uc, UcError, UC_ARCH_X86, UC_ARCH_ARM64, UC_MODE_64, UC_MODE_ARM,
+from unicorn import (Uc, UcError, UC_ERR_ARG, UC_ARCH_X86, UC_ARCH_ARM64, UC_MODE_64, UC_MODE_ARM,
                      UC_HOOK_BLOCK, UC_HOOK_MEM_WRITE, UC_HOOK_INSN, UC_HOOK_INTR,
                      UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
                      UC_HOOK_MEM_FETCH_UNMAPPED)
@@ -84,6 +86,7 @@ BRK = 0x60000000          # program break for brk()
 BUDGET = 40000            # instructions per run of one function
 FRAME_BUDGET = 20000      # instructions a direct callee (with everything below it) may use
 INNER_BUDGET = 6000       # ... and any deeper callee: a lock spinning in std is cut off there
+QUICK = 10000             # instructions per function in the first, sweeping pass
 MAX_DEPTH = 8             # call levels executed below the emulated function
 MAX_RUNS = 8              # runs per function (1 natural + forced-branch runs)
 WRITE_BUDGET = 1 << 21    # bytes one run may store
@@ -584,6 +587,39 @@ class _Writes:
             pg[o:o + n] = array("I", [g]) * n
             a += n
 
+    def copy(self, src, dst, n):
+        """A memcpy/realloc the emulator performed itself: the destination bytes keep the ages
+        of the source bytes (bytes never written -- static data -- count as written now).
+        Marking the whole copy as new would weld a decoded string to whatever older bytes
+        follow it in the block (an AEAD tag after the plaintext: `...data.bin` + `q`)."""
+        if n <= 0:
+            return
+        if n > 0x10000:
+            for o in range(0, n, 4096):
+                self.add(dst + o, min(n - o, 4096))
+            return
+        gens = array("I")
+        a, end = src, src + n
+        while a < end:
+            k = min(end - a, 4096 - (a & 0xfff))
+            pg = self.pages.get(a >> 12)
+            gens += pg[a & 0xfff:(a & 0xfff) + k] if pg is not None else array("I", bytes(4 * k))
+            a += k
+        g = self.gen
+        gens = array("I", [x or g for x in gens])
+        a, i, end = dst, 0, dst + n
+        while a < end:
+            k = min(end - a, 4096 - (a & 0xfff))
+            pg = self.pages.get(a >> 12)
+            if pg is None:
+                if len(self.pages) > 1 << 12:
+                    return
+                pg = self.pages[a >> 12] = array("I", bytes(4 * 4096))
+            pg[a & 0xfff:(a & 0xfff) + k] = gens[i:i + k]
+            self.dirty.append((a, k))
+            a += k
+            i += k
+
     def written(self, a):
         pg = self.pages.get(a >> 12)
         return bool(pg and pg[a & 0xfff])
@@ -658,6 +694,10 @@ class _Writes:
                 segs.append([i, i + 1, g])
         pieces, cur = [], segs[0][0]
         for a, b in zip(segs, segs[1:]):
+            # down: what follows is older (a stale tail). (Not up: a string decoded in chunks
+            # across captures -- `https://telemetry.northwind.exam` + `ple/api/v3/beacon` -- goes
+            # up too, so a new string stored right after an older one stays glued; the overlap
+            # rules deal with that.)
             if b[2] < a[2]:
                 pieces.append(run[cur:b[0]])
                 cur = b[0]
@@ -741,6 +781,60 @@ def _arm_classify(insn, address):
     return None
 
 
+def _fast_access(uc):
+    """Replace the binding's register and memory accessors on this instance with direct calls
+    into libunicorn. The Python binding classifies every register id and builds ctypes objects
+    on each call (~3 us per register); the hooks read registers at every call and return of
+    the emulated code, which made that the largest single cost on call-heavy C++ binaries.
+    Only 64-bit integer registers are read or written here."""
+    import ctypes
+    try:
+        from unicorn.unicorn_py3.unicorn import uclib
+        h = uc._uch
+    except Exception:
+        return
+    rd, wr, mr = uclib.uc_reg_read, uclib.uc_reg_write, uclib.uc_mem_read
+    one = ctypes.c_uint64()
+    one_p = ctypes.byref(one)
+    buf = ctypes.create_string_buffer(4096)
+    string_at = ctypes.string_at
+    slow_mem_read = uc.mem_read
+    batches = {}
+
+    def reg_read(reg_id, aux=None):
+        if rd(h, reg_id, one_p):
+            raise UcError(UC_ERR_ARG)
+        return one.value
+
+    def reg_write(reg_id, value):
+        one.value = value & 0xffffffffffffffff
+        if wr(h, reg_id, one_p):
+            raise UcError(UC_ERR_ARG)
+
+    def reg_read_batch(ids):
+        key = tuple(ids)
+        b = batches.get(key)
+        if b is None:
+            n = len(key)
+            vals = (ctypes.c_uint64 * n)()
+            ptrs = (ctypes.c_void_p * n)(*[ctypes.addressof(vals) + 8 * i for i in range(n)])
+            b = batches[key] = ((ctypes.c_int * n)(*key), vals, ptrs, ctypes.c_int(n))
+        regs, vals, ptrs, n = b
+        if uclib.uc_reg_read_batch(h, regs, ptrs, n):
+            raise UcError(UC_ERR_ARG)
+        return tuple(vals)
+
+    def mem_read(address, size):
+        if size > 4096:
+            return slow_mem_read(address, size)
+        err = mr(h, address, buf, size)
+        if err:
+            raise UcError(err)
+        return string_at(buf, size)
+
+    uc.reg_read, uc.reg_write, uc.reg_read_batch, uc.mem_read = reg_read, reg_write, reg_read_batch, mem_read
+
+
 class _Abort(Exception):
     pass
 
@@ -753,6 +847,8 @@ class Emulator:
         self.arm = img.arm
         self.uc = None
         self._blk = {}
+        self._thunks = {}
+        self._allocs = {}
         self._md_lite = Cs(CS_ARCH_X86, CS_MODE_64)
         if self.arm:
             self.SP, self.PC, self.RET = A.UC_ARM64_REG_SP, A.UC_ARM64_REG_PC, A.UC_ARM64_REG_X0
@@ -783,6 +879,7 @@ class Emulator:
                 uc.ctl_set_cpu_model(A.UC_CPU_ARM64_MAX)
             except Exception:
                 pass
+        _fast_access(uc)
         map_image(uc, self.img.binary)
         uc.mem_map(TRAMP, TRAMP_SIZE)
         ret = b"\xc0\x03\x5f\xd6" if self.arm else b"\xc3"
@@ -962,8 +1059,8 @@ class Emulator:
                     try:
                         uc.mem_write(p, bytes(uc.mem_read(ptr, k)))
                         self._touch(p, k)
-                        for o in range(0, k, 4096):
-                            self.writes.add(p + o, min(k - o, 4096))
+                        self.writes.copy(ptr, p, k)
+                        self.text_writes += 1
                     except UcError:
                         pass
                 return p
@@ -977,8 +1074,8 @@ class Emulator:
                     data = bytes(uc.mem_read(s, k))
                     uc.mem_write(d, data)
                     self._touch(d, k)
-                    for o in range(0, k, 4096):
-                        self.writes.add(d + o, min(k - o, 4096))
+                    self.writes.copy(s, d, k)
+                    self.text_writes += 1
                 return d
             if n in ("memset", "memset_chk"):
                 d, c, k = arg(0), arg(1) & 0xff, arg(2)
@@ -1066,6 +1163,18 @@ class Emulator:
     def _on_write(self, uc, access, address, size, value, _):
         self.writes.add(address, size)
         self.wrote += size
+        # did printable text get written? (a new (pointer, length) string needs some)
+        if size > 8:
+            self.text_writes += 1          # the hook sees only 8 bytes of a wider store
+            self.last_text_at = self.count
+        else:
+            v = value & ((1 << (8 * size)) - 1)
+            while v:
+                if 0x20 <= (v & 0xff) <= 0x7e:
+                    self.text_writes += 1
+                    self.last_text_at = self.count
+                    break
+                v >>= 8
         if self.wrote > WRITE_BUDGET:
             # `rep stos`/`rep movs` over a fake length counts as one instruction but writes
             # megabytes, one hook call per element: stop the run instead
@@ -1129,28 +1238,39 @@ class Emulator:
         uc = self.uc
         if self.writes.gen == self._args_gen:
             return                       # nothing written since the last look: nothing new
+        # a string is passed on within a few calls of being written (decode, then format or
+        # copy it); a loop of calls with no new text costs nothing after that
+        if self.text_writes != self._args_text:
+            self._args_text = self.text_writes
+            self._args_left = 8
+        elif self._args_left <= 0:
+            return
+        self._args_left -= 1
         self._args_gen = self.writes.gen
         regs = list(uc.reg_read_batch(self.ARGS[:6]))
+        try_str, plausible = self._try_str, self._plausible
         for a, b in zip(regs, regs[1:]):
-            self._try_str(a, b)
-        seen, budget = set(), [48]
-
-        def walk(p, depth):
-            if depth == 0 or budget[0] <= 0 or p in seen or not self._plausible(p):
-                return
+            if 6 <= b <= 4096:
+                try_str(a, b)
+        # depth-first, the same order as a recursive walk, without a Python call per value
+        seen, budget = set(), 48
+        stack = [(r, 3) for r in reversed(regs) if plausible(r)]
+        unpack, read = struct.Struct("<8Q").unpack, uc.mem_read
+        while stack and budget > 0:
+            p, depth = stack.pop()
+            if p in seen:
+                continue
             seen.add(p)
-            budget[0] -= 1
+            budget -= 1
             try:
-                q = struct.unpack("<8Q", uc.mem_read(p, 64))
+                q = unpack(read(p, 64))
             except UcError:
-                return
-            for a, b in zip(q, q[1:]):
-                self._try_str(a, b)
-            for v in q:
-                walk(v, depth - 1)
-
-        for r in regs:
-            walk(r, 3)
+                continue
+            for k in range(7):
+                if 6 <= q[k + 1] <= 4096:
+                    try_str(q[k], q[k + 1])
+            if depth > 1:
+                stack.extend((v, depth - 1) for v in reversed(q) if v not in seen and plausible(v))
 
     def _on_return(self):
         if self.frames:
@@ -1181,13 +1301,80 @@ class Emulator:
         if TRAMP <= address < TRAMP + TRAMP_SIZE:
             self.frames.append(call)            # popped by the trampoline's `ret`
             return False
-        if img.executable(address) and len(self.frames) < MAX_DEPTH:
+        if img.executable(address) and (len(self.frames) < MAX_DEPTH or self._import_thunk(address)
+                                        or address in img.named or self._allocator(address)):
+            # (past the depth limit, still take a jump stub to an import or a modelled runtime
+            # function: without code inlined, `alloc` is 8+ calls below a decoder, and an
+            # allocation returning 0 ends in handle_alloc_error)
             self.frames.append(call)
             return False
         # too deep, or a call through a pointer the image never set (0, garbage): return 0
         self._capture()
         self._unwind(call)
         return True
+
+    def _extend(self, frame):
+        """Give a callee that is still writing text another half budget, up to four times."""
+        if self.count - self.last_text_at < 2000 and frame.get("ext", 0) < 4:
+            frame["ext"] = frame.get("ext", 0) + 1
+            frame["start"] += INNER_BUDGET // 2
+            return True
+        return False
+
+    def _import_thunk(self, address):
+        """Is `address` a jump stub to an import (`jmp [rip+slot]` / adrp+ldr+br x16)? Returns
+        the import's name ("?" when it cannot be told), or "" when it is not a stub."""
+        hit = self._thunks.get(address)
+        if hit is None:
+            hit = ""
+            try:
+                if self.arm:
+                    w = struct.unpack("<3I", self.uc.mem_read(address, 12))
+                    if (w[0] & 0x9f00001f) == 0x90000010 and (w[2] & 0xfffffc1f) == 0xd61f0000:
+                        hit = "?"
+                else:
+                    b = bytes(self.uc.mem_read(address, 6))
+                    if b[:2] == b"\xff\x25":
+                        slot = address + 6 + struct.unpack("<i", b[2:])[0]
+                        tgt = struct.unpack("<Q", self.uc.mem_read(slot, 8))[0]
+                        if TRAMP <= tgt < TRAMP + TRAMP_SIZE:
+                            i = (tgt - TRAMP) // 16
+                            hit = self.img.tramp[i] if i < len(self.img.tramp) else "?"
+            except (UcError, struct.error):
+                hit = ""
+            self._thunks[address] = hit
+        return hit
+
+    def _allocator(self, address, depth=3):
+        """Does the function at `address` reach an allocation import (HeapAlloc, malloc, ...)
+        within `depth` direct calls or tail jumps of its first instructions? Those wrappers
+        (__rust_alloc -> __rdl_alloc -> HeapAlloc) run whatever the call depth: an allocation
+        that returns 0 sends the decoder into handle_alloc_error."""
+        key = (address, depth)
+        hit = self._allocs.get(key)
+        if hit is not None:
+            return hit
+        self._allocs[key] = False                  # (recursion guard)
+        alloc = set(_ALLOC) | {"calloc", "realloc", "heaprealloc", "rust_realloc", "rdl_realloc"}
+        hit = False
+        name = self._import_thunk(address) or self.img.named.get(address, "")
+        if name and _norm(name) in alloc:
+            hit = True
+        elif depth > 0:
+            try:
+                code = bytes(self.uc.mem_read(address, 96))
+            except UcError:
+                code = b""
+            for a, sz, mn, ops in self.img.md.disasm_lite(code, address):
+                if mn in ("call", "jmp", "bl", "b") and ops.startswith(("0x", "#0x")):
+                    t = int(ops.lstrip("#"), 16)
+                    if t != address and self.img.executable(t) and self._allocator(t, depth - 1):
+                        hit = True
+                        break
+                if mn in ("ret",):
+                    break
+        self._allocs[key] = hit
+        return hit
 
     def _unwind(self, frame):
         uc = self.uc
@@ -1264,9 +1451,16 @@ class Emulator:
                         self.covered.add((pa, address == tgt))
         if self.frames:
             if self.count - self.frames[0]["start"] > FRAME_BUDGET:
-                self._abandon()
-                return
-            if len(self.frames) > 1 and self.count - self.frames[-1]["start"] > INNER_BUDGET:
+                f0 = self.frames[0]
+                if self.count - self.last_text_at < 2000 and f0.get("ext", 0) < 4:
+                    # still writing text (a decoder that is slow, not stuck): a bit longer
+                    f0["ext"] = f0.get("ext", 0) + 1
+                    f0["start"] += FRAME_BUDGET // 2
+                else:
+                    self._abandon()
+                    return
+            if len(self.frames) > 1 and self.count - self.frames[-1]["start"] > INNER_BUDGET and \
+                    not self._extend(self.frames[-1]):
                 # the innermost callee overran (a spinning lock, a loop over a fake length):
                 # return 0 from it and let its caller -- the decoder -- carry on
                 self._unwind(self.frames.pop())
@@ -1312,13 +1506,19 @@ class Emulator:
 
     # ---- running a function ----------------------------------------------------------------
 
-    def run(self, func_va, size, plan=None):
-        """Emulate one function once, forcing the branches in `plan` ({addr: taken}).
+    def run(self, func_va, size, plan=None, budget=None):
+        """Emulate one function once, forcing the branches in `plan` ({addr: taken}), for at
+        most `budget` instructions (BUDGET).
 
         Returns (strings, branches seen, (branch, direction) pairs covered)."""
+        budget = budget or BUDGET
         self._reset()
         self.writes = _Writes()
         self._args_gen = -1
+        self._args_text = -1
+        self._args_left = 0
+        self.text_writes = 0
+        self.last_text_at = -BUDGET
         self.wrote = 0
         self.strings = set()
         if not getattr(self, "keep_exact", False):
@@ -1335,11 +1535,23 @@ class Emulator:
         self.lo, self.hi = func_va, func_va + size
         pc = BASE + func_va
         faults = {}
+        extend = 3 if budget >= BUDGET else 0
         for _ in range(64):
             try:
                 self.fault = False
-                self.uc.emu_start(pc, 0, timeout=0, count=max(1, BUDGET - self.count))
+                self.uc.emu_start(pc, 0, timeout=0, count=max(1, budget - self.count))
                 if not self.fault:
+                    # out of instructions while still writing text (a cipher decrypting one
+                    # string after another, e.g. ChaCha20 at opt-level="z" with nothing
+                    # inlined): carry on, a few times
+                    if extend and self.count >= budget - 64 and \
+                            self.count - self.last_text_at < BUDGET // 4:
+                        extend -= 1
+                        budget += BUDGET // 2
+                        self._capture()
+                        self.prev = None           # resumed mid-block: no pending terminator
+                        pc = self.uc.reg_read(self.PC)
+                        continue
                     break
                 raise UcError(0)
             except UcError:
@@ -1347,7 +1559,7 @@ class Emulator:
                 # that callee and return 0 to its caller. A call from the emulated function that
                 # keeps faulting (a panic unwinding through std) is abandoned as a whole. A fault
                 # in the function itself ends the run.
-                if not self.frames or self.count >= BUDGET:
+                if not self.frames or self.count >= budget:
                     break
                 self._capture()
                 self.prev = None
@@ -1554,6 +1766,7 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
     all, or only in many short pieces.
     """
     templates = []
+    typed = []
     mid = []
     _normalized = []
 
@@ -1611,11 +1824,76 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
             cache[st] = _explained(st)
         return cache[st]
 
-    def _explained(st):
+    def typed_output(b):
+        """A printf template in the file filled with static arguments: `BUG: %s:%u in %s()` with
+        `%s` = a source path and a function name that are both in the file and `%u` a number,
+        perhaps behind a short logger prefix (`(EE) `). Unlike printf_output the literal part
+        may be small, because every `%s` argument must itself be a string of the file."""
+        if not typed:
+            for m in re.finditer(rb"[\x20-\x7e]{6,200}", file_bytes):
+                t = m.group()
+                if b"%" not in t:
+                    continue
+                dirs = list(_FMT_DIRECTIVE.finditer(t))
+                if not dirs or not any(d.group().endswith(b"s") for d in dirs):
+                    continue
+                lits = _FMT_DIRECTIVE.split(t)
+                if len(lits[0].strip()) < 3:
+                    continue
+                body = b""
+                for lit, d in zip(lits, dirs + [None]):
+                    body += re.escape(lit)
+                    if d is not None:
+                        body += b"(.{0,160}?)" if d.group().endswith(b"s") else \
+                            b"([-+]?(?:0x)?[0-9a-fA-F.]{0,24})"
+                typed.append((lits[0].rstrip(b"\n"), re.compile(body.rstrip(b"\n"), re.S),
+                              [d.group().endswith(b"s") for d in dirs]))
+            typed.append((None, None, None))
+        for lit0, rx, kinds in typed:
+            if lit0 is None or lit0 not in b:
+                continue
+            for m in rx.finditer(b):
+                pre, post = b[:m.start()], b[m.end():]
+                if len(pre) > 8 or len(post) > 8:
+                    continue
+                if any(x.strip() and x.strip() not in file_bytes for x in (pre, post)):
+                    continue
+                args = [g for g, is_s in zip(m.groups(), kinds) if is_s]
+                if all(len(a) <= 2 or a in file_bytes for a in args) and \
+                        sum(len(a) for a in args) < len(b):
+                    return True
+        return False
+
+    def formatted(b):
+        """Static text with numbers formatted in at run time: `(EE) BUG: dix/devices.c:1367 in
+        InitValuatorClassDeviceStruct()` (a line number), `runtime: typeOff 0x40a120 base 0x0`
+        (Go's runtime printing fake values). Numbers are taken out and every piece of text
+        between them must be static on its own. Text must make up most of the candidate, so an
+        address (`10.66.12.7:8443`) or a version-stamped name is never explained this way."""
+        parts = _NUMBER.split(b)
+        if len(parts) < 2:
+            return False
+        text = [x for x in parts if x.strip()]
+        n_text = sum(len(x) for x in text)
+        if n_text < 0.6 * len(b) or not any(len(x.strip()) >= 6 for x in text):
+            return False
+        for x in text:
+            y = x.strip()
+            if len(y) < 3 or y in file_bytes:
+                continue
+            if not _explained(y.decode("ascii", "ignore"), numbers=False):
+                return False
+        return True
+
+    def _explained(st, numbers=True):
         b = st.encode("ascii", "ignore")
         if b in file_bytes:
             return True
         if printf_output(st):
+            return True
+        if numbers and formatted(b):
+            return True
+        if numbers and typed_output(b):
             return True
         # a fake argument the emulator passed (out-pointers point into SCRATCH) that the code
         # formatted into text, e.g. "/proc/self/fd/268468224"
@@ -1627,9 +1905,13 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
         if len(stem) >= 6 and len(stem) < len(b) and stem in file_bytes:
             return True
         # static words joined at run time (a flag list: `--file -f --after-context -A`)
-        toks = b.split()
-        if len(toks) >= 3 and all((len(t) >= 2 and t in file_bytes) or
-                                  (len(t) == 1 and not t.isalnum()) for t in toks):
+        # (a word may carry punctuation glued on, `NUM,` / `--after-context=`, and up to two
+        # one-letter words fill a template: `complete -c rg -s C -l context -d '`)
+        toks = [t.strip(b",=;:'\"()") for t in b.split()]
+        words = [t for t in toks if len(t) >= 2]
+        letters = [t for t in toks if len(t) == 1 and t.isalnum()]
+        if len(toks) >= 3 and len(words) >= 3 and len(letters) <= 2 and \
+                all(t in file_bytes for t in words):
             return True
         if len(b) > 160:
             # long text (help screens, formatted messages): judge it by its windows instead of an
@@ -1677,12 +1959,90 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
         long = [p for p in pieces if p >= 6]
         if long and sum(long) >= 0.75 * n and len(pieces) - len(long) <= 2 * len(long) + 1:
             return True
+        # a static message inside a logger's decoration (`(EE) ` + message + `(EE) `, the prefix
+        # itself assembled from `(EE)` and a space): almost all of it is pieces of 4+ bytes, one
+        # of them long
+        if max(pieces) >= 12 and sum(p for p in pieces if p >= 4) >= 0.9 * n:
+            return True
         # a static identifier re-cased or re-punctuated at run time (git's BAD_DATE_OVERFLOW
         # reported as badDateOverflow)
         k = _norm_text(b)
-        return len(k) >= 8 and k in normalized()
+        if len(k) >= 8 and k in normalized():
+            return True
+        return near_static(b) or static_scramble(b)
+
+    def static_scramble(b):
+        """Pieces of nearby static text interleaved or overlapping (`clocclock_gek_gettimttime`
+        from two copies of `clock_gettime`; long runs of .rodata shuffled by a copy routine
+        running on fake lengths): most of the candidate is 4+ byte file pieces that sit within
+        a few KB of each other in the file and go backwards or overlap there, which a string
+        written in one piece never does."""
+        n = len(b)
+        if n < 12:
+            return False
+        i, prev, hit = 0, None, 0
+        while i < n:
+            k = 0
+            while i + k < n and b[i:i + k + 1] in file_bytes:
+                k += 1
+            if k < 4:
+                i += max(k, 1)
+                prev = None
+                continue
+            piece = b[i:i + k]
+            # the occurrence nearest the previous piece (short pieces occur in many places)
+            occ, j = [], file_bytes.find(piece)
+            while j >= 0 and len(occ) < 32:
+                occ.append(j)
+                j = file_bytes.find(piece, j + 1)
+            here = min(occ, key=lambda o: abs(o - prev[1])) if prev else occ[0]
+            if prev is not None and abs(here - prev[1]) < 4096 and here < prev[1]:
+                hit += k + (prev[2] if prev[2] else 0)     # backwards or overlapping: both count
+                prev = (here, here + k, 0)
+            else:
+                prev = (here, here + k, k)
+            i += k
+        return hit >= 0.7 * n
+
+    def near_static(b):
+        """A static string with a few bytes changed: a loop running on fake arguments over the
+        symbol table (`PyFloau_Type`, `PyBytes_AsStringAodRIze` from vim's .dynstr). Aligned on a
+        4-byte anchor, at most a quarter of the bytes (2 for short ones) differ."""
+        n = len(b)
+        if n < 8:
+            return False
+        allow = max(2, n // 4)
+        for i in sorted({0, n // 2 - 2, n - 4}):
+            anchor = b[i:i + 4]
+            j, seen = file_bytes.find(anchor), 0
+            while j >= 0 and seen < 16:
+                seen += 1
+                st = j - i
+                if st >= 0:
+                    ref = file_bytes[st:st + n]
+                    if len(ref) == n and sum(x != y for x, y in zip(b, ref)) <= allow:
+                        return True
+                    # ... or most of it, then junk (`PyRun_SimrleStrin` + `uhnNHome`): the longest
+                    # aligned prefix with a quarter of its bytes changed covers 60%+
+                    miss, best = 0, 0
+                    for m, (x, y) in enumerate(zip(b, ref), 1):
+                        miss += x != y
+                        if miss <= max(1, m // 4):
+                            best = m
+                    if best >= 10 and best >= 0.6 * n:
+                        return True
+                j = file_bytes.find(anchor, j + 1)
+        return False
 
     return explained
+
+
+# a number formatted into text: decimal, float with exponent, 0x-hex, a bare hex run at the very
+# start of a view (`40a138, newval=`), digits inside an identifier (`CMP0008`). The text around
+# the numbers must be static piece by piece, so `Win64` + `NorthwindAgent/2.1` is not explained
+_NUMBER = re.compile(rb"^(?=[0-9a-fA-F]*\d)[0-9a-fA-F]+(?![A-Za-z0-9_])"
+                     rb"|(?<![A-Za-z0-9_])[-+]?(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:e[-+]?\d+)?)"
+                     rb"|\d+")      # (and digits inside an identifier: `CMP0008`)
 
 
 _EMULATOR_VALUES = tuple(
@@ -1707,35 +2067,94 @@ def _drop_overlap_artifacts(records):
     texts = {r["string"] for r in records}
     exact = {r["string"] for r in records if r.get("exact")}
     used = {r["string"] for r in records if r.get("used")}
-    stale, partial = set(), set()
+    funcs = {}
+    for r in records:
+        funcs.setdefault(r["string"], set()).add(r.get("function"))
+    natural_ = {r["string"] for r in records if not r.get("forced")}
+    stale, partial, whole_tails = set(), set(), set()
     # a string the code used at a known length, followed by more text in memory: that text is a
     # stale tail from an earlier, longer string in the same buffer
     for p in exact:
         for s in texts:
             if s != p and s.startswith(p) and s not in exact:
                 stale.add(s)
-    for p in texts:
-        if len(p) < 6:
+    # where a piece of text occurs among the recovered strings (a joined pool searched with
+    # str.find: thousands of strings on a large binary made the pairwise scans cubic)
+    order_ = sorted(texts)
+    pool_ = "\0".join(order_)
+    starts_ = []
+    pos = 0
+    for t in order_:
+        starts_.append(pos)
+        pos += len(t) + 1
+    holders_ = {}
+
+    def holders(piece):
+        """The recovered strings that contain `piece`."""
+        got = holders_.get(piece)
+        if got is None:
+            got, i = set(), pool_.find(piece)
+            while i >= 0:
+                k = bisect.bisect_right(starts_, i) - 1
+                got.add(order_[k])
+                i = pool_.find(piece, starts_[k] + len(order_[k]) + 1) if k + 1 < len(order_) else -1
+            holders_[piece] = got
+        return got
+
+    # Pairs (P, S = P + tail), decided in two rounds so the outcome does not depend on the
+    # order sets iterate in: first every reason S is stale, then which P are partial views.
+    by_prefix = {}
+    for q in order_:
+        by_prefix.setdefault(q[:6], []).append(q)
+    pairs = []
+    for p in order_:
+        if len(p) >= 6:
+            ext = [q for q in by_prefix.get(p[:6], ()) if q != p and q.startswith(p)]
+            if len(ext) > 64:              # (a pathological chain of views: the nearest 64)
+                ext = sorted(sorted(ext, key=len)[:64])
+            pairs += [(p, q) for q in ext]
+    for p, q in pairs:
+        if q in stale or (q in used and p not in exact):
             continue
-        for s in texts:
-            if s == p or not s.startswith(p) or s in stale:
-                continue
-            if s in used and p not in exact:
-                partial.add(p)                 # the code used s at its full length
-                continue
-            tail = s[len(p):]
-            # a tail of a few characters is a buffer still being decoded byte by byte, not a stale
-            # piece of another string (stale tails are cut by write age in _Writes._split)
-            if len(tail) >= 4 and \
-                    any(tail in o and o not in (s, tail) and not o.startswith(p) for o in texts):
-                stale.add(s)
-            elif p not in exact:
-                partial.add(p)
+        tail = q[len(p):]
+        # P complete in a function of its own and S = P + a few characters from another
+        # function: not a decode seen half-way (that is one buffer, one function) but P's
+        # bytes followed by stray bytes (`Global\NW-5c1e9a` + `0`, an AEAD tag's `&8fq`)
+        # (four to eight characters only when they look like noise: `&8fq` is, `/2.1` -- the
+        # end of a user agent whose start another function decoded -- is not)
+        if (len(tail) <= 3 or (len(tail) <= 8 and any(c in _JUNK for c in tail))) and \
+                p in natural_ and q not in used and q not in exact and not (funcs[p] & funcs[q]):
+            stale.add(q)
+        # the code passed P on at its length and the rest is another recovered string as a
+        # whole (`...config-endpoint` + `canary::bravo::...`): two strings side by side
+        elif p in used and len(tail) >= 4 and tail in texts and q not in used:
+            stale.add(q)
+        # a tail that is a piece of another string (not of S itself); a tail of a few characters
+        # is a buffer still being decoded byte by byte (stale tails are cut by write age in
+        # _Writes._split)
+        elif len(tail) >= 4 and any(o not in (q, tail) and not o.startswith(p) and o not in q
+                                    for o in holders(tail)):
+            stale.add(q)
+            if tail in natural_:
+                whole_tails.add(tail)      # S = junk + a string found on its own: keep that one
+    for p, q in pairs:
+        if p not in exact and (q in used or q not in stale):
+            partial.add(p)                 # S, longer, is the string; P a view of it half-done
     garbled = set()
+    # strings that repeat a piece of themselves (`--skip-update-ch--skip-update-ch`): junk, and
+    # no yardstick for telling other strings garbled
+    def repeats(t):
+        grams = [t[i:i + 6] for i in range(len(t) - 5)]
+        return len(set(grams)) < len(grams)
+    stutters = {y for y in texts if repeats(y)        # (y's first piece is inside z)
+                and any(z != y and len(z) < len(y) and _stutter_of(y, z) for z in holders(y[:6]))}
+    by5 = {}
+    for t in order_:
+        by5.setdefault(t[:5], []).append(t)
     for x in texts:
-        for y in texts:
-            if x == y or y.startswith(x) or x.startswith(y):
-                continue
+        for y in by5.get(x[:5], ()):                # (every rule below needs 5+ shared characters)
+            if x == y or y.startswith(x) or x.startswith(y) or x in y or y in stutters:
+                continue          # (x inside y: a piece of y, not a garbled copy of it)
             if len(y) < len(x) or (len(y) == len(x) and y not in used):
                 continue
             k = 0
@@ -1757,7 +2176,9 @@ def _drop_overlap_artifacts(records):
         if len(f) < 8:
             garbled.add(f)    # short text only a forced path built (`lib`+`map`): too little evidence
             continue
-        for n in natural | used:
+        # (candidates: strings sharing f's first 5 characters, or containing its first 8)
+        cands = [n for n in by5.get(f[:5], ()) + sorted(holders(f[:8])) if n in natural or n in used]
+        for n in cands:
             k = 0
             while k < min(len(f), len(n)) and f[k] == n[k]:
                 k += 1
@@ -1786,30 +2207,268 @@ def _drop_overlap_artifacts(records):
             if len(y) < 12 or x == y:
                 continue
             m = len(x) - 1
-            while m >= 12 and y.find(x[:m], 1) < 0:
+            while m >= 8 and y.find(x[:m], 1) < 0:
                 m -= 1
-            # (inside, not at the start: a used prefix of x is the decode seen half-way through)
-            if m >= 12 and 0 < len(x) - m <= 3:
+            # (inside, not at the start: a used prefix of x is the decode seen half-way through;
+            # a short view needs less: `ture-fla` + `eett`)
+            if (m >= 12 and 0 < len(x) - m <= 3) or (m >= 8 and len(x) <= 12 and 0 < len(x) - m <= 4):
                 garbled.add(x)
                 break
-    drop = stale | partial | garbled | padded
-    drop |= {t for t in texts - used - exact for s in stale if t != s and s.endswith(t)}
+    # glued: another recovered string with a piece of yet another one in front of it
+    # (`Mozilla/5.0 (Win` + `Software\Northwind\Agent\Settings`, `https://` + `--skip-update-ch`
+    # + `--skip-update-check`): a string decoded right behind the start of an older one
+    glued = set()
+    pool = pool_
+    for x in texts - used - exact:
+        for u in (x[-k:] for k in range(len(x) - 3, 7, -1)):
+            if u not in texts:
+                continue
+            # (only a forced-path string, or a whole string the code used: a natural string
+            # ending in a suffix seen on its own is usually that string, `...x64) NorthwindAgent/2.1`)
+            if x in natural_ and u not in used and u not in exact and \
+                    not any(x[:-len(u)].endswith(u[:k]) for k in range(6, len(u))):
+                continue      # (unless u stutters: a piece of u right before u itself)
+            h = x[:-len(u)]
+            others = pool.replace(x, "")
+            # the head: one or two pieces (3+ characters) of other recovered strings
+            if h in others or any(h[:i] in others and h[i:] in others
+                                  for i in range(3, len(h) - 2)):
+                glued.add(x)
+                break
+    drop = stale | partial | garbled | padded | glued
+    drop |= {t for t in texts - used - exact - whole_tails for s in stale if t != s and s.endswith(t)}
+    if os.environ.get("RUST_DEOBF_DEBUG_OVERLAP"):
+        for name, st in (("stale", stale), ("partial", partial), ("garbled", garbled), ("padded", padded)):
+            for t in sorted(st):
+                print(f"[overlap] {name}: {t!r}", file=sys.stderr)
     keep = [r for r in records if r["string"] not in drop]
     alive = {r["string"] for r in keep}
+    # a scramble of a surviving string: its pieces stored to scratch in another order or with
+    # gaps before the final copy (`C:\Progr` + `Svc\stat` from `C:\ProgramData\NorthwindSvc\
+    # state.db`, `a` + `bravo::b`), seen at -O1 and with thin LTO
+    scrambled = {x for x in alive - used - exact
+                 if any(len(y) > len(x) and _scramble_of(x, y) for y in alive if y != x)}
+    # a stutter: a string followed by a repeat of (a piece of) itself (`--skip-update-ch` +
+    # `--skip-update-check`), a decode attempt and the decode written side by side
+    scrambled |= (stutters & alive) - used - exact
+    alive -= scrambled
+    keep = [r for r in keep if r["string"] in alive]
     return [r for r in keep if not any(o != r["string"] and r["string"] in o for o in alive)]
+
+
+def _static_share(b, file_bytes, min_piece=4):
+    """Fraction of `b` made of file substrings of `min_piece`+ bytes (greedy, left to right)."""
+    n, i, c = len(b), 0, 0
+    while i < n:
+        k = 0
+        while i + k < n and b[i:i + k + 1] in file_bytes:
+            k += 1
+        if k >= min_piece:
+            c += k
+        i += max(k, 1)
+    return c / n if n else 0.0
+
+
+def _drop_junk_factories(records, file_bytes, many=6, share=0.85):
+    """A function whose forced paths produce many strings, most of them reshuffled static text
+    (rustfmt: one function, 17 strings like `  secs in tarsihe phaseng pd `, a sort or copy
+    routine running on fake lengths over .rodata). Its forced-only strings that are 85%+ pieces
+    of the file go. A decoder with many `match` arms still keeps them: decoded text is not made
+    of the file's own pieces."""
+    forced = {}
+    for r in records:
+        if r.get("forced") and not r.get("used"):
+            forced.setdefault(r["function"], []).append(r)
+    junk = set()
+    for fva, rs in forced.items():
+        if len(rs) < many:
+            continue
+        shares = {r["string"]: _static_share(r["string"][:400].encode("ascii", "ignore"), file_bytes)
+                  for r in rs}
+        if 2 * sum(1 for v in shares.values() if v >= share) >= len(rs):
+            # a factory of reshuffled text: its other forced-only strings that are mostly file
+            # pieces too (60%+) are more of the same
+            junk.update(st for st, v in shares.items() if v >= 0.6)
+    return [r for r in records if r["string"] not in junk]
+
+
+def _stutter_of(x, y, min_piece=6):
+    """x is 2-4 pieces of y, each 6+ characters, longer than y altogether: y written more
+    than once in a row, or a piece of it and then all of it."""
+    if len(x) <= len(y) or len(y) < 8:
+        return False
+    n = len(x)
+    best = [None] * (n + 1)
+    best[n] = []
+    for i in range(n - 1, -1, -1):
+        k = 1
+        while i + k <= n and x[i:i + k] in y:
+            k += 1
+        for L in range(k - 1, min_piece - 1, -1):
+            rest = best[i + L]
+            if rest is not None and (best[i] is None or len(rest) + 1 < len(best[i])):
+                best[i] = [L] + rest
+    pieces = best[0]
+    return bool(pieces) and 2 <= len(pieces) <= 4
+
+
+_JUNK = set("&()`~^|{}[]<>!$#@*+=\"';,")
+
+
+def _scramble_of(x, y, min_piece=4):
+    """x is made entirely of 2+ pieces of y that are not contiguous in y: interior pieces of
+    `min_piece`+ characters, the first and last of any length, one of them 6+ long."""
+    if x in y or len(x) < 8:
+        return False
+    n = len(x)
+    # fewest pieces covering x, each a substring of y
+    best = [None] * (n + 1)
+    best[n] = []
+    for i in range(n - 1, -1, -1):
+        k = 1
+        while i + k <= n and x[i:i + k] in y:
+            k += 1
+        for L in range(k - 1, 0, -1):
+            rest = best[i + L]
+            if rest is not None and (best[i] is None or len(rest) + 1 < len(best[i])):
+                best[i] = [L] + rest
+    pieces = best[0]
+    if not pieces or len(pieces) < 2 or len(pieces) > 5 or max(pieces) < 6:
+        return False
+    return all(p >= min_piece for p in pieces[1:-1])
 
 
 
 
 def _degenerate(st):
-    """Fake inputs formatted into text: a build-id of zeros, a run of one character."""
+    """Fake inputs formatted into text: a build-id of zeros, a run of one character, a piece
+    appended over and over by a loop running on a fake count (`/usr/share/vimusr/share/vim...`)."""
     if len(st) < 16:
         return False
     top = max(st.count(c) for c in set(st))
-    return top / len(st) > 0.5 or re.search(r"(.)\1{15}", st) is not None
+    if top / len(st) > 0.5 or re.search(r"(.)\1{15}", st) is not None:
+        return True
+    # periodic: the same unit (2-64 characters) three or more times, after a short head
+    for head in (0, 1, 2):
+        t = st[head:]
+        for period in range(2, min(64, len(t) // 3) + 1):
+            if t[period:] == t[:-period]:
+                return True
+    return False
 
 
-def recover(path, canaries, max_funcs=0, time_budget=None, explore=True):
+def _emulate(img, order, scores, explained, canaries, time_budget, explore):
+    """The two passes over `order` with one emulator; returns (records by string, functions
+    tried, runs, timed out, canaries found)."""
+    from recover_callsite import looks_like_text
+    emu = Emulator(img)
+    t0 = time.monotonic()
+    deadline = t0 + time_budget if time_budget else None
+    found, by_string = set(), {}
+    tried_set, runs = set(), 0
+    timed_out = False
+
+    def collect(fva, strs, natural, exact, used):
+        for st in sorted(strs):
+            for c in canaries:
+                if c in st:
+                    found.add(c)
+            rec = by_string.get(st)
+            if rec is None:
+                if _degenerate(st) or not looks_like_text(st.encode("ascii", "ignore")) or explained(st):
+                    by_string[st] = False
+                    continue
+                rec = by_string[st] = {"string": st, "function": fva, "method": "emulation",
+                                       "forced": True}
+            elif rec is False:
+                continue
+            if st in natural:
+                rec.pop("forced", None)    # reached without forcing a branch, in some run
+            if st in used:
+                rec["used"] = True         # the code passed it on at exactly this length
+            if st in exact:
+                rec["exact"] = True        # ... and what followed it in memory was stale
+
+    # Pass 1, only with a time budget: every function once, unforced, with a small instruction
+    # budget, in score order, using at most 40% of the time. A large binary (gdb: 15,760
+    # functions, 1,400 of them decoder-like) used to spend the whole budget exploring the first
+    # hundred; decoders mostly finish in a few thousand instructions with any arguments.
+    complete = set()
+    if deadline is not None and explore:
+        sweep_end = t0 + 0.4 * time_budget
+        # (a small binary is swept completely whatever the machine's load, so which function a
+        # string is first attributed to -- the overlap rules use it -- does not depend on timing)
+        timed_sweep = len(order) >= PARALLEL_MIN
+        for fva, size in order:
+            if timed_sweep and time.monotonic() > sweep_end:
+                break
+            strs, _, _ = emu.run(fva, size, budget=QUICK)
+            runs += 1
+            tried_set.add(fva)
+            if emu.count < QUICK:
+                complete.add(fva)          # ran to its end: a full single run would be the same
+            collect(fva, strs, strs, set(emu.exact), set(emu.used))
+            if canaries and len(found) == len(canaries):
+                break
+    # Pass 2: full budgets, and path exploration of decoder-like functions
+    for fva, size in order:
+        if canaries and len(found) == len(canaries):
+            break
+        if deadline is not None and time.monotonic() > deadline:
+            timed_out = True
+            break
+        if explore and scores[fva] > 0:
+            strs, n = emu.explore(fva, size, deadline=deadline)
+            natural = emu.natural
+        elif fva in complete:
+            continue
+        else:
+            strs, _, _ = emu.run(fva, size)
+            n = 1
+            natural = strs
+        tried_set.add(fva)
+        runs += n
+        collect(fva, strs, natural, set(emu.exact), set(emu.used))
+    return by_string, tried_set, runs, timed_out, found
+
+
+def _worker(path, share, canaries, time_budget, explore):
+    """One process of a parallel run: the functions in `share` (entry addresses), in order."""
+    img = Image(path)
+    funcs = dict(img.functions())
+    scores = _scores(img, list(funcs.items()))
+    order = [(f, funcs[f]) for f in share if f in funcs]
+    explained = _static_cover(img.file_bytes + img.code_constants())
+    by_string, tried, runs, timed_out, found = _emulate(img, order, scores, explained, canaries,
+                                                        time_budget, explore)
+    return by_string, len(tried), runs, timed_out, found
+
+
+def _merge(into, other):
+    for st, rec in other.items():
+        cur = into.get(st)
+        if cur is None or (cur is False and rec):
+            into[st] = rec
+        elif rec and cur:
+            if "forced" not in rec:
+                cur.pop("forced", None)
+            for flag in ("used", "exact"):
+                if rec.get(flag):
+                    cur[flag] = True
+
+
+PARALLEL_MIN = 2000      # functions: below this one process finishes well within the budget
+
+
+def _workers():
+    try:
+        n = int(os.environ.get("RUST_DEOBF_WORKERS", "0"))
+    except ValueError:
+        n = 0
+    return n if n > 0 else max(1, min(4, os.cpu_count() or 1))
+
+
+def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers=None):
     """Emulate functions and collect the strings they materialise in memory.
 
     Returns, besides the canary bookkeeping used by the benchmark, ``recovered_texts`` and
@@ -1820,8 +2479,9 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True):
 
     max_funcs: 0 = no cap (the time budget decides); explore: re-run decoder-like functions with
     forward branches flipped, to reach strings on paths the fake arguments do not take.
+    workers: processes for a large binary (PARALLEL_MIN+ functions); default RUST_DEOBF_WORKERS
+    or min(4, CPUs). Each takes every n-th function of the score order.
     """
-    from recover_callsite import looks_like_text
     try:
         img = Image(path)
     except Exception as e:
@@ -1832,44 +2492,32 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True):
     order = sorted(funcs, key=lambda f: (-scores[f[0]], f[0]))
     if max_funcs:
         order = order[:max_funcs]
-    explained = _static_cover(img.file_bytes + img.code_constants())
-    emu = Emulator(img)
-    deadline = time.monotonic() + time_budget if time_budget else None
-    found, records, seen = set(), [], set()
-    tried = runs = 0
-    timed_out = False
-    for fva, size in order:
-        if deadline is not None and time.monotonic() > deadline:
-            timed_out = True
-            break
-        tried += 1
-        if explore and scores[fva] > 0:
-            strs, n = emu.explore(fva, size, deadline=deadline)
-            natural = emu.natural
-        else:
-            strs, _, _ = emu.run(fva, size)
-            n = 1
-            natural = strs
-        exact, used = set(emu.exact), set(emu.used)
-        runs += n
-        for st in sorted(strs):
-            for c in canaries:
-                if c in st:
-                    found.add(c)
-            if st in seen or _degenerate(st) or not looks_like_text(st.encode("ascii", "ignore")) \
-                    or explained(st):
-                continue
-            seen.add(st)
-            rec = {"string": st, "function": fva, "method": "emulation"}
-            if st not in natural:
-                rec["forced"] = True       # only on a path reached by forcing branches
-            if st in used:
-                rec["used"] = True         # the code passed it on at exactly this length
-            if st in exact:
-                rec["exact"] = True        # ... and what followed it in memory was stale
-            records.append(rec)
-        if canaries and len(found) == len(canaries):
-            break
+    workers = workers or _workers()
+    if workers > 1 and len(order) >= PARALLEL_MIN:
+        import concurrent.futures as cf
+        import multiprocessing as mp
+        ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context("spawn")
+        shares = [[f for f, _ in order[i::workers]] for i in range(workers)]
+        by_string, tried, runs, timed_out, found = {}, 0, 0, False, set()
+        try:
+            with cf.ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+                jobs = [pool.submit(_worker, str(path), sh, canaries, time_budget, explore) for sh in shares]
+                for j in jobs:
+                    bs, t, r, to, fd = j.result()
+                    _merge(by_string, bs)
+                    tried += t
+                    runs += r
+                    timed_out |= to
+                    found |= fd
+        except Exception:
+            workers = 1                    # (no processes here: fall back to one)
+    if workers <= 1 or len(order) < PARALLEL_MIN:
+        explained = _static_cover(img.file_bytes + img.code_constants())
+        by_string, tried_set, runs, timed_out, found = _emulate(img, order, scores, explained,
+                                                                canaries, time_budget, explore)
+        tried = len(tried_set)
+    records = [r for r in by_string.values() if r]
+    records = _drop_junk_factories(records, img.file_bytes)
     records = _drop_overlap_artifacts(records)
     return {"functions_tried": tried, "functions_total": len(funcs), "runs": runs,
             "timed_out": timed_out, "recovered": sorted(found),
@@ -1920,7 +2568,35 @@ def _selftest():
     e.heap_top, e.sizes = HEAP, {}
     a, b = e._alloc(10), e._alloc(10)
     assert b - a >= 0x40 and a % 16 == 0 and b % 16 == 0
-    print("selftest OK: classification, written-memory capture and write-age splitting, heap model")
+    # a modelled copy keeps the ages of what it copies: the decoded string and the older bytes
+    # after it stay separate
+    w, out = _Writes(), set()
+    uc.mem_write(0x1100, b"tag-bytes-older" + b"\x00")
+    w.add(0x1100, 16)
+    w.capture(uc, out)
+    uc.mem_write(0x1100, b"decoded:")                       # newer: the first 8 bytes
+    w.add(0x1100, 8)
+    w.capture(uc, out)
+    uc.mem_write(0x1200, bytes(uc.mem_read(0x1100, 16)))
+    w.copy(0x1100, 0x1200, 16)
+    out = set()
+    w.capture(uc, out)
+    assert "decoded:" in out and "decoded:s-older" not in out, out
+    # static text with run-time numbers, and a logger prefix, is static; an address is not
+    fb = (b"\x00BUG: %s:%u in %s()\n\x00../dix/devices.c\x00InitValuatorClassDeviceStruct\x00"
+          b"(EE)\x00runtime: typeOff \x00 base \x00Failed to create listening socket array\x00")
+    ex = _static_cover(fb)
+    assert ex("(EE) BUG: ../dix/devices.c:1367 in InitValuatorClassDeviceStruct()")
+    assert ex("runtime: typeOff 0x40a120 base 0x0")
+    assert ex("(EE) Failed to create listening socket array(EE) ")
+    assert not ex("10.66.12.7:8443") and not ex("canary::bravo::build-id-20261018")
+    # a scramble of another string's pieces is not a string
+    assert _scramble_of("C:\\ProgrSvc\\stat", "C:\\ProgramData\\NorthwindSvc\\state.db")
+    assert not _scramble_of("Software\\Northwind", "C:\\ProgramData\\NorthwindSvc\\state.db")
+    assert _stutter_of("--skip-update-ch--skip-update-check", "--skip-update-check")
+    assert not _stutter_of("canary::bravo::build-id-20261018", "canary::alpha::7f3c-config-endpoint")
+    print("selftest OK: classification, written-memory capture and write-age splitting, heap model, "
+          "age-preserving copies, formatted static text, scrambles")
 
 
 def main():

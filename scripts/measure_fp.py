@@ -24,7 +24,8 @@ Only x86-64 ELF/PE that LIEF can parse are scanned (the static engine is x86-64)
 a defensive, read-only measurement: it disassembles binaries and prints statistics.
 """
 from __future__ import annotations
-import argparse, json, sys
+import argparse
+import os, json, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,6 +40,35 @@ DEFAULT_CANDIDATES = [
     "/usr/bin/ssh", "/usr/bin/perl", "/usr/bin/vim.basic", "/usr/bin/dpkg",
     "/bin/tar", "/usr/bin/gzip", "/usr/bin/xz", "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
 ]
+
+
+def corpus() -> list[Path]:
+    """A mixed corpus of benign binaries that are on most Linux analysis hosts (and on GitHub's
+    ubuntu runners): C/C++, Go and Rust. Precision measured only on the binaries the filters
+    were developed against overstates it; this set keeps C/C++ and Go in view."""
+    import glob as _glob
+    import shutil
+    names = ["bash", "tar", "xz", "git", "curl", "gdb", "cmake", "Xvfb", "openssl", "ssh", "perl",
+             "python3", "vim.basic",                                   # C / C++
+             "age", "gh", "docker", "kubectl", "hugo", "go",            # Go
+             "rg", "fd", "bat", "delta", "starship"]                    # Rust
+    out = [Path(w) for w in (shutil.which(n) for n in names) if w]
+    home = Path.home()
+    for tool in ("rustfmt", "cargo-fmt", "cargo", "rustdoc"):       # rustup's real binaries
+        out += [Path(p) for p in sorted(_glob.glob(str(home / ".rustup/toolchains/*/bin" / tool)))[:1]]
+    return out
+
+
+def language(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return "?"
+    if b"\xff Go buildinf:" in data or b".gopclntab" in data or b"runtime.gopanic" in data:
+        return "Go"
+    if b"/rustc/" in data or b"rust_panic" in data or b"RUST_BACKTRACE" in data:
+        return "Rust"
+    return "C/C++"
 
 
 def is_x86_64(path: Path) -> bool:
@@ -85,7 +115,7 @@ def measure_pipeline(path: Path, time_budget: float):
         by_engine.setdefault(x.get("method", "?"), []).append(x["string"])
     emu = next((e for e in res["engines"] if e["engine"].startswith("emulation")), {})
     fp = sorted({x["string"] for x in res["decoded"]})
-    return {"binary": str(path), "text_bytes": text_size(path),
+    return {"binary": str(path), "language": language(path), "text_bytes": text_size(path),
             "emulated_functions": emu.get("functions", "-"), "timed_out": emu.get("timed_out", False),
             "seconds": round(time.monotonic() - t0, 1),
             "false_positives": len(fp), "fp_strings": fp[:20],
@@ -110,6 +140,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bins", nargs="*", help="explicit binary paths to measure")
     ap.add_argument("--glob", nargs="*", default=[], help="glob(s) of binaries to add")
+    ap.add_argument("--corpus", action="store_true",
+                    help="the mixed C/C++, Go and Rust corpus (corpus()) instead of DEFAULT_CANDIDATES")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--pipeline", action="store_true",
                     help="measure the whole recover.py pipeline instead of static recovery alone")
@@ -117,7 +149,8 @@ def main():
                     help="emulation time budget per binary with --pipeline (default 120 s)")
     a = ap.parse_args()
 
-    cands = [Path(b) for b in a.bins] if a.bins else [Path(p) for p in DEFAULT_CANDIDATES]
+    cands = [Path(b) for b in a.bins] if a.bins else corpus() if a.corpus else \
+        [Path(p) for p in DEFAULT_CANDIDATES]
     cands += discover(a.glob)
     # resolve symlinks, de-dup, keep only existing x86-64 binaries
     seen, bins = set(), []
@@ -138,21 +171,34 @@ def main():
             r = measure_pipeline(p, a.time_budget)
             rows.append(r)
             if not a.json:
-                print(f"{p.name:<40} {r['text_bytes'] // 1024:>7} KB  emulated {r['emulated_functions']:>11}"
+                print(f"{p.name:<26} {r['language']:<6} {r['text_bytes'] // 1024:>7} KB  emulated {r['emulated_functions']:>11}"
                       f"{' (budget)' if r['timed_out'] else ''}  {r['seconds']:>5}s  FP {r['false_positives']}"
                       f"  {r['fp_by_method'] or ''}", flush=True)
                 for st in r["fp_strings"]:
                     print(f"      FP: {st!r}")
         tot = sum(r["false_positives"] for r in rows)
         summary = {"binaries": len(rows), "clean_binaries": sum(1 for r in rows if not r["false_positives"]),
-                   "false_positives_total": tot, "time_budget_s": a.time_budget}
+                   "false_positives_total": tot, "time_budget_s": a.time_budget,
+                   "by_language": {lang: sum(r["false_positives"] for r in rows if r["language"] == lang)
+                                   for lang in sorted({r["language"] for r in rows})}}
         if a.json:
             (ROOT / "build").mkdir(exist_ok=True)
             out = json.dumps({"summary": summary, "rows": rows}, indent=2)
             (ROOT / "build" / "fp_pipeline_results.json").write_text(out)
             print(out)
         else:
-            print(f"{summary['clean_binaries']}/{len(rows)} binaries with zero FP, {tot} FP total")
+            print(f"{summary['clean_binaries']}/{len(rows)} binaries with zero FP, {tot} FP total "
+                  f"(by language: {summary['by_language']})")
+        md = os.environ.get("GITHUB_STEP_SUMMARY")
+        if md:                         # a table on the CI run page
+            with open(md, "a") as f:
+                f.write("| binary | language | .text KB | functions emulated | FP |\n|---|---|--:|--:|--:|\n")
+                for r in rows:
+                    f.write(f"| {Path(r['binary']).name} | {r['language']} | {r['text_bytes'] // 1024} | "
+                            f"{r['emulated_functions']}{' (budget)' if r['timed_out'] else ''} | "
+                            f"{r['false_positives']} |\n")
+        if os.environ.get("RUST_DEOBF_FP_STRICT") and tot:
+            sys.exit(1)
         return
 
     rows = [measure(p) for p in bins]

@@ -24,7 +24,7 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, CS_OP_REG, CS_OP_
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from recover_callsite import looks_like_text, read_va
-from disasm import linear  # noqa: E402
+from disasm import Insns, linear  # noqa: E402
 
 
 def _rn(ins, rid):
@@ -162,11 +162,8 @@ def recover_litcrypt2_arm64(binary, insns, canaries):
             return bytes(o)
 
         texts = []
-        for ci, cins in enumerate(insns):
-            if cins.mnemonic != "bl":
-                continue
-            if next((o.imm for o in cins.operands if o.type == CS_OP_IMM), None) != entry:
-                continue
+        for ci in insns.calls_to(entry):
+            cins = insns[ci]
             blob = length = None
             for j in range(ci - 1, max(0, ci - 20), -1):
                 pj = insns[j]
@@ -200,8 +197,8 @@ def recover(path, canaries):
         return {"error": "no .text", "recall": 0, "n": len(canaries), "decoders": 0, "recovered_texts": []}
     code = bytes(text.content); base = text.virtual_address
     md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN); md.detail = True
-    insns = list(linear(md, code, base))
-    idx = {ins.address: i for i, ins in enumerate(insns)}
+    insns = Insns(md, code, base)
+    idx = insns.index_map()
 
     def resolve_pageadd(i, reg, back=60):
         return _resolve_pageadd(insns, i, reg, back)
@@ -261,12 +258,8 @@ def recover(path, canaries):
         if entry is None:
             continue
         decoder_texts = []
-        for i, ins in enumerate(insns):
-            if ins.mnemonic != "bl":
-                continue
-            tgt = next((o.imm for o in ins.operands if o.type == CS_OP_IMM), None)
-            if tgt != entry:
-                continue
+        for i in insns.calls_to(entry):
+            ins = insns[i]
             blob_va = length = None
             for j in range(i - 1, max(0, i - 20), -1):
                 pj = insns[j]

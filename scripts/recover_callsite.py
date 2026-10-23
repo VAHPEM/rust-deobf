@@ -28,7 +28,7 @@ from pathlib import Path
 import lief
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM, CS_OP_IMM, CS_OP_REG
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from disasm import linear  # noqa: E402
+from disasm import Insns, linear  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PRINT = set(bytes(string.printable, "ascii")) - set(b"\x0b\x0c")
@@ -260,8 +260,7 @@ def recover_litcrypt2(binary, insns, canaries):
     recover(), so it does not add false positives on ordinary binaries.
     """
     out, n = [], len(insns)
-    call_tgts = [op.imm for s in insns if s.mnemonic == "call"
-                 for op in s.operands if op.type == CS_OP_IMM]
+    call_tgts = insns.call_targets()
     for i, ins in enumerate(insns):
         if ins.mnemonic != "cmovb" or not ins.operands:
             continue
@@ -374,11 +373,8 @@ def recover_litcrypt2(binary, insns, canaries):
         # rsi/rdx under SysV (ELF) and rdx/r8 under the Win64 ABI (PE)
         blob_reg, len_reg = ("rdx", "r8") if _is_pe(binary) else ("rsi", "rdx")
         texts = []
-        for ci, cins in enumerate(insns):
-            if cins.mnemonic != "call":
-                continue
-            if next((op.imm for op in cins.operands if op.type == CS_OP_IMM), None) != entry:
-                continue
+        for ci in insns.calls_to(entry):
+            cins = insns[ci]
             blob = length = None
             for j in range(ci - 1, max(0, ci - 20), -1):
                 pj = insns[j]
@@ -409,12 +405,12 @@ def recover(path, canaries):
     if loaded is None: return {"error": "no .text", "recall": 0, "n": len(canaries)}
     binary, code, base = loaded
     md = Cs(CS_ARCH_X86, CS_MODE_64); md.detail = True
-    insns = list(linear(md, code, base))
-    idx = {ins.address: i for i, ins in enumerate(insns)}
+    insns = Insns(md, code, base)
+    idx = insns.index_map()
 
     decoders = []  # (loop_xor_addr, key_va, keylen)
     for i, ins in enumerate(insns):
-        if ins.mnemonic not in ("xor", "add", "sub"): continue
+        if ins.mnemonic not in ("xor", "add", "sub") or "[" not in ins.op_str: continue
         # xor r8b, byte ptr [rip+disp]  OR  xor r8b, byte ptr [base+index]
         mem_op = next((op for op in ins.operands if op.type == CS_OP_MEM), None)
         if mem_op is None: continue
@@ -497,10 +493,8 @@ def recover(path, canaries):
         # several call sites that all decode to clean text with the same key.
         decoder_texts = []
         # find call sites: call rel -> entry
-        for i, ins in enumerate(insns):
-            if ins.mnemonic != "call": continue
-            tgt = next((op.imm for op in ins.operands if op.type == CS_OP_IMM), None)
-            if tgt != entry: continue
+        for i in insns.calls_to(entry):
+            ins = insns[i]
             # backward scan for lea rsi,[rip+..] (blob) and mov edx,imm (len)
             # ABI-aware: SysV passes (rdi=out, rsi=enc, rdx=len); Win64 passes
             # (rcx=out, rdx=enc, r8=len). The ciphertext pointer is a `lea <reg>,[rip+..]`
