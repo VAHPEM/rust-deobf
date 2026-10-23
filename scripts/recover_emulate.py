@@ -2123,11 +2123,13 @@ def _drop_overlap_artifacts(records):
         # bytes followed by stray bytes (`Global\NW-5c1e9a` + `0`, an AEAD tag's `&8fq`)
         # (four to eight characters only when they look like noise: `&8fq` is, `/2.1` -- the
         # end of a user agent whose start another function decoded -- is not)
-        # (and P's function must be at least as good a witness as S's -- it produced as many
-        # strings: a function that decoded only the first chunk, `--skip-update-ch`, is not)
+        # (and either P's function is at least as good a witness as S's -- it produced as many
+        # strings: one that decoded only the first chunk, `--skip-update-ch`, is not -- or the
+        # tail does not continue P's last character class: `...5c1e9a` + `-F`, `...off` + `C`)
         if (len(tail) <= 3 or (len(tail) <= 8 and any(c in _JUNK for c in tail))) and \
                 p in natural_ and q not in used and q not in exact and not (funcs[p] & funcs[q]) \
-                and max(per_func[f] for f in funcs[p]) >= max(per_func[f] for f in funcs[q]):
+                and (max(per_func[f] for f in funcs[p]) >= max(per_func[f] for f in funcs[q])
+                     or _char_class(p[-1]) != _char_class(tail[0])):
             stale.add(q)
         # the code passed P on at its length and the rest is another recovered string as a
         # whole (`...config-endpoint` + `canary::bravo::...`): two strings side by side
@@ -2314,6 +2316,10 @@ def _stutter_of(x, y, min_piece=6):
                 best[i] = [L] + rest
     pieces = best[0]
     return bool(pieces) and 2 <= len(pieces) <= 4
+
+
+def _char_class(c):
+    return "a" if c.islower() else "A" if c.isupper() else "0" if c.isdigit() else "."
 
 
 _JUNK = set("&()`~^|{}[]<>!$#@*+=\"';,")

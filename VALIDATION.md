@@ -777,3 +777,14 @@ model (`File/Glob.pm`, `SV_YES:UNDEF`, `lib/rustlib/src/rust/`, `session 1970010
 vim symbol names with letters inserted as well as changed, and a few reshuffles. Dropping those
 would take rules that also drop decoded indicators made of common words (`--skip-update-check`
 is three dictionary words), which is the wrong trade for this tool.
+
+**What this round also shows.** The rules that decide which of several overlapping views of a
+buffer is the string are heuristics, and they are brittle: the stray-tail rule went through three
+versions in this round alone — a fix for an AEAD tag after muddy's plaintext (`…20261018&8fq`)
+dropped obfstr's `--skip-update-check` on the Kali VM's rustc 1.99 PE build (a shorter view from
+a function that decoded only the first 16 bytes looked like the same string without its "stray"
+tail), and the fix for that briefly broke a set-3 ARM64 cell. Every rule is now held by the
+suites above and the self-tests, but a new compiler or profile can still land on a combination
+they do not cover. The durable fix is information the emulator does not record yet — which
+buffer (address) each view came from — so views of one buffer can be told from copies; that is
+the next step, not another rule.

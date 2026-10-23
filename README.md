@@ -270,6 +270,10 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   recovery with that environment.
 - **Precision is good, not perfect**: 29 false positives on a 21-binary C/C++, Go and Rust
   corpus (see Results) — run-time assembled text the filters do not model.
+- **Overlap rules are heuristics**: which of several overlapping views of a buffer is the string
+  is decided from text, write ages and which function produced it, not from buffer addresses;
+  fixing one profile's case has broken another before (VALIDATION.md §11). Recording the buffer
+  each view came from is the planned fix.
 - **Benign corpus only**: the benchmark is synthetic. It now covers the shapes and profiles the
   review asked for, but real malware will find shapes it does not — please report them.
 
