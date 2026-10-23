@@ -2067,9 +2067,10 @@ def _drop_overlap_artifacts(records):
     texts = {r["string"] for r in records}
     exact = {r["string"] for r in records if r.get("exact")}
     used = {r["string"] for r in records if r.get("used")}
-    funcs = {}
+    funcs, per_func = {}, {}
     for r in records:
         funcs.setdefault(r["string"], set()).add(r.get("function"))
+        per_func[r.get("function")] = per_func.get(r.get("function"), 0) + 1
     natural_ = {r["string"] for r in records if not r.get("forced")}
     stale, partial, whole_tails = set(), set(), set()
     # a string the code used at a known length, followed by more text in memory: that text is a
@@ -2122,8 +2123,11 @@ def _drop_overlap_artifacts(records):
         # bytes followed by stray bytes (`Global\NW-5c1e9a` + `0`, an AEAD tag's `&8fq`)
         # (four to eight characters only when they look like noise: `&8fq` is, `/2.1` -- the
         # end of a user agent whose start another function decoded -- is not)
+        # (and P's function must be at least as good a witness as S's -- it produced as many
+        # strings: a function that decoded only the first chunk, `--skip-update-ch`, is not)
         if (len(tail) <= 3 or (len(tail) <= 8 and any(c in _JUNK for c in tail))) and \
-                p in natural_ and q not in used and q not in exact and not (funcs[p] & funcs[q]):
+                p in natural_ and q not in used and q not in exact and not (funcs[p] & funcs[q]) \
+                and max(per_func[f] for f in funcs[p]) >= max(per_func[f] for f in funcs[q]):
             stale.add(q)
         # the code passed P on at its length and the rest is another recovered string as a
         # whole (`...config-endpoint` + `canary::bravo::...`): two strings side by side
