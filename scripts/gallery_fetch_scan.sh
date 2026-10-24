@@ -80,27 +80,32 @@ fi
 H="${1:-}"; FAM="${2:-}"
 [[ "$H" =~ ^[0-9a-fA-F]{64}$ ]] || die "pass a 64-hex sha256 as the first argument (got: '${H:-}')"
 
-if [ -z "${MB_KEY:-}" ]; then
-    read -rsp "MalwareBazaar Auth-Key (hidden): " MB_KEY; echo
-    [ -n "$MB_KEY" ] || die "no key entered"
-fi
-
 zip="$SAMPLES/$H.zip"
-echo "downloading $H ..."
-curl -s https://mb-api.abuse.ch/api/v1/ \
-    -H "Auth-Key: $MB_KEY" \
-    -d "query=get_file" --data-urlencode "sha256_hash=$H" \
-    -o "$zip"
-
-# A real sample is a zip; an API error comes back as a few bytes of JSON.
-if [ "$(stat -c%s "$zip" 2>/dev/null || echo 0)" -lt 200 ] || ! file "$zip" | grep -qi zip; then
-    echo "download did not return a zip -- API said:" >&2
-    cat "$zip" >&2; echo >&2
-    die "fetch failed (check the key and that the hash is on MalwareBazaar)"
+if [ -s "$zip" ] && file "$zip" | grep -qi zip; then
+    echo "using existing $zip (delete it to force re-download)"
+else
+    if [ -z "${MB_KEY:-}" ]; then
+        read -rsp "MalwareBazaar Auth-Key (hidden): " MB_KEY; echo
+        [ -n "$MB_KEY" ] || die "no key entered"
+    fi
+    echo "downloading $H ..."
+    curl -s https://mb-api.abuse.ch/api/v1/ \
+        -H "Auth-Key: $MB_KEY" \
+        -d "query=get_file" --data-urlencode "sha256_hash=$H" \
+        -o "$zip"
+    # A real sample is a zip; an API error comes back as a few bytes of JSON.
+    if [ "$(stat -c%s "$zip" 2>/dev/null || echo 0)" -lt 200 ] || ! file "$zip" | grep -qi zip; then
+        echo "download did not return a zip -- API said:" >&2
+        cat "$zip" >&2; echo >&2
+        rm -f "$zip"
+        die "fetch failed (check the key and that the hash is on MalwareBazaar)"
+    fi
 fi
 
 dest="$SAMPLES/$H.d"; mkdir -p "$dest"
-7z x -p infected -y -o"$dest" "$zip" >/dev/null || die "extract failed (need p7zip-full? 'sudo apt install p7zip-full')"
+# MalwareBazaar zips are AES-encrypted with the password "infected"; the 7z password flag takes
+# NO space (-pinfected, not -p infected -- the latter means empty password + a file named infected).
+7z x -pinfected -y -o"$dest" "$zip" >/dev/null || die "extract failed (need p7zip-full? 'sudo apt install p7zip-full')"
 
 # triage every extracted file that is actually a binary (usually one); NEVER run them
 found=0
