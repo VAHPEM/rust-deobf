@@ -807,8 +807,8 @@ default: it emulates individual functions under Unicorn, no syscalls reach the h
 |---|---|---|---|---|--:|---|
 | **EDDIESTEALER** | `5330cf6a…e995f42` | PE x86-64 | **rust=True**, rustc 6d9f6ae, 157 panic sites | 1376/1376 fns, 11 s, no crash | **32** | **recovered the hidden C2 domain `xxxivi.com` + C2 URL path `/don/api/handler/73da58c0-…`, plus the dynamically-resolved API names it hides (`ReadProcessMemory`, `InternetConnectW`, `NtQuerySystemInformation`, `encryption_key`, `username`…). static/FLOSS get 0; emulation got all 32.** |
 | KrustyLoader | `030eb56e…84228b0` | ELF x86-64 | **rust=True**, rustc 1.70.0, **18 crates** (tokio/hyper/socket2/hex/cfb-mode), 220 panic sites | 2072/2072 fns, 6 s, no crash | 0 | metadata + capability profile recovered; **no macro-obfuscated strings** — its config is encrypted at run time (cfb-mode) and loaded dynamically, so static string deobf has nothing to decode (7 benign literal paths only). Correct, not a miss. |
-| FickleStealer | `e9bc44cf…a6c599c` | **PE32 i386 (32-bit)** | rust=False | — (arch `?`) | 0 | **format gap: the engine is x86-64/AArch64 only**, so a 32-bit x86 sample is not analysed. Documented limitation, next-work item. |
-| RustDoor | `a900ec81…9b56faa5` | **Mach-O universal** | rust=False | — (arch `?`) | 0 | **format gap: Mach-O not supported** (ELF/PE only). Next-work item. |
+| FickleStealer | `e9bc44cf…a6c599c` | **PE32 i386 (32-bit)** | rust=False | — (arch `?`) | 0 | format gap at the time of this run. **Now (§14):** 32-bit x86 is detected and the PE32 loader works, but PE32 *emulation* of the Windows std path is not yet reliable, so PE32 is routed to literal recovery only; 32-bit x86 ELF is fully emulated (5/5). FickleStealer is also packed, so it needs unpacking first regardless. |
+| RustDoor | `a900ec81…9b56faa5` | **Mach-O universal** | rust=False | — (arch `?`) | 0 | format gap at the time of this run. **Now closed (§15):** Mach-O is fully emulated; the recovery got RustDoor's C2 URL. |
 | catthief.exe | `904e6720…cb94c22` | PE x86-64 (FLARE-On) | **rust=True**, rustc 1.96, 17 crates | 2391/2391 fns, 10 s | 1 | not string-obfuscated → little to decode, nothing invented |
 | ToxicMiner.exe | `ee3a410d…a28a93` | PE x86-64 (C/C++ control) | **rust=False** | 4780/4780 fns, 11 s | 2 | correctly flags non-Rust; 2 runtime-assembled strings |
 
@@ -824,8 +824,10 @@ fingerprints).
 obfuscators the emulator targets: **KrustyLoader** encrypts its config with a real cipher
 (cfb-mode) at run time, so static deobfuscation correctly finds nothing to decode — the win there
 is the metadata, and the strings would need dynamic recovery. (2) Two **format gaps** surfaced
-immediately on real samples: **32-bit x86 PE** (FickleStealer) and **Mach-O** (RustDoor) are not
-handled — the engine is x86-64/AArch64 ELF/PE only. Both are concrete next-work items. The
+immediately on real samples: **32-bit x86 PE** (FickleStealer) and **Mach-O** (RustDoor). Both
+drove concrete follow-up work: Mach-O is now fully emulated (§15), and 32-bit x86 ELF is too (§14);
+32-bit PE is detected and loads but its Windows-std emulation is not yet reliable, so it is routed
+to literals only (§14) — the one gap still open. The
 benchmark's obfuscation crates (litcrypt/obfstr/…) model one real pattern (EDDIESTEALER-style),
 not all of them.
 
@@ -867,12 +869,24 @@ first derail each time:
 - **32-bit TLS** (GS/Linux, FS/Windows) via a GDT descriptor, and **`int 0x80`** syscalls with
   i386 numbers (write/brk/mmap2/munmap).
 
-**Result:** every canary crate built for i686 returns **5/5** — `xor_custom`, `add_custom`,
-`litcrypt`, `litcrypt2`, `obfstr`, `cryptify`. `tests/test_32bit.py` builds them and asserts it;
-the x86-64 and AArch64 paths are unchanged (benchmark + self-tests still pass). The static
-call-site recoverers, cryptify, stack-strings and libfuncs remain x86-64/AArch64 only, so on a
-32-bit binary strings come from emulation + literal recovery. PE32 (32-bit Windows) uses the same
-engine; it is exercised on real samples rather than the ELF canary suite.
+**Result:** every canary crate built for `i686-unknown-linux-gnu` (ELF) returns **5/5** —
+`xor_custom`, `add_custom`, `litcrypt`, `litcrypt2`, `obfstr`, `cryptify`. `tests/test_32bit.py`
+builds them and asserts it; the x86-64 and AArch64 paths are unchanged (benchmark + self-tests
+still pass). The static call-site recoverers, cryptify, stack-strings and libfuncs remain
+x86-64/AArch64 only, so on a 32-bit binary strings come from emulation + literal recovery.
+
+**32-bit PE is a separate, harder case and is deliberately not emulated.** The loader *does* handle
+PE32 — PE32 `HIGHLOW` base relocations (4-byte, absolute → RVA against the image base; PE32+ used
+only `DIR64`) and imagebase rebasing are implemented and verified against clean `i686-pc-windows-gnu`
+canaries. But emulation of those same canaries recovers **0/5** (one does 2/5): the Windows std
+prologue sends non-decoder functions into fake-argument-driven recursion that overflows the stack,
+and the real decoders chain through runtime-initialised globals that bare emulation leaves null.
+The net effect is no canaries plus false-positive strings, which would hurt precision on real PE32
+malware. So `recover.py` routes PE32 to **literal recovery only** (verified: 128 literals parsed
+correctly from the canaries) and skips emulation + libfuncs with an explicit note;
+`tests/test_formats.py::test_detect_and_route_32bit_pe` guards that gate. Completing PE32 emulation
+(modelling the Windows std init / TEB and stdcall import cleanup) is the open next-work item — the
+loader groundwork is already in place.
 
 ## 15. Mach-O emulation (Oct 2026)
 

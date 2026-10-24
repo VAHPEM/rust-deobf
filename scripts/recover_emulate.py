@@ -243,10 +243,17 @@ class Image:
                         self.patches[e.iat_address] = self._import(nm)
                 for blk in b.relocations:
                     for e in blk.entries:
-                        if str(e.type).endswith("DIR64"):
+                        t = str(e.type)
+                        if t.endswith("DIR64"):              # PE32+ : 8-byte absolute pointer
                             raw = self.read_any(e.address, 8)
                             if len(raw) == 8:
                                 v = struct.unpack("<Q", raw)[0]
+                                if v >= ib:
+                                    self.patches[e.address] = v - ib
+                        elif t.endswith("HIGHLOW"):          # PE32 : 4-byte absolute pointer
+                            raw = self.read_any(e.address, 4)
+                            if len(raw) == 4:
+                                v = struct.unpack("<I", raw)[0]
                                 if v >= ib:
                                     self.patches[e.address] = v - ib
                 return

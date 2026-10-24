@@ -333,15 +333,18 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   IOCs) and the API names the sample hides — end-to-end deobfuscation of real obfuscated Rust
   malware. Honest caveats from the same run: **KrustyLoader** encrypts its config at run time
   (cfb-mode), so static string deobf correctly finds nothing (metadata is the win there). Two
-  format gaps surfaced and are now closed. **32-bit x86** (ELF/PE i386) and **Mach-O** (the macOS
-  format, x86-64 and arm64) are both fully emulated: the engine decodes obfuscated strings on
-  them, verified at **5/5 on all six canary crates** for `i686-unknown-linux-gnu` (VALIDATION.md
-  §14, `tests/test_32bit.py`) and **5/5 on all six built for `aarch64-apple-darwin`** (§15,
-  `tests/test_macho.py`). (FickleStealer is also packed, so it needs unpacking regardless of
-  arch.) The benchmark's obfuscation crates model one real pattern, not all of them;
-  `gallery/manifest.json` lists 67 families by hash.
+  format gaps surfaced and are partly closed. **32-bit x86 ELF** and **Mach-O** (the macOS format,
+  x86-64 and arm64) are fully emulated: the engine decodes obfuscated strings on them, verified at
+  **5/5 on all six canary crates** for `i686-unknown-linux-gnu` (VALIDATION.md §14,
+  `tests/test_32bit.py`) and **5/5 on all six built for `aarch64-apple-darwin`** (§15,
+  `tests/test_macho.py`). **32-bit PE is the one case still open**: the loader handles it (PE32
+  `HIGHLOW` relocations, imagebase rebasing) but emulation of the Windows std path is not yet
+  reliable (0–2/5 plus false positives), so PE32 is routed to literal recovery only and emulation
+  is skipped with a note until it is verified 5/5 (VALIDATION.md §14). (FickleStealer is also
+  packed, so it needs unpacking regardless of arch.) The benchmark's obfuscation crates model one
+  real pattern, not all of them; `gallery/manifest.json` lists 67 families by hash.
 - **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
-  signature on ELF, PE and Mach-O (x86-64, AArch64, 32-bit x86); the bundled DB is for one
+  signature on ELF, PE and Mach-O (x86-64, AArch64; 32-bit x86 ELF); the bundled DB is for one
   toolchain (rustc 1.97 x86-64) and must be regenerated (`--gen`) for another rustc, architecture
   or format, and generic-heavy labels flatten their type args.
 
