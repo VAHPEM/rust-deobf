@@ -1,0 +1,15 @@
+{
+  "strings": [
+    "C:\\ProgramData\\Helios\\agent-state.db",
+    "https://cdn.helios-sync.net/v2/push"
+  ],
+  "ints": [
+    305419896
+  ],
+  "cff_functions": [
+    "band",
+    "label",
+    "main"
+  ],
+  "notes": "goldberg_stmts flattens band(); goldberg_string/int encrypt the literals. Strings are IOC-shaped and do not collide with crate/metadata tokens."
+}

@@ -173,6 +173,24 @@ Everything was re-run outside the development container, on the two ARM64 VMs of
 The glibc build needed two emulator fixes — libgcc's outlined atomics (`__aarch64_cas4_acq` &
 co.) and a `write` import that must report success — see [VALIDATION.md §10b](VALIDATION.md).
 
+### Third-party obfuscation crates
+
+`bench_src/` is hand-rolled ciphers; `obf_src/` is author-written programs obfuscated with the
+crates a real analyst meets. [**goldberg**](https://crates.io/crates/goldberg) applies code-flow
+obfuscation plus string and integer encryption; `recover.py` recovers its encrypted strings
+**6/6** across ELF, PE and AArch64, release and `size-lto` (`tests/test_obf.py`, a CI job). The
+strings are IOC-shaped and chosen not to collide with crate or metadata tokens, so the number
+measures recovery rather than a coincidence of the literal text. More crates are planned
+(`rustfuscator`, `obfuse`), goldberg first.
+
+### Real-malware reference
+
+`gallery/manifest.json` (built by `scripts/parse_gallery.py` from
+[rust-malware-gallery](https://github.com/decoderloop/rust-malware-gallery)) maps **126 sample
+hashes across 67 Rust malware families** to family, aliases and writeups. It drives evaluation
+and gives triage a hash → family attribution. **Hashes only** — samples are fetched from the
+listed source and analysed in an isolated VM, never stored here.
+
 ---
 
 ## What it does

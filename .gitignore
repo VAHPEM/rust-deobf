@@ -14,3 +14,5 @@ build/litcrypt2_arm64
 build/*__*
 build/arm64/
 build/build_manifest.jsonl
+obf_src/*/target/
+obf_src/*/Cargo.lock

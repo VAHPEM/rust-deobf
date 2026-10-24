@@ -1,0 +1,1763 @@
+{
+ "source": "github.com/decoderloop/rust-malware-gallery",
+ "note": "hashes only; fetch samples from the listed source in an isolated VM",
+ "families": [
+  {
+   "family": "01flip",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-12-10 - Palo Alto Networks - 01flip: Multi-Platform Ransomware Written in Rust",
+     "url": "https://unit42.paloaltonetworks.com/new-ransomware-01flip-written-in-rust/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "e5834b7bdd70ec904470d541713e38fe933e96a4e49f80dbfb25148d9674f957",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e5834b7bdd70ec904470d541713e38fe933e96a4e49f80dbfb25148d9674f957/"
+    }
+   ]
+  },
+  {
+   "family": "Agenda Ransomware",
+   "aliases": [
+    "Qilin",
+    "AgendaCrypt"
+   ],
+   "writeups": [
+    {
+     "title": "2022-12-16 - Trend Micro - Agenda Ransomware Uses Rust to Target More Vital Industries",
+     "url": "https://www.trendmicro.com/en_us/research/22/l/agenda-ransomware-uses-rust-to-target-more-vital-industries.html"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "e90bdaaf5f9ca900133b699f18e4062562148169b29cb4eb37a0577388c22527",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e90bdaaf5f9ca900133b699f18e4062562148169b29cb4eb37a0577388c22527/"
+    }
+   ]
+  },
+  {
+   "family": "Akira Ransomware (Rust \"Akira v2\" variant)",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-10-21 - Cisco - Akira ransomware continues to evolve",
+     "url": "https://blog.talosintelligence.com/akira-ransomware-continues-to-evolve/"
+    },
+    {
+     "title": "2024-12-03 - Check Point - Inside Akira Ransomware's Rust Experiment",
+     "url": "https://research.checkpoint.com/2024/inside-akira-ransomwares-rust-experiment/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "0ee1d284ed663073872012c7bde7fac5ca1121403f1a5d2d5411317df282796c",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/0ee1d284ed663073872012c7bde7fac5ca1121403f1a5d2d5411317df282796c/"
+    }
+   ]
+  },
+  {
+   "family": "Akira Ransomware (Rust \"Megazord\" variant)",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-10-21 - Cisco - Akira ransomware continues to evolve",
+     "url": "https://blog.talosintelligence.com/akira-ransomware-continues-to-evolve/"
+    },
+    {
+     "title": "2024-12-02 - Palo Alto - Threat Assessment: Howling Scorpius (Akira Ransomware)",
+     "url": "https://unit42.paloaltonetworks.com/threat-assessment-howling-scorpius-akira-ransomware/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "28cea00267fa30fb63e80a3c3b193bd9cd2a3d46dd9ae6cede5f932ac15c7e2e",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/28cea00267fa30fb63e80a3c3b193bd9cd2a3d46dd9ae6cede5f932ac15c7e2e/"
+    },
+    {
+     "sha256": "131da83b521f610819141d5c740313ce46578374abb22ef504a7593955a65f07",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/131da83b521f610819141d5c740313ce46578374abb22ef504a7593955a65f07/"
+    }
+   ]
+  },
+  {
+   "family": "AmnesiaStealer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-08-23 - Jamf - AmnesiaStealer: a multi-stage Rust-based macOS infostealer that hijacks Chromium browsers",
+     "url": "https://www.jamf.com/blog/amnesia-stealer-macos-infostealer-clickfix/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "de5748aac4a4d4cb48cf050652679e6bc49eda33d9ffaa0d280b578122fab55a",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/de5748aac4a4d4cb48cf050652679e6bc49eda33d9ffaa0d280b578122fab55a"
+    },
+    {
+     "sha256": "e853748ca8f9a5a9168263617409a9039ab09f4ffc7d860374c1e3b0b67b31a5",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e853748ca8f9a5a9168263617409a9039ab09f4ffc7d860374c1e3b0b67b31a5"
+    }
+   ]
+  },
+  {
+   "family": "AsyncRAT (Rust variant)",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-05-26 - G DATA - Reborn in Rust: AsyncRAT",
+     "url": "https://www.gdatasoftware.com/blog/2025/05/38207-asyncrat-rust"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "eb12c198fc1b6ec79ea4b457988db4478ee6bc9aca128aa24a85b76a57add459",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/eb12c198fc1b6ec79ea4b457988db4478ee6bc9aca128aa24a85b76a57add459/"
+    }
+   ]
+  },
+  {
+   "family": "Banshee (Rust variant)",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-01-31 - Kandji - Banshee Rust Rewrite?",
+     "url": "https://the-sequence.com/banshee-rust-rewrite"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "dea72cdd7c9dfc49f0a19581086c8e6e99b000dc33f461ece8b9f37c1bd7068d",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/dea72cdd7c9dfc49f0a19581086c8e6e99b000dc33f461ece8b9f37c1bd7068d/"
+    }
+   ]
+  },
+  {
+   "family": "BlackCat Ransomware",
+   "aliases": [
+    "ALPHV",
+    "Noberus"
+   ],
+   "writeups": [
+    {
+     "title": "2022-01-26 -  Varonis - BlackCat Ransomware (ALPHV)",
+     "url": "https://www.varonis.com/blog/blackcat-ransomware"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "3d7cf20ca6476e14e0a026f9bdd8ff1f26995cdc5854c3adb41a6135ef11ba83",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/3d7cf20ca6476e14e0a026f9bdd8ff1f26995cdc5854c3adb41a6135ef11ba83/"
+    }
+   ]
+  },
+  {
+   "family": "BlackCat Ransomware (Sphynx)",
+   "aliases": [
+    "ALPHV Sphynx"
+   ],
+   "writeups": [
+    {
+     "title": "2023-05-30 - IBM X-Force - BlackCat (ALPHV) ransomware levels up for stealth, speed and exfiltration",
+     "url": "https://securityintelligence.com/x-force/blackcat-ransomware-levels-up-stealth-speed-exfiltration/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "c0e70e69d8f7432383fa37528cd42db764b73dd08eb75d72229c2a0d02e538cc",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/c0e70e69d8f7432383fa37528cd42db764b73dd08eb75d72229c2a0d02e538cc/"
+    }
+   ]
+  },
+  {
+   "family": "CargoBay",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2022-11-29 - IBM X-Force - CargoBay BlackHat Backdoor Analysis Report (IRIS-14738)",
+     "url": "https://exchange.xforce.ibmcloud.com/malware-analysis/guid:87abff769352d8208e403331c86eb95f"
+    },
+    {
+     "title": "1",
+     "url": "https:///twitter.com/BushidoToken/status/1626538453989990402"
+    },
+    {
+     "title": "2",
+     "url": "https://twitter.com/BushidoToken/status/1626538456859004928"
+    },
+    {
+     "title": "3",
+     "url": "https://twitter.com/BushidoToken/status/1626538458427670529"
+    },
+    {
+     "title": "4",
+     "url": "https://twitter.com/BushidoToken/status/1626538460243808256"
+    },
+    {
+     "title": "5",
+     "url": "https://twitter.com/BushidoToken/status/1626538461908897793"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "a963a8a8e1583081daa43638744eef6c410d1a410c11eb9413da15a26e802de5",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/a963a8a8e1583081daa43638744eef6c410d1a410c11eb9413da15a26e802de5/"
+    }
+   ]
+  },
+  {
+   "family": "ChaosBot",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-10-09 - eSentire - New Rust Malware \"ChaosBot\" Uses Discord for Command and Control",
+     "url": "https://www.esentire.com/blog/new-rust-malware-chaosbot-uses-discord-for-command-and-control"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "4d5f3690cdff840ceba70c1b1630ceadd0d3dcf23c8e0add0257cba2f166f5e6",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/4d5f3690cdff840ceba70c1b1630ceadd0d3dcf23c8e0add0257cba2f166f5e6/"
+    },
+    {
+     "sha256": "cdc73afb92617d9e2e0b6f2f22587f5f57316250a25b7bb8477a80628703e7b7",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/cdc73afb92617d9e2e0b6f2f22587f5f57316250a25b7bb8477a80628703e7b7/"
+    }
+   ]
+  },
+  {
+   "family": "Cicada3301 Ransomware",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-08-30 - TrueSec - Dissecting the Cicada",
+     "url": "https://www.truesec.com/hub/blog/dissecting-the-cicada"
+    },
+    {
+     "title": "2024-09-03 - MorphiSec - Cicada3301 Ransomware (archived version)",
+     "url": "https://cyberscoop.com/wp-content/uploads/sites/3/2024/08/20240829-morphisec-cicada3301-ransomware-final__doc.pdf"
+    },
+    {
+     "title": "2024-10-18 - Group-IB - Encrypted Symphony: Infiltrating the Cicada3301 Ransomware-as-a-Service Group",
+     "url": "https://www.group-ib.com/blog/cicada3301/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "7b3022437b637c44f42741a92c7f7ed251845fd02dda642c0a47fde179bd984e",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/7b3022437b637c44f42741a92c7f7ed251845fd02dda642c0a47fde179bd984e/"
+    },
+    {
+     "sha256": "56e1d092c07322d9dad7d85d773953573cc3294b9e428b3bbbaf935ca4d2f7e7",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/56e1d092c07322d9dad7d85d773953573cc3294b9e428b3bbbaf935ca4d2f7e7/"
+    }
+   ]
+  },
+  {
+   "family": "Convuster",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2021-03-18 - Kaspersky - Convuster: macOS adware now in Rust",
+     "url": "https://securelist.com/convuster-macos-adware-in-rust/101258/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "947ae8f075fd0d1e5be0341b922c0173f0c5cfd771314ebe220207f3ed53466a",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=947ae8f075fd0d1e5be0341b922c0173f0c5cfd771314ebe220207f3ed53466a"
+    }
+   ]
+  },
+  {
+   "family": "CosmicRust",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-01-04 - Greg Lesnewich - 100DaysofYARA - CosmicRust",
+     "url": "https://g-les.github.io/yara/2024/01/04/100DaysofYARA-CosmicRust.html"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "3315e5a4590e430550a4d85d0caf5f521d421a2966b23416fcfc275a5fd2629a",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=3315e5a4590e430550a4d85d0caf5f521d421a2966b23416fcfc275a5fd2629a"
+    }
+   ]
+  },
+  {
+   "family": "DeltaStealer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-05-19 - Trend Micro - Rust-Based Info Stealers Abuse GitHub Codespaces",
+     "url": "https://www.trendmicro.com/en_us/research/23/e/rust-based-info-stealers-abuse-github-codespaces.html"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "c92a7425959121ff49970c53b78e714b9e450e4b214ac85deb878d0bedf82a70",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/c92a7425959121ff49970c53b78e714b9e450e4b214ac85deb878d0bedf82a70/"
+    }
+   ]
+  },
+  {
+   "family": "EDDIESTEALER",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-05-29 - Elastic - Chasing Eddies: New Rust- based InfoStealer used in CAPTCHA campaigns",
+     "url": "https://www.elastic.co/security-labs/eddiestealer"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "5330cf6a8f4f297b9726f37f47cffac38070560cbac37a8e561e00c19e995f42",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/5330cf6a8f4f297b9726f37f47cffac38070560cbac37a8e561e00c19e995f42/"
+    }
+   ]
+  },
+  {
+   "family": "Embargo Ransomware",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-05-24 - Cyble - The Rust Revolution: New Embargo Ransomware Steps In",
+     "url": "https://cyble.com/blog/the-rust-revolution-new-embargo-ransomware-steps-in/"
+    },
+    {
+     "title": "2024-10-23 - ESET - Embargo ransomware: Rock'n'Rust",
+     "url": "https://www.welivesecurity.com/en/eset-research/embargo-ransomware-rocknrust/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "ebffc9ced2dba66db9aae02c7ccd2759a36c5167df5cd4adb151b20e7eab173c",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/ebffc9ced2dba66db9aae02c7ccd2759a36c5167df5cd4adb151b20e7eab173c/"
+    }
+   ]
+  },
+  {
+   "family": "evm-units",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-12-02 - Socket - Malicious Rust Crate evm-units Serves Cross-Platform Payloads for Silent Execution",
+     "url": "https://socket.dev/blog/malicious-rust-crate-evm-units-serves-cross-platform-payloads"
+    }
+   ],
+   "samples": []
+  },
+  {
+   "family": "ExeWho2",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-12-04 - Alex Perotti - ExeWho2 - A Tool from the Wild",
+     "url": "https://cyb3rkitties.github.io/posts/exewho2-download-execution-payload-red-teaming/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "a36967a40dcff74c04b5dd80f1aa685925912df8ff6cb63c14059439e08d5f8d",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/a36967a40dcff74c04b5dd80f1aa685925912df8ff6cb63c14059439e08d5f8d/"
+    }
+   ]
+  },
+  {
+   "family": "FickerStealer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2020-10-27 - 3xp0rtblog - Tweet on FickerStealer",
+     "url": "https://twitter.com/3xp0rtblog/status/1321209656774135810"
+    },
+    {
+     "title": "2021-07-19 - CyberArk - FickerStealer: A New Rust Player in the Market",
+     "url": "https://www.cyberark.com/resources/threat-research-blog/fickerstealer-a-new-rust-player-in-the-market"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "dc021a0ca0bb3f66d54d15d2b236422c0b90399ea762c7d7aa6d727b9bd5b46c",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/dc021a0ca0bb3f66d54d15d2b236422c0b90399ea762c7d7aa6d727b9bd5b46c/"
+    }
+   ]
+  },
+  {
+   "family": "Fickle Stealer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-06-19 - Fortinet - Fickle Stealer Distributed via Multiple Attack Chain",
+     "url": "https://www.fortinet.com/blog/threat-research/fickle-stealer-distributed-via-multiple-attack-chain"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "e9bc44cf548a70e7285499209973faf44b7374dece1413dfcdc03bf25a6c599c",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e9bc44cf548a70e7285499209973faf44b7374dece1413dfcdc03bf25a6c599c/"
+    }
+   ]
+  },
+  {
+   "family": "Freeze.rs",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-08-09 - Fortinet - Attackers Distribute Malware via Freeze.rs And SYK Crypter",
+     "url": "https://www.fortinet.com/blog/threat-research/malware-distributed-via-freezers-and-syk-crypter"
+    },
+    {
+     "title": "2023-09-07 - Gi7w0rm - Uncovering DDGroup \u2014 A long-time threat actor",
+     "url": "https://gi7w0rm.medium.com/uncovering-ddgroup-a-long-time-threat-actor-d3b3020625a4"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "afd38445e5249ac5ac66addd18c20d271f41c3ffb056ca49c8c02f9fecb4afcb",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=afd38445e5249ac5ac66addd18c20d271f41c3ffb056ca49c8c02f9fecb4afcb"
+    }
+   ]
+  },
+  {
+   "family": "FunkSec Ransomware",
+   "aliases": [
+    "FunkLocker"
+   ],
+   "writeups": [
+    {
+     "title": "2025-01-10 - Check Point - FunkSec \u2013 Alleged Top Ransomware Group Powered by AI",
+     "url": "https://research.checkpoint.com/2025/funksec-alleged-top-ransomware-group-powered-by-ai/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "c233aec7917cf34294c19dd60ff79a6e0fac5ed6f0cb57af98013c08201a7a1c",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/c233aec7917cf34294c19dd60ff79a6e0fac5ed6f0cb57af98013c08201a7a1c"
+    },
+    {
+     "sha256": "66dbf939c00b09d8d22c692864b68c4a602e7a59c4b925b2e2bef57b1ad047bd",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/66dbf939c00b09d8d22c692864b68c4a602e7a59c4b925b2e2bef57b1ad047bd"
+    },
+    {
+     "sha256": "dcf536edd67a98868759f4e72bcbd1f4404c70048a2a3257e77d8af06cb036ac",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/dcf536edd67a98868759f4e72bcbd1f4404c70048a2a3257e77d8af06cb036ac"
+    },
+    {
+     "sha256": "b1ef7b267d887e34bf0242a94b38e7dc9fd5e6f8b2c5c440ce4ec98cc74642fb",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/b1ef7b267d887e34bf0242a94b38e7dc9fd5e6f8b2c5c440ce4ec98cc74642fb"
+    },
+    {
+     "sha256": "5226ea8e0f516565ba825a1bbed10020982c16414750237068b602c5b4ac6abd",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/5226ea8e0f516565ba825a1bbed10020982c16414750237068b602c5b4ac6abd"
+    },
+    {
+     "sha256": "e622f3b743c7fc0a011b07a2e656aa2b5e50a4876721bcf1f405d582ca4cda22",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e622f3b743c7fc0a011b07a2e656aa2b5e50a4876721bcf1f405d582ca4cda22"
+    },
+    {
+     "sha256": "20ed21bfdb7aa970b12e7368eba8e26a711752f1cc5416b6fd6629d0e2a44e5d",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/20ed21bfdb7aa970b12e7368eba8e26a711752f1cc5416b6fd6629d0e2a44e5d"
+    },
+    {
+     "sha256": "dd15ce869aa79884753e3baad19b0437075202be86268b84f3ec2303e1ecd966",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/dd15ce869aa79884753e3baad19b0437075202be86268b84f3ec2303e1ecd966"
+    }
+   ]
+  },
+  {
+   "family": "Rust-based backdoor observed in supply chain compromise of `arrayref` Rust crate",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-08-20 - Socket - Popular Rust Crates Compromised in Build-Time Supply Chain Attack",
+     "url": "https://socket.dev/blog/popular-rust-crates-compromised"
+    },
+    {
+     "title": "2026-08-20 - Wiz - Rust Supply Chain Attack on arrayref: Significant Overlap with DPRK Campaigns",
+     "url": "https://www.wiz.io/blog/rust-supply-chain-attack-on-arrayref-significant-overlap-with-dprk-campaigns"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "74d3447e7cf99c99ea01a16332ec27432dfb0f491e10e67cd118065a60483306",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/74d3447e7cf99c99ea01a16332ec27432dfb0f491e10e67cd118065a60483306/"
+    },
+    {
+     "sha256": "c9561a3b00a0fa38b7772675d987f84bd429c55cd024fc08a98245c2d1632848",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/c9561a3b00a0fa38b7772675d987f84bd429c55cd024fc08a98245c2d1632848/"
+    },
+    {
+     "sha256": "408ef22050ffc5a67e005802809026b29f297a8019f8fda91a2afa8e877ba434",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/408ef22050ffc5a67e005802809026b29f297a8019f8fda91a2afa8e877ba434"
+    }
+   ]
+  },
+  {
+   "family": "Rust-based payload delivered by GlassWorm",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-11-29 - Nextron Systems - Analysis of the Rust implants found in the malicious VS Code extension",
+     "url": "https://www.nextron-systems.com/2025/11/29/analysis-of-the-rust-implants-found-in-the-malicious-vs-code-extension/"
+    },
+    {
+     "title": "2025-12-10 - Koi - GlassWorm Goes Native: Same Infrastructure, Hardened Delivery",
+     "url": "https://www.koi.ai/blog/glassworm-goes-native-same-infrastructure-hardened-delivery"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "6ebeb188f3cc3b647c4460c0b8e41b75d057747c662f4cd7912d77deaccfd2f2",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/6ebeb188f3cc3b647c4460c0b8e41b75d057747c662f4cd7912d77deaccfd2f2/"
+    },
+    {
+     "sha256": "fb07743d139f72fca4616b01308f1f705f02fda72988027bc68e9316655eadda",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/fb07743d139f72fca4616b01308f1f705f02fda72988027bc68e9316655eadda/"
+    }
+   ]
+  },
+  {
+   "family": "Rust-based loader mimicking GoToMeeting DLL",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-05-13 - G Data - GoTo Meeting loads Remcos RAT via Rust Shellcode Loader",
+     "url": "https://blog.gdatasoftware.com/2024/05/37906-gotomeeting-loads-remcos"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "93439fe9b45d7b6e9fcdc5e68fd47677ea17025e4eabb6f1468cb9ae98ee8a5b",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/93439fe9b45d7b6e9fcdc5e68fd47677ea17025e4eabb6f1468cb9ae98ee8a5b/"
+    }
+   ]
+  },
+  {
+   "family": "Hive Ransomware (Rust variant)",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2022-07-05 - Microsoft - Hive ransomware gets upgrades in Rust",
+     "url": "https://www.microsoft.com/en-us/security/blog/2022/07/05/hive-ransomware-gets-upgrades-in-rust/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "f4a39820dbff47fa1b68f83f575bc98ed33858b02341c5c0464a49be4e6c76d3",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/f4a39820dbff47fa1b68f83f575bc98ed33858b02341c5c0464a49be4e6c76d3/"
+    }
+   ]
+  },
+  {
+   "family": "Hunters International Ransomware",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-11-09 - Bitdefender - Hive Ransomware's Offspring: Hunters International Takes the Stage",
+     "url": "https://www.bitdefender.com.au/blog/businessinsights/hive-ransomwares-offspring-hunters-international-takes-the-stage/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "c4d39db132b92514085fe269db90511484b7abe4620286f6b0a30aa475f64c3e",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/c4d39db132b92514085fe269db90511484b7abe4620286f6b0a30aa475f64c3e/"
+    }
+   ]
+  },
+  {
+   "family": "IronWorm",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-07-12 - JFrog - IronWorm Returns as jscrambler, Rustier Than Ever",
+     "url": "https://research.jfrog.com/post/ironworm-returns-rustier-than-ever/"
+    },
+    {
+     "title": "2026-06-03 - JFrog - IronWorm: Shai-Hulud's rustier cousin",
+     "url": "https://research.jfrog.com/post/iron-worm-shai-hulud-rustier-cousin/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "36abd242ddaa27f0160c539377a0e92cf781c1695137850acc87e3892b436d36",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/36abd242ddaa27f0160c539377a0e92cf781c1695137850acc87e3892b436d36/"
+    },
+    {
+     "sha256": "9ea600a96c3d6950bfbf5b98980bad957a88441307a1cb8e3c6a21b3bdc65d12",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/9ea600a96c3d6950bfbf5b98980bad957a88441307a1cb8e3c6a21b3bdc65d12/"
+    }
+   ]
+  },
+  {
+   "family": "JLORAT",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-05-02 - 0xnubb - A Rusty Mousetrap: Attributing and Analyzing JLORAT",
+     "url": "https://0xnubb.com/blogs/jlorat.html"
+    },
+    {
+     "title": "Report Link",
+     "url": "https://0xnubb.com/assets/JLORAT.pdf"
+    },
+    {
+     "title": "2023-04-24 - Kaspersky - Tomiris called, they want their Turla malware back > Tomiris's polyglot toolset > JLORAT",
+     "url": "https://securelist.com/tomiris-called-they-want-their-turla-malware-back/109552/#jlorat"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "69bb729ff354cd9651f99a05f74f3ea20d483dc8e6e5838e4dd48858fd500d29",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/69bb729ff354cd9651f99a05f74f3ea20d483dc8e6e5838e4dd48858fd500d29/"
+    }
+   ]
+  },
+  {
+   "family": "JitterDropper",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-06-02 - 0xnubb - JitterDropper: Sleeping Assemblies",
+     "url": "https://0xnubb.com/blogs/jitterdropper.html"
+    },
+    {
+     "title": "Report Link",
+     "url": "https://0xnubb.com/assets/JitterDropper.pdf"
+    },
+    {
+     "title": "2026-04-13 - OALabs Research - JitterDropper: A Rust/MSVC dropper fingerprinted by per-API sleep-jitter budgets",
+     "url": "https://research.openanalysis.net/jitterdropper/dropper/rust/srdi/donut/pixeldrain/2026/04/13/jitterdropper.html"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "812d2d8436985fc8531315970b2af6bcdd697f9033bc12841ce467e6fda94408",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/812d2d8436985fc8531315970b2af6bcdd697f9033bc12841ce467e6fda94408/"
+    },
+    {
+     "sha256": "cb7264735e38f2575a354762c122a90d8994ea406f4911a42d8fa45d397fc4ff",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/cb7264735e38f2575a354762c122a90d8994ea406f4911a42d8fa45d397fc4ff/"
+    },
+    {
+     "sha256": "e8082e3c0d63f83ad95af88f50e9ae26512e89113339b66b24068648363d676e",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e8082e3c0d63f83ad95af88f50e9ae26512e89113339b66b24068648363d676e/"
+    },
+    {
+     "sha256": "9957bf9bc95be77c84f83546d37ec3bd81877872f2e18e54adc014c541da3c6a",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/9957bf9bc95be77c84f83546d37ec3bd81877872f2e18e54adc014c541da3c6a/"
+    },
+    {
+     "sha256": "eede257690bdc8c0668c3bef1e394a6c1e50980ba237647fb36c26f46557a450",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/eede257690bdc8c0668c3bef1e394a6c1e50980ba237647fb36c26f46557a450/"
+    },
+    {
+     "sha256": "4e57a67bf5a1dfa198bafc192ed47016f1a043c0c8ae0349f32c02ed17d296d4",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/4e57a67bf5a1dfa198bafc192ed47016f1a043c0c8ae0349f32c02ed17d296d4/"
+    },
+    {
+     "sha256": "9e714ba3e2f8fe053550bb0234fc7e3fa64ce41e601bff83f0f47822245312fc",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/9e714ba3e2f8fe053550bb0234fc7e3fa64ce41e601bff83f0f47822245312fc/"
+    },
+    {
+     "sha256": "2ef28834f30d3fd881f8c3004ab67c01e2ec283c03d57e173e43a7b30d52f97b",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/2ef28834f30d3fd881f8c3004ab67c01e2ec283c03d57e173e43a7b30d52f97b/"
+    },
+    {
+     "sha256": "5605f711e9c256b09dcf06c4f39851545dbfc05c1c5b3e5f3129b16506e7df19",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/5605f711e9c256b09dcf06c4f39851545dbfc05c1c5b3e5f3129b16506e7df19/"
+    }
+   ]
+  },
+  {
+   "family": "KCVY OSLOCK",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "Tweet regarding KCVY OSLOCK Ransomware (archived version)",
+     "url": "https://archive.is/IVFKD"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "0ae6570d9e659ffd5efc1e3f9faca696bd12b66b8d125b1159aee9e5251a4d79",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/0ae6570d9e659ffd5efc1e3f9faca696bd12b66b8d125b1159aee9e5251a4d79/"
+    }
+   ]
+  },
+  {
+   "family": "KrustyLoader",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-01-29 - Synacktiv - KrustyLoader - Rust malware linked to Ivanti ConnectSecure compromises",
+     "url": "https://www.synacktiv.com/publications/krustyloader-rust-malware-linked-to-ivanti-connectsecure-compromises"
+    },
+    {
+     "title": "2024-02-10 - N0fix - KrustyLoader - About stripped Rust symbol recovery (archived version)",
+     "url": "https://archive.is/YXkYt"
+    },
+    {
+     "title": "2024-08-03 - N0fix - KrustyLoader - Leveraging rust compilation artifacts to obtain reliable compilation timestamps and pivoting (archived version)",
+     "url": "https://archive.is/6WGRv"
+    },
+    {
+     "title": "2025-05-13 - EclecticIQ - China-Nexus Nation State Actors Exploit SAP NetWeaver (CVE-2025-31324) to Target Critical Infrastructures",
+     "url": "https://blog.eclecticiq.com/china-nexus-nation-state-actors-exploit-sap-netweaver-cve-2025-31324-to-target-critical-infrastructures"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "030eb56e155fb01d7b190866aaa8b3128f935afd0b7a7b2178dc8e2eb84228b0",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/030eb56e155fb01d7b190866aaa8b3128f935afd0b7a7b2178dc8e2eb84228b0/"
+    },
+    {
+     "sha256": "47ff0ae9220a09bfad2a2fb1e2fa2c8ffe5e9cb0466646e2a940ac2e0cf55d04",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/47ff0ae9220a09bfad2a2fb1e2fa2c8ffe5e9cb0466646e2a940ac2e0cf55d04/"
+    }
+   ]
+  },
+  {
+   "family": "LabubaRAT",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-07-22 - Lenny_3BO - Cracking LabubaRAT's C2 encryption: one hardcoded AES key, five builds, all forgeable. (archived version)",
+     "url": "https://ghostarchive.org/archive/zhbYx"
+    },
+    {
+     "title": "Original",
+     "url": "https://x.com/Lenny_3BO/status/2079729775443362031"
+    },
+    {
+     "title": "2026-07-14 - Blackpoint Cyber - LabubaRAT: A Rust Based Remote Access Tool Masquerading as NVIDIA Software",
+     "url": "https://blackpointcyber.com/blog/labubarat-a-rust-based-remote-access-tool-masquerading-as-nvidia-software/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "0f0fd4870160fab8ca35512ecef8425e8c0e733f7a771109598e8efa36fc42e3",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/0f0fd4870160fab8ca35512ecef8425e8c0e733f7a771109598e8efa36fc42e3/"
+    }
+   ]
+  },
+  {
+   "family": "Luca Stealer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2022-08-18 - BlackBerry - Luca Stealer Targets Password Managers and Cryptocurrency Wallets",
+     "url": "https://blogs.blackberry.com/en/2022/08/luca-stealer-targets-password-managers-and-cryptocurrency-wallets"
+    },
+    {
+     "title": "Binary Defense - Digging through Rust to find Gold: Extracting Secrets from Rust Malware",
+     "url": "https://www.binarydefense.com/resources/blog/digging-through-rust-to-find-gold-extracting-secrets-from-rust-malware/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "99331a27afa84009e140880a8739d96f97baa1676d67ba7a3278fe61bfb79022",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=99331a27afa84009e140880a8739d96f97baa1676d67ba7a3278fe61bfb79022"
+    }
+   ]
+  },
+  {
+   "family": "Luna Ransomware",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2022-08-30 - Elastic - LUNA Ransomware Attack Pattern Analysis",
+     "url": "https://www.elastic.co/security-labs/luna-ransomware-attack-pattern"
+    },
+    {
+     "title": "2023-01-13 - Nikhil \"Kaido\" Hegde - Getting Rusty and Stringy with Luna Ransomware",
+     "url": "https://nikhilh-20.github.io/blog/luna_ransomware/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "1cbbf108f44c8f4babde546d26425ca5340dccf878d306b90eb0fbec2f83ab51",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=1cbbf108f44c8f4babde546d26425ca5340dccf878d306b90eb0fbec2f83ab51"
+    }
+   ]
+  },
+  {
+   "family": "Marabu Ransomware",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-12-22 - Gameel Ali - Tweet regarding Marabu Ransomware (archived version)",
+     "url": "https://archive.is/Q1SK2"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "fcfec2dc084c222e90ba7a860de6395ad819c46764fc37e0891308eff65510d5",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/fcfec2dc084c222e90ba7a860de6395ad819c46764fc37e0891308eff65510d5/"
+    }
+   ]
+  },
+  {
+   "family": "Myth Stealer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-06-05 - Trellix - Demystifying Myth Stealer: A Rust Based InfoStealer",
+     "url": "https://www.trellix.com/blogs/research/demystifying-myth-stealer-a-rust-based-infostealer/"
+    },
+    {
+     "title": "2025-08-17 - cxiao.net - Reversing a (not-so-) Simple Rust Loader",
+     "url": "https://cxiao.net/posts/2025-08-17-not-so-simple-rust-loader/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "55a418f8562684607ee0acd745595e297ab7e586d0a5d3f8328643b29c72dfa2",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/55a418f8562684607ee0acd745595e297ab7e586d0a5d3f8328643b29c72dfa2/"
+    },
+    {
+     "sha256": "2f2b93d37d67b80b4faaf25bebe4e3cbaf7aca35328aeb66da6a1a9b44316f5b",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/2f2b93d37d67b80b4faaf25bebe4e3cbaf7aca35328aeb66da6a1a9b44316f5b/"
+    },
+    {
+     "sha256": "66054607f38481ee7e39e002b58fe950966c4c0203df39f46acfe5c0e857c89a",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/66054607f38481ee7e39e002b58fe950966c4c0203df39f46acfe5c0e857c89a/"
+    }
+   ]
+  },
+  {
+   "family": "Nokoyawa Ransomware (Rust variant)",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2022-12-20 - Zscaler - Nokoyawa Ransomware: Rust or Bust",
+     "url": "https://www.zscaler.com/blogs/security-research/nokoyawa-ransomware-rust-or-bust"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "7095beafff5837070a89407c1bf3c6acf8221ed786e0697f6c578d4c3de0efd6",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/7095beafff5837070a89407c1bf3c6acf8221ed786e0697f6c578d4c3de0efd6/"
+    }
+   ]
+  },
+  {
+   "family": "P2PInfect",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-07-19 - Palo Alto Networks - P2PInfect: The Rusty Peer-to-Peer Self-Replicating Worm",
+     "url": "https://unit42.paloaltonetworks.com/peer-to-peer-worm-p2pinfect/"
+    },
+    {
+     "title": "2023-07-31 - Cado Security - Cado Security Labs Encounter Novel Malware, Redis P2Pinfect (archived version)",
+     "url": "https://web.archive.org/web/20250527051235/https://www.cadosecurity.com/blog/redis-p2pinfect"
+    },
+    {
+     "title": "2023-09-20 - Cado Security - Cado Security Labs Researchers Witness a 600X Increase in P2Pinfect Traffic (archived version)",
+     "url": "https://web.archive.org/web/20250812081523/https://www.cadosecurity.com/blog/cado-security-labs-researchers-witness-a-600x-increase-in-p2pinfect-traffic"
+    },
+    {
+     "title": "2023-12-04 - Cado Security - P2Pinfect - New Variant Targets MIPS Devices (archived version)",
+     "url": "https://web.archive.org/web/20250702212318/https://www.cadosecurity.com/blog/p2pinfect-new-variant-targets-mips-devices"
+    },
+    {
+     "title": "2024-01-16 - Nozomi Networks - P2PInfect Worm Evolves to Target a New Platform",
+     "url": "https://www.nozominetworks.com/blog/p2pinfect-worm-evolves-to-target-a-new-platform"
+    },
+    {
+     "title": "2024-06-25 - Cado Security - From Dormant to Dangerous: P2Pinfect Evolves to Deploy New Ransomware and Cryptominer (archived version)",
+     "url": "https://web.archive.org/web/20250812064127/https://www.cadosecurity.com/blog/from-dormant-to-dangerous-p2pinfect-evolves-to-deploy-new-ransomware-and-cryptominer"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "3a43116d507d58f3c9717f2cb0a3d06d0c5a7dc29f601e9c2b976ee6d9c8713f",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/3a43116d507d58f3c9717f2cb0a3d06d0c5a7dc29f601e9c2b976ee6d9c8713f/"
+    }
+   ]
+  },
+  {
+   "family": "RALord Ransomware",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-04 - ISH Tecnologia - RALord: Novo grupo de Ransomware-as-a-Service",
+     "url": "https://ish.com.br/wp-content/uploads/2025/04/RALord-Novo-grupo-de-Ransomware-as-a-Service-1.pdf"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "456b9adaabae9f3dce2207aa71410987f0a571cd8c11f2e7b41468501a863606",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/456b9adaabae9f3dce2207aa71410987f0a571cd8c11f2e7b41468501a863606/"
+    }
+   ]
+  },
+  {
+   "family": "RansomExx2",
+   "aliases": [
+    "Defray",
+    "Defray777"
+   ],
+   "writeups": [
+    {
+     "title": "2022-11-22 - IBM X-Force - RansomExx upgrades to rust",
+     "url": "https://securityintelligence.com/x-force/ransomexx-upgrades-rust/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "a7ea1e33c548182b8e56e32b547afb4b384ebe257ca0672dbf72569a54408c5c",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=a7ea1e33c548182b8e56e32b547afb4b384ebe257ca0672dbf72569a54408c5c"
+    }
+   ]
+  },
+  {
+   "family": "Realst Stealer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-07-06 - Iamdeadlyz - Fake Blockchain Games Deliver RedLine Stealer & Realst Stealer - A New macOS Infostealer Malware",
+     "url": "https://iamdeadlyz.gitbook.io/malware-research/july-2023/fake-blockchain-games-deliver-redline-stealer-and-realst-stealer-a-new-macos-infostealer-malware#realst-stealer-macos"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "2af0e212ad70eaf8b96a645045ef2764700b5adf7b1187ae3d82240f96f613e2",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/2af0e212ad70eaf8b96a645045ef2764700b5adf7b1187ae3d82240f96f613e2/"
+    }
+   ]
+  },
+  {
+   "family": "Rust-based clipboard hijacker used in \"Ghost Network\" malware distribution campaign",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-06-17 - Check Point - From Stars to Upvotes: Fake Reputation Fueling a Crypto Clipboard Hijacker",
+     "url": "https://research.checkpoint.com/2026/from-stars-to-upvotes-fake-reputation-fueling-a-crypto-clipboard-hijacker/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "33c86ecfc324de3af97150bd009aba7925a6ba7a0842e127e94cf351013c0fe6",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/33c86ecfc324de3af97150bd009aba7925a6ba7a0842e127e94cf351013c0fe6"
+    },
+    {
+     "sha256": "7a7ad4ae347a3f99f3773a113d9f70ecfa967100c96e8275bd1df833caee68d1",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/7a7ad4ae347a3f99f3773a113d9f70ecfa967100c96e8275bd1df833caee68d1/"
+    }
+   ]
+  },
+  {
+   "family": "Rust-based loader for Rilide",
+   "aliases": [
+    "BRAINSTORM"
+   ],
+   "writeups": [
+    {
+     "title": "2023-04-04 - Trustwave - Rilide: A New Malicious Browser Extension for Stealing Cryptocurrencies",
+     "url": "https://www.trustwave.com/en-us/resources/blogs/spiderlabs-blog/rilide-a-new-malicious-browser-extension-for-stealing-cryptocurrencies/"
+    },
+    {
+     "title": "2023-05-01 - Mandiant - A LNK Between Browsers: Hunting Methodologies and Extension Abusing Actors",
+     "url": "https://www.mandiant.com/resources/blog/lnk-between-browsers"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "0f11aeecbde1f355d26c9d406dad80cb0ae8536aea31fdddaf915d4afd434f3f",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/0f11aeecbde1f355d26c9d406dad80cb0ae8536aea31fdddaf915d4afd434f3f/"
+    }
+   ]
+  },
+  {
+   "family": "Rust-based stealer used in RusticWeb campaign",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-12-21 - Seqrite - Operation RusticWeb targets Indian Govt: From Rust-based malware to Web-service exfiltration",
+     "url": "https://www.seqrite.com/blog/operation-rusticweb-targets-indian-govt-from-rust-based-malware-to-web-service-exfiltration/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "db91e23d9715464511057f2e15c9adc97d3f27fcfa308f05ac7e2de7275fdd32",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=db91e23d9715464511057f2e15c9adc97d3f27fcfa308f05ac7e2de7275fdd32"
+    }
+   ]
+  },
+  {
+   "family": "RustBucket",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-04-21 - Jamf - BlueNoroff APT group targets macOS with \u2018RustBucket\u2019 Malware",
+     "url": "https://www.jamf.com/blog/bluenoroff-apt-targets-macos-rustbucket-malware/"
+    },
+    {
+     "title": "2023-07-13 - Elastic - The DPRK strikes using a new variant of RUSTBUCKET",
+     "url": "https://www.elastic.co/security-labs/DPRK-strikes-using-a-new-variant-of-rustbucket"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "9ca914b1cfa8c0ba021b9e00bda71f36cad132f27cf16bda6d937badee66c747",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=9ca914b1cfa8c0ba021b9e00bda71f36cad132f27cf16bda6d937badee66c747"
+    },
+    {
+     "sha256": "de81e5246978775a45f3dbda43e2716aaa1b1c4399fe7d44f918fccecc4dd500",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/de81e5246978775a45f3dbda43e2716aaa1b1c4399fe7d44f918fccecc4dd500/"
+    }
+   ]
+  },
+  {
+   "family": "RustDoor",
+   "aliases": [
+    "Thiefbucket"
+   ],
+   "writeups": [
+    {
+     "title": "2024-02-08 - Bitdefender - New macOS Backdoor Written in Rust Shows Possible Link with Windows Ransomware Group",
+     "url": "https://www.bitdefender.com/en-us/blog/labs/new-macos-backdoor-written-in-rust-shows-possible-link-with-windows-ransomware-group"
+    },
+    {
+     "title": "2024-02-19 - S2W - RustDoor and GateDoor: A New Pair of Weapons Disguised as Legitimate Software by Suspected Cybercriminal",
+     "url": "https://medium.com/s2wblog/rustdoor-and-gatedoor-a-new-pair-of-weapons-disguised-as-legitimate-software-by-suspected-34c94e558b40"
+    },
+    {
+     "title": "2024-09-16 - Jamf - Jamf Threat Labs observes targeted attacks amid FBI Warnings",
+     "url": "https://www.jamf.com/blog/jamf-threat-labs-observes-targeted-attacks-amid-fbi-warnings/"
+    },
+    {
+     "title": "2025-02-26 - Palo Alto Networks - RustDoor and Koi Stealer for macOS Used by North Korea-Linked Threat Actor to Target the Cryptocurrency Sector",
+     "url": "https://unit42.paloaltonetworks.com/macos-malware-targets-crypto-sector/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "a900ec81363358ef26bcdf7827f6091af44c3f1001bc8f52b766c9569b56faa5",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/a900ec81363358ef26bcdf7827f6091af44c3f1001bc8f52b766c9569b56faa5/"
+    },
+    {
+     "sha256": "4a59e2fe11ed9136d96a985448b34957ee5861adc9c1a52de4ad65880875dfdb",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/4a59e2fe11ed9136d96a985448b34957ee5861adc9c1a52de4ad65880875dfdb/"
+    },
+    {
+     "sha256": "238b546e2a1afc230f88b98dce1be6bf442b0b807e364106c0b28fe18db2ce66",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/238b546e2a1afc230f88b98dce1be6bf442b0b807e364106c0b28fe18db2ce66/"
+    }
+   ]
+  },
+  {
+   "family": "Rustic Crypter",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2022-05-19 - IBM X-Force - ITG23 crypters highlight cooperation between cyber criminal groups",
+     "url": "https://securityintelligence.com/posts/itg23-crypters-cooperation-between-cybercriminal-groups/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "45aa8efb6b1a9a0e0091040bb99a7c37d346aaf306fa4e31e9d5d9f0fef56676",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/45aa8efb6b1a9a0e0091040bb99a7c37d346aaf306fa4e31e9d5d9f0fef56676/"
+    }
+   ]
+  },
+  {
+   "family": "RustoBot",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-04-21 - Fortinet - New Rust Botnet \"RustoBot\" is Routed via Routers",
+     "url": "https://www.fortinet.com/blog/threat-research/new-rust-botnet-rustobot-is-routed-via-routers"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "114b460012412411363c9a3ab0246e48a584ce86fc6c0b7855495ec531dd05a1",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/114b460012412411363c9a3ab0246e48a584ce86fc6c0b7855495ec531dd05a1/"
+    },
+    {
+     "sha256": "1697fd5230f7f09a7b43fee1a1693013ed98beeb7a182cd3f0393d93dd1b7576",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/1697fd5230f7f09a7b43fee1a1693013ed98beeb7a182cd3f0393d93dd1b7576/"
+    },
+    {
+     "sha256": "44a526f20c592fd95b4f7d61974c6f87701e33776b68a5d0b44ccd2fa3f48c5d",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/44a526f20c592fd95b4f7d61974c6f87701e33776b68a5d0b44ccd2fa3f48c5d/"
+    },
+    {
+     "sha256": "5dc90cbb0f69f283ccf52a2a79b3dfe94ee8b3474cf6474cfcbe9f66f245a55d",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/5dc90cbb0f69f283ccf52a2a79b3dfe94ee8b3474cf6474cfcbe9f66f245a55d/"
+    },
+    {
+     "sha256": "9a9b5bdeb1f23736ceffba623c8950d627a791a0b40c4d44ae2f80e02a43955d",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/9a9b5bdeb1f23736ceffba623c8950d627a791a0b40c4d44ae2f80e02a43955d/"
+    },
+    {
+     "sha256": "9e660ce74e1bdb0a75293758200b03efd5f807e7896665addb684e0ffb53afd2",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/9e660ce74e1bdb0a75293758200b03efd5f807e7896665addb684e0ffb53afd2/"
+    },
+    {
+     "sha256": "9f098920613bd0390d6485936256a67ae310b633124cfbf503936904e69a81bf",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/9f098920613bd0390d6485936256a67ae310b633124cfbf503936904e69a81bf/"
+    },
+    {
+     "sha256": "b68e2d852ad157fc01da34e11aa24a5ab30845b706d7827b8119a3e648ce2cf1",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/b68e2d852ad157fc01da34e11aa24a5ab30845b706d7827b8119a3e648ce2cf1/"
+    },
+    {
+     "sha256": "b910e77ee686d7d6769fab8cb8f9b17a4609c4e164bb4ed80d9717d9ddad364f",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/b910e77ee686d7d6769fab8cb8f9b17a4609c4e164bb4ed80d9717d9ddad364f/"
+    },
+    {
+     "sha256": "c0abb19b3a72bd2785e8b567e82300423da672a463eefdeda6dd60872ff0e072",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/c0abb19b3a72bd2785e8b567e82300423da672a463eefdeda6dd60872ff0e072/"
+    },
+    {
+     "sha256": "e547306d6dee4b5b2b6ce3e989b9713a5c21ebe3fefa0f5c1a1ea37cec37e20f",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e547306d6dee4b5b2b6ce3e989b9713a5c21ebe3fefa0f5c1a1ea37cec37e20f/"
+    },
+    {
+     "sha256": "ec9e77f1185f644462305184cf8afcf5d12c7eb524a2d3f4090a658a198c20ce",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/ec9e77f1185f644462305184cf8afcf5d12c7eb524a2d3f4090a658a198c20ce/"
+    },
+    {
+     "sha256": "efb0153047b08aa1876e1e4e97a082f6cb05af75479e1e9069b77d98473a11f4",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/efb0153047b08aa1876e1e4e97a082f6cb05af75479e1e9069b77d98473a11f4/"
+    }
+   ]
+  },
+  {
+   "family": "Rustonotto",
+   "aliases": [
+    "CHILLYCHINO"
+   ],
+   "writeups": [
+    {
+     "title": "2025-08-07 - S2W - ScarCruft's New Language: Whispering in PubNub, Crafting Backdoor in Rust, Striking with Ransomware",
+     "url": "https://github.com/S2W-TALON/Threat-Intelligence-Report/blob/df953af93d3634885bbfc5a0a2f2e1b2aeef58c1/250807_ScarCruft's%20New%20Language%3A%20Whispering%20in%20PubNub%2C%20Crafting%20Backdoor%20in%20Rust%2C%20Striking%20with%20Ransomware/%5BS2W%5D%20ScarCruft%E2%80%99s%20New%20Language_%20Whispering%20in%20PubNub%2C%20Crafting%20Backdoor%20in%20Rust%2C%20Striking%20with%20Ransomware.pdf"
+    },
+    {
+     "title": "2025-09-08 - Zscaler - APT37 Targets Windows with Rust Backdoor and Python Loader",
+     "url": "https://www.zscaler.com/blogs/security-research/apt37-targets-windows-rust-backdoor-and-python-loader"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "67ad959e8af25a48928c28ca9a38a6f2a61ea4935fe60dfed79061214e840b15",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/67ad959e8af25a48928c28ca9a38a6f2a61ea4935fe60dfed79061214e840b15/"
+    },
+    {
+     "sha256": "738a31e7a0d96fe1b0ad6778db39425160835a80ac33ce8a84f26b71c00c26b9",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/738a31e7a0d96fe1b0ad6778db39425160835a80ac33ce8a84f26b71c00c26b9/"
+    }
+   ]
+  },
+  {
+   "family": "RustyAttr",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-11-13 - Group-IB - Stealthy Attributes of Lazarus APT Group: Evading Detection with Extended Attributes",
+     "url": "https://www.group-ib.com/blog/stealthy-attributes-of-apt-lazarus/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "9111d458d5665b1bf463859792e950fe8d8186df9a6a3241360dc11f34d018c2",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/9111d458d5665b1bf463859792e950fe8d8186df9a6a3241360dc11f34d018c2"
+    },
+    {
+     "sha256": "176e8a5a7b6737f8d3464c18a77deef778ec2b9b42b7e7eafc888aeaf2758c2d",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/176e8a5a7b6737f8d3464c18a77deef778ec2b9b42b7e7eafc888aeaf2758c2d"
+    }
+   ]
+  },
+  {
+   "family": "RustyBuer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2021-05-03 - Proofpoint - New Variant of Buer Loader Written in Rust",
+     "url": "https://www.proofpoint.com/us/blog/threat-insight/new-variant-buer-loader-written-rust"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "3abed86f46c8be754239f8c878f035efaae91c33b8eb8818c5bbed98c4d9a3ac",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/3abed86f46c8be754239f8c878f035efaae91c33b8eb8818c5bbed98c4d9a3ac/"
+    }
+   ]
+  },
+  {
+   "family": "RustyClaw",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-10-17 - Cisco - UAT-5647 targets Ukrainian and Polish entities with RomCom malware variants",
+     "url": "https://blog.talosintelligence.com/uat-5647-romcom/"
+    },
+    {
+     "title": "2025-06-30 - Proofpoint - 10 Things I Hate About Attribution: RomCom vs. TransferLoader",
+     "url": "https://www.proofpoint.com/us/blog/threat-insight/10-things-i-hate-about-attribution-romcom-vs-transferloader"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "10e1d453d4f9ca05ff6af3dcd7766a17ca1470ee89ba90feee5d52f8d2b18a4c",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/10e1d453d4f9ca05ff6af3dcd7766a17ca1470ee89ba90feee5d52f8d2b18a4c/"
+    },
+    {
+     "sha256": "7602e2c1ae27e1b36ee4aed357e505f14496f63db29fb4fcdd0d8a9db067a5c4",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/7602e2c1ae27e1b36ee4aed357e505f14496f63db29fb4fcdd0d8a9db067a5c4/"
+    },
+    {
+     "sha256": "b1fe8fbbb0b6de0f1dcd4146d674a71c511488a9eb4538689294bd782df040df",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/b1fe8fbbb0b6de0f1dcd4146d674a71c511488a9eb4538689294bd782df040df/"
+    }
+   ]
+  },
+  {
+   "family": "RustyFlag",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2023-09-14 - Deep Instinct - Operation Rusty Flag \u2013 A Malicious Campaign Against Azerbaijanian Targets",
+     "url": "https://www.deepinstinct.com/blog/operation-rusty-flag-a-malicious-campaign-against-azerbaijanian-targets"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "5327308fee51fc6bb95996c4185c4cfcbac580b747d79363c7cf66505f3ff6db",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/5327308fee51fc6bb95996c4185c4cfcbac580b747d79363c7cf66505f3ff6db/"
+    }
+   ]
+  },
+  {
+   "family": "RustyPages",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-08-19 - Kandji - Threat Detected: RustyPages Malware - Part I",
+     "url": "https://the-sequence.com/rustypages-malware-part-i"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "e98756472404aeef70ba4d403339962989d9ed733fa0f6a23bdf4c2900d7e877",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e98756472404aeef70ba4d403339962989d9ed733fa0f6a23bdf4c2900d7e877/"
+    },
+    {
+     "sha256": "7ab47b7b14f4d6848b9f4d410d1315ccc68e9a6714d94a2e870b6ba77d28e828",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/7ab47b7b14f4d6848b9f4d410d1315ccc68e9a6714d94a2e870b6ba77d28e828/"
+    },
+    {
+     "sha256": "5cee6368c6a9922a81a03831979947db8e5365986b4ad725c552ab6018a083b3",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/5cee6368c6a9922a81a03831979947db8e5365986b4ad725c552ab6018a083b3/"
+    },
+    {
+     "sha256": "d2c48f4fa4b0285889ef6c7667e12a1c0eda1393632ef2eac67b32777bf096f7",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/d2c48f4fa4b0285889ef6c7667e12a1c0eda1393632ef2eac67b32777bf096f7/"
+    },
+    {
+     "sha256": "f4c41111960771e0d7558ec2453b76ba9c422fcb9408e09a8de1fd611c272846",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/f4c41111960771e0d7558ec2453b76ba9c422fcb9408e09a8de1fd611c272846/"
+    }
+   ]
+  },
+  {
+   "family": "RustyWater",
+   "aliases": [
+    "RUSTRIC",
+    "Archer RAT"
+   ],
+   "writeups": [
+    {
+     "title": "2025-12-22 - Seqrite - UNG0801: Tracking Threat Clusters obsessed with AV Icon Spoofing targeting Israel",
+     "url": "https://www.seqrite.com/blog/ung0801-tracking-threat-clusters-obsessed-with-av-icon-spoofing-targeting-israel/"
+    },
+    {
+     "title": "2026-01-08 - CloudSEK - Reborn in Rust: Muddy Water Evolves Tooling with RustyWater Implant",
+     "url": "https://www.cloudsek.com/blog/reborn-in-rust-muddywater-evolves-tooling-with-rustywater-implant"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "a2001892410e9f34ff0d02c8bc9e7c53b0bd10da58461e1e9eab26bdbf410c79",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/a2001892410e9f34ff0d02c8bc9e7c53b0bd10da58461e1e9eab26bdbf410c79/"
+    },
+    {
+     "sha256": "7523e53c979692f9eecff6ec760ac3df5b47f172114286e570b6bba3b2133f58",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/7523e53c979692f9eecff6ec760ac3df5b47f172114286e570b6bba3b2133f58/"
+    }
+   ]
+  },
+  {
+   "family": "Rust-based keylogger used by SloppyLemming",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-03-02 - Arctic Wolf - SloppyLemming Deploys BurrowShell and Rust-Based RAT to Target Pakistan and Bangladesh",
+     "url": "https://arcticwolf.com/resources/blog/sloppylemming-deploys-burrowshell-and-rust-based-rat-to-target-pakistan-and-bangladesh/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "4f1628821c13cc27fd4134301cc93a1ad32b2a3f7066c3d90f7ba89e02180754",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/4f1628821c13cc27fd4134301cc93a1ad32b2a3f7066c3d90f7ba89e02180754/"
+    }
+   ]
+  },
+  {
+   "family": "SnowFlake Stealer",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2022-02-14 - Finch4 - SnowFlake Stealer Analysis",
+     "url": "https://github.com/Finch4/Malware-Analysis-Reports/blob/4f3baae07575e799db97ec22cb271d89c0fb0879/SnowFlake%20Stealer/SnowFlake%20Stealer%20Analysis.pdf"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "1ae99a454f6c11e30c346ca825e2d20bc5450ddb808f25dd20a4d952604d34f0",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/1ae99a454f6c11e30c346ca825e2d20bc5450ddb808f25dd20a4d952604d34f0/"
+    },
+    {
+     "sha256": "4f10f503422560da8a332c30323401af59a914af940716d06e139ed7371be53f",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/4f10f503422560da8a332c30323401af59a914af940716d06e139ed7371be53f/"
+    },
+    {
+     "sha256": "5e1626ac3140548619efba38a154b98234080908158378ad2e7e4af9e92cfbb8",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/5e1626ac3140548619efba38a154b98234080908158378ad2e7e4af9e92cfbb8/"
+    },
+    {
+     "sha256": "674f31aed8544f2f54423de908559f3d1964ef4f3391d2bf989915766b8c42e9",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/674f31aed8544f2f54423de908559f3d1964ef4f3391d2bf989915766b8c42e9/"
+    },
+    {
+     "sha256": "8441c5d0d5ee30f94f54459ba89a3a2d20677d98313c120f32bf98015214049f",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/8441c5d0d5ee30f94f54459ba89a3a2d20677d98313c120f32bf98015214049f/"
+    },
+    {
+     "sha256": "b44db0bf0992d55c7353fe368322fe0b1e912b2a381c4bf8b7c56c9fcd2a86ff",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/b44db0bf0992d55c7353fe368322fe0b1e912b2a381c4bf8b7c56c9fcd2a86ff/"
+    }
+   ]
+  },
+  {
+   "family": "SPICA",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-01-18 - Google TAG - Russian threat group COLDRIVER expands its targeting of Western officials to include the use of malware",
+     "url": "https://blog.google/threat-analysis-group/google-tag-coldriver-russian-phishing-malware/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "37c52481711631a5c73a6341bd8bea302ad57f02199db7624b580058547fb5a9",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/37c52481711631a5c73a6341bd8bea302ad57f02199db7624b580058547fb5a9/"
+    }
+   ]
+  },
+  {
+   "family": "SSLoad",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2024-04-11 - Palo Alto Networks - Contact Forms Campaign Pushes SSLoad Malware",
+     "url": "https://github.com/PaloAltoNetworks/Unit42-timely-threat-intel/blob/main/2024-04-15-IOC-for-Contact-Forms-campaign-SSLoad-activity.txt"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "09ffc4188bf11bf059b616491fcb8a09a474901581f46ec7f2c350fbda4e1e1c",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/09ffc4188bf11bf059b616491fcb8a09a474901581f46ec7f2c350fbda4e1e1c/"
+    }
+   ]
+  },
+  {
+   "family": "Still Toolkit",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-04-16 - BI.ZONE - Unholy trinity: werewolves target law enforcers",
+     "url": "https://bi.zone/eng/expertise/blog/triedinoe-zlo-oborotni-atakuyut-sotrudnikov-silovykh-struktur/"
+    },
+    {
+     "title": "2026-08-13 - Kaspersky - Armored Likho expands its cyber-espionage toolkit",
+     "url": "https://securelist.com/armored-likho-still-toolkit/121033/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "e321a2348bfba68e642f8b13bbdbebc394a4364bddbdadf8b37e4bff80200de1",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/e321a2348bfba68e642f8b13bbdbebc394a4364bddbdadf8b37e4bff80200de1/"
+    },
+    {
+     "sha256": "404eb4ada6e161210611f1c8275f126ec24aad37c380ead130cf15667023d249",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/404eb4ada6e161210611f1c8275f126ec24aad37c380ead130cf15667023d249/"
+    },
+    {
+     "sha256": "5fc1251e474eae9253362a08095e989edc2b63de21d76052a2c849efc6792c3f",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/5fc1251e474eae9253362a08095e989edc2b63de21d76052a2c849efc6792c3f/"
+    }
+   ]
+  },
+  {
+   "family": "SysJoker (Rust variant)",
+   "aliases": [
+    "RustDown"
+   ],
+   "writeups": [
+    {
+     "title": "2023-11-23 - Check Point - Israel-Hamas War Spotlight: Shaking the Rust Off SysJoker",
+     "url": "https://research.checkpoint.com/2023/israel-hamas-war-spotlight-shaking-the-rust-off-sysjoker/"
+    },
+    {
+     "title": "2023-11-27 - Intezer - WildCard: The APT Behind SysJoker Targets Critical Sectors in Israel",
+     "url": "https://intezer.com/blog/research/wildcard-evolution-of-sysjoker-cyber-threat/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "d4095f8b2fd0e6deb605baa1530c32336298afd026afc0f41030fa43371e3e72",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=d4095f8b2fd0e6deb605baa1530c32336298afd026afc0f41030fa43371e3e72"
+    }
+   ]
+  },
+  {
+   "family": "Tetra Loader",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-05-22 - Cisco - UAT-6382 exploits Cityworks zero-day vulnerability to deliver malware",
+     "url": "https://blog.talosintelligence.com/uat-6382-exploits-cityworks-vulnerability/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "14ed3878b6623c287283a8a80020f68e1cb6bfc37b236f33a95f3a64c4f4611f",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/14ed3878b6623c287283a8a80020f68e1cb6bfc37b236f33a95f3a64c4f4611f/"
+    },
+    {
+     "sha256": "1c38e3cda8ac6d79d9da40834367697a209c6b07e6b3ab93b3a4f375b161a901",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/1c38e3cda8ac6d79d9da40834367697a209c6b07e6b3ab93b3a4f375b161a901/"
+    },
+    {
+     "sha256": "4ffc33bdc8527a2e8cb87e49cdc16c3b1480dfc135e507d552f581a67d1850a9",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/4ffc33bdc8527a2e8cb87e49cdc16c3b1480dfc135e507d552f581a67d1850a9/"
+    }
+   ]
+  },
+  {
+   "family": "Unnamed Rust DDoS Botnet",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2025-11-30 - Beelzebub - How I Reverse Engineered a Rust Botnet and Built a C2 Honeypot to Monitor Its Targets",
+     "url": "https://beelzebub.ai/blog/rust-ddos-botnet-honeypot-c2-decoding/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "fd6ec293c37abd2d832659697d42c781727b0d32ba6bba3f0387b0dedaabe74e",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/fd6ec293c37abd2d832659697d42c781727b0d32ba6bba3f0387b0dedaabe74e/"
+    }
+   ]
+  },
+  {
+   "family": "VENON",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2026-03-10 - ZenoX - VENON: The First Brazilian Banker RAT in Rust",
+     "url": "https://zenox.ai/en/venon-the-first-brazilian-banker-rat-in-rust/"
+    },
+    {
+     "title": "Full PDF version of report available here",
+     "url": "https://public.vydar.net/ZenoX%20-%20VENON-%20O%20Primeiro%20Banker%20RAT%20Brasileiro%20em%20Rust%20-%20Versa%CC%83o%20Aberta%20-%20EN.pdf"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "c482286a7fdfb64d308c197a4deabcd773b8b62d9e74d1d08fcfd02568d75d72",
+     "source": "MalwareBazaar",
+     "url": "https://bazaar.abuse.ch/sample/c482286a7fdfb64d308c197a4deabcd773b8b62d9e74d1d08fcfd02568d75d72/"
+    }
+   ]
+  },
+  {
+   "family": "Zeon Ransomware (Rust variant)",
+   "aliases": [],
+   "writeups": [
+    {
+     "title": "2022-06-22 - SentinelOne - From the Front Lines | 3 New and Emerging Ransomware Threats Striking Businesses in 2022",
+     "url": "https://www.sentinelone.com/blog/from-the-front-lines-3-new-and-emerging-ransomware-threats-striking-businesses-in-2022/"
+    }
+   ],
+   "samples": [
+    {
+     "sha256": "fb57abf08a85f1d7ca0a6fdcd76b04ccf964a5b05f2f784492083994773e4590",
+     "source": "MalShare",
+     "url": "https://malshare.com/sample.php?action=detail&hash=fb57abf08a85f1d7ca0a6fdcd76b04ccf964a5b05f2f784492083994773e4590"
+    }
+   ]
+  }
+ ],
+ "hash_to_family": {
+  "e5834b7bdd70ec904470d541713e38fe933e96a4e49f80dbfb25148d9674f957": "01flip",
+  "e90bdaaf5f9ca900133b699f18e4062562148169b29cb4eb37a0577388c22527": "Agenda Ransomware",
+  "0ee1d284ed663073872012c7bde7fac5ca1121403f1a5d2d5411317df282796c": "Akira Ransomware (Rust \"Akira v2\" variant)",
+  "28cea00267fa30fb63e80a3c3b193bd9cd2a3d46dd9ae6cede5f932ac15c7e2e": "Akira Ransomware (Rust \"Megazord\" variant)",
+  "131da83b521f610819141d5c740313ce46578374abb22ef504a7593955a65f07": "Akira Ransomware (Rust \"Megazord\" variant)",
+  "de5748aac4a4d4cb48cf050652679e6bc49eda33d9ffaa0d280b578122fab55a": "AmnesiaStealer",
+  "e853748ca8f9a5a9168263617409a9039ab09f4ffc7d860374c1e3b0b67b31a5": "AmnesiaStealer",
+  "eb12c198fc1b6ec79ea4b457988db4478ee6bc9aca128aa24a85b76a57add459": "AsyncRAT (Rust variant)",
+  "dea72cdd7c9dfc49f0a19581086c8e6e99b000dc33f461ece8b9f37c1bd7068d": "Banshee (Rust variant)",
+  "3d7cf20ca6476e14e0a026f9bdd8ff1f26995cdc5854c3adb41a6135ef11ba83": "BlackCat Ransomware",
+  "c0e70e69d8f7432383fa37528cd42db764b73dd08eb75d72229c2a0d02e538cc": "BlackCat Ransomware (Sphynx)",
+  "a963a8a8e1583081daa43638744eef6c410d1a410c11eb9413da15a26e802de5": "CargoBay",
+  "4d5f3690cdff840ceba70c1b1630ceadd0d3dcf23c8e0add0257cba2f166f5e6": "ChaosBot",
+  "cdc73afb92617d9e2e0b6f2f22587f5f57316250a25b7bb8477a80628703e7b7": "ChaosBot",
+  "7b3022437b637c44f42741a92c7f7ed251845fd02dda642c0a47fde179bd984e": "Cicada3301 Ransomware",
+  "56e1d092c07322d9dad7d85d773953573cc3294b9e428b3bbbaf935ca4d2f7e7": "Cicada3301 Ransomware",
+  "947ae8f075fd0d1e5be0341b922c0173f0c5cfd771314ebe220207f3ed53466a": "Convuster",
+  "3315e5a4590e430550a4d85d0caf5f521d421a2966b23416fcfc275a5fd2629a": "CosmicRust",
+  "c92a7425959121ff49970c53b78e714b9e450e4b214ac85deb878d0bedf82a70": "DeltaStealer",
+  "5330cf6a8f4f297b9726f37f47cffac38070560cbac37a8e561e00c19e995f42": "EDDIESTEALER",
+  "ebffc9ced2dba66db9aae02c7ccd2759a36c5167df5cd4adb151b20e7eab173c": "Embargo Ransomware",
+  "a36967a40dcff74c04b5dd80f1aa685925912df8ff6cb63c14059439e08d5f8d": "ExeWho2",
+  "dc021a0ca0bb3f66d54d15d2b236422c0b90399ea762c7d7aa6d727b9bd5b46c": "FickerStealer",
+  "e9bc44cf548a70e7285499209973faf44b7374dece1413dfcdc03bf25a6c599c": "Fickle Stealer",
+  "afd38445e5249ac5ac66addd18c20d271f41c3ffb056ca49c8c02f9fecb4afcb": "Freeze.rs",
+  "c233aec7917cf34294c19dd60ff79a6e0fac5ed6f0cb57af98013c08201a7a1c": "FunkSec Ransomware",
+  "66dbf939c00b09d8d22c692864b68c4a602e7a59c4b925b2e2bef57b1ad047bd": "FunkSec Ransomware",
+  "dcf536edd67a98868759f4e72bcbd1f4404c70048a2a3257e77d8af06cb036ac": "FunkSec Ransomware",
+  "b1ef7b267d887e34bf0242a94b38e7dc9fd5e6f8b2c5c440ce4ec98cc74642fb": "FunkSec Ransomware",
+  "5226ea8e0f516565ba825a1bbed10020982c16414750237068b602c5b4ac6abd": "FunkSec Ransomware",
+  "e622f3b743c7fc0a011b07a2e656aa2b5e50a4876721bcf1f405d582ca4cda22": "FunkSec Ransomware",
+  "20ed21bfdb7aa970b12e7368eba8e26a711752f1cc5416b6fd6629d0e2a44e5d": "FunkSec Ransomware",
+  "dd15ce869aa79884753e3baad19b0437075202be86268b84f3ec2303e1ecd966": "FunkSec Ransomware",
+  "74d3447e7cf99c99ea01a16332ec27432dfb0f491e10e67cd118065a60483306": "Rust-based backdoor observed in supply chain compromise of `arrayref` Rust crate",
+  "c9561a3b00a0fa38b7772675d987f84bd429c55cd024fc08a98245c2d1632848": "Rust-based backdoor observed in supply chain compromise of `arrayref` Rust crate",
+  "408ef22050ffc5a67e005802809026b29f297a8019f8fda91a2afa8e877ba434": "Rust-based backdoor observed in supply chain compromise of `arrayref` Rust crate",
+  "6ebeb188f3cc3b647c4460c0b8e41b75d057747c662f4cd7912d77deaccfd2f2": "Rust-based payload delivered by GlassWorm",
+  "fb07743d139f72fca4616b01308f1f705f02fda72988027bc68e9316655eadda": "Rust-based payload delivered by GlassWorm",
+  "93439fe9b45d7b6e9fcdc5e68fd47677ea17025e4eabb6f1468cb9ae98ee8a5b": "Rust-based loader mimicking GoToMeeting DLL",
+  "f4a39820dbff47fa1b68f83f575bc98ed33858b02341c5c0464a49be4e6c76d3": "Hive Ransomware (Rust variant)",
+  "c4d39db132b92514085fe269db90511484b7abe4620286f6b0a30aa475f64c3e": "Hunters International Ransomware",
+  "36abd242ddaa27f0160c539377a0e92cf781c1695137850acc87e3892b436d36": "IronWorm",
+  "9ea600a96c3d6950bfbf5b98980bad957a88441307a1cb8e3c6a21b3bdc65d12": "IronWorm",
+  "69bb729ff354cd9651f99a05f74f3ea20d483dc8e6e5838e4dd48858fd500d29": "JLORAT",
+  "812d2d8436985fc8531315970b2af6bcdd697f9033bc12841ce467e6fda94408": "JitterDropper",
+  "cb7264735e38f2575a354762c122a90d8994ea406f4911a42d8fa45d397fc4ff": "JitterDropper",
+  "e8082e3c0d63f83ad95af88f50e9ae26512e89113339b66b24068648363d676e": "JitterDropper",
+  "9957bf9bc95be77c84f83546d37ec3bd81877872f2e18e54adc014c541da3c6a": "JitterDropper",
+  "eede257690bdc8c0668c3bef1e394a6c1e50980ba237647fb36c26f46557a450": "JitterDropper",
+  "4e57a67bf5a1dfa198bafc192ed47016f1a043c0c8ae0349f32c02ed17d296d4": "JitterDropper",
+  "9e714ba3e2f8fe053550bb0234fc7e3fa64ce41e601bff83f0f47822245312fc": "JitterDropper",
+  "2ef28834f30d3fd881f8c3004ab67c01e2ec283c03d57e173e43a7b30d52f97b": "JitterDropper",
+  "5605f711e9c256b09dcf06c4f39851545dbfc05c1c5b3e5f3129b16506e7df19": "JitterDropper",
+  "0ae6570d9e659ffd5efc1e3f9faca696bd12b66b8d125b1159aee9e5251a4d79": "KCVY OSLOCK",
+  "030eb56e155fb01d7b190866aaa8b3128f935afd0b7a7b2178dc8e2eb84228b0": "KrustyLoader",
+  "47ff0ae9220a09bfad2a2fb1e2fa2c8ffe5e9cb0466646e2a940ac2e0cf55d04": "KrustyLoader",
+  "0f0fd4870160fab8ca35512ecef8425e8c0e733f7a771109598e8efa36fc42e3": "LabubaRAT",
+  "99331a27afa84009e140880a8739d96f97baa1676d67ba7a3278fe61bfb79022": "Luca Stealer",
+  "1cbbf108f44c8f4babde546d26425ca5340dccf878d306b90eb0fbec2f83ab51": "Luna Ransomware",
+  "fcfec2dc084c222e90ba7a860de6395ad819c46764fc37e0891308eff65510d5": "Marabu Ransomware",
+  "55a418f8562684607ee0acd745595e297ab7e586d0a5d3f8328643b29c72dfa2": "Myth Stealer",
+  "2f2b93d37d67b80b4faaf25bebe4e3cbaf7aca35328aeb66da6a1a9b44316f5b": "Myth Stealer",
+  "66054607f38481ee7e39e002b58fe950966c4c0203df39f46acfe5c0e857c89a": "Myth Stealer",
+  "7095beafff5837070a89407c1bf3c6acf8221ed786e0697f6c578d4c3de0efd6": "Nokoyawa Ransomware (Rust variant)",
+  "3a43116d507d58f3c9717f2cb0a3d06d0c5a7dc29f601e9c2b976ee6d9c8713f": "P2PInfect",
+  "456b9adaabae9f3dce2207aa71410987f0a571cd8c11f2e7b41468501a863606": "RALord Ransomware",
+  "a7ea1e33c548182b8e56e32b547afb4b384ebe257ca0672dbf72569a54408c5c": "RansomExx2",
+  "2af0e212ad70eaf8b96a645045ef2764700b5adf7b1187ae3d82240f96f613e2": "Realst Stealer",
+  "33c86ecfc324de3af97150bd009aba7925a6ba7a0842e127e94cf351013c0fe6": "Rust-based clipboard hijacker used in \"Ghost Network\" malware distribution campaign",
+  "7a7ad4ae347a3f99f3773a113d9f70ecfa967100c96e8275bd1df833caee68d1": "Rust-based clipboard hijacker used in \"Ghost Network\" malware distribution campaign",
+  "0f11aeecbde1f355d26c9d406dad80cb0ae8536aea31fdddaf915d4afd434f3f": "Rust-based loader for Rilide",
+  "db91e23d9715464511057f2e15c9adc97d3f27fcfa308f05ac7e2de7275fdd32": "Rust-based stealer used in RusticWeb campaign",
+  "9ca914b1cfa8c0ba021b9e00bda71f36cad132f27cf16bda6d937badee66c747": "RustBucket",
+  "de81e5246978775a45f3dbda43e2716aaa1b1c4399fe7d44f918fccecc4dd500": "RustBucket",
+  "a900ec81363358ef26bcdf7827f6091af44c3f1001bc8f52b766c9569b56faa5": "RustDoor",
+  "4a59e2fe11ed9136d96a985448b34957ee5861adc9c1a52de4ad65880875dfdb": "RustDoor",
+  "238b546e2a1afc230f88b98dce1be6bf442b0b807e364106c0b28fe18db2ce66": "RustDoor",
+  "45aa8efb6b1a9a0e0091040bb99a7c37d346aaf306fa4e31e9d5d9f0fef56676": "Rustic Crypter",
+  "114b460012412411363c9a3ab0246e48a584ce86fc6c0b7855495ec531dd05a1": "RustoBot",
+  "1697fd5230f7f09a7b43fee1a1693013ed98beeb7a182cd3f0393d93dd1b7576": "RustoBot",
+  "44a526f20c592fd95b4f7d61974c6f87701e33776b68a5d0b44ccd2fa3f48c5d": "RustoBot",
+  "5dc90cbb0f69f283ccf52a2a79b3dfe94ee8b3474cf6474cfcbe9f66f245a55d": "RustoBot",
+  "9a9b5bdeb1f23736ceffba623c8950d627a791a0b40c4d44ae2f80e02a43955d": "RustoBot",
+  "9e660ce74e1bdb0a75293758200b03efd5f807e7896665addb684e0ffb53afd2": "RustoBot",
+  "9f098920613bd0390d6485936256a67ae310b633124cfbf503936904e69a81bf": "RustoBot",
+  "b68e2d852ad157fc01da34e11aa24a5ab30845b706d7827b8119a3e648ce2cf1": "RustoBot",
+  "b910e77ee686d7d6769fab8cb8f9b17a4609c4e164bb4ed80d9717d9ddad364f": "RustoBot",
+  "c0abb19b3a72bd2785e8b567e82300423da672a463eefdeda6dd60872ff0e072": "RustoBot",
+  "e547306d6dee4b5b2b6ce3e989b9713a5c21ebe3fefa0f5c1a1ea37cec37e20f": "RustoBot",
+  "ec9e77f1185f644462305184cf8afcf5d12c7eb524a2d3f4090a658a198c20ce": "RustoBot",
+  "efb0153047b08aa1876e1e4e97a082f6cb05af75479e1e9069b77d98473a11f4": "RustoBot",
+  "67ad959e8af25a48928c28ca9a38a6f2a61ea4935fe60dfed79061214e840b15": "Rustonotto",
+  "738a31e7a0d96fe1b0ad6778db39425160835a80ac33ce8a84f26b71c00c26b9": "Rustonotto",
+  "9111d458d5665b1bf463859792e950fe8d8186df9a6a3241360dc11f34d018c2": "RustyAttr",
+  "176e8a5a7b6737f8d3464c18a77deef778ec2b9b42b7e7eafc888aeaf2758c2d": "RustyAttr",
+  "3abed86f46c8be754239f8c878f035efaae91c33b8eb8818c5bbed98c4d9a3ac": "RustyBuer",
+  "10e1d453d4f9ca05ff6af3dcd7766a17ca1470ee89ba90feee5d52f8d2b18a4c": "RustyClaw",
+  "7602e2c1ae27e1b36ee4aed357e505f14496f63db29fb4fcdd0d8a9db067a5c4": "RustyClaw",
+  "b1fe8fbbb0b6de0f1dcd4146d674a71c511488a9eb4538689294bd782df040df": "RustyClaw",
+  "5327308fee51fc6bb95996c4185c4cfcbac580b747d79363c7cf66505f3ff6db": "RustyFlag",
+  "e98756472404aeef70ba4d403339962989d9ed733fa0f6a23bdf4c2900d7e877": "RustyPages",
+  "7ab47b7b14f4d6848b9f4d410d1315ccc68e9a6714d94a2e870b6ba77d28e828": "RustyPages",
+  "5cee6368c6a9922a81a03831979947db8e5365986b4ad725c552ab6018a083b3": "RustyPages",
+  "d2c48f4fa4b0285889ef6c7667e12a1c0eda1393632ef2eac67b32777bf096f7": "RustyPages",
+  "f4c41111960771e0d7558ec2453b76ba9c422fcb9408e09a8de1fd611c272846": "RustyPages",
+  "a2001892410e9f34ff0d02c8bc9e7c53b0bd10da58461e1e9eab26bdbf410c79": "RustyWater",
+  "7523e53c979692f9eecff6ec760ac3df5b47f172114286e570b6bba3b2133f58": "RustyWater",
+  "4f1628821c13cc27fd4134301cc93a1ad32b2a3f7066c3d90f7ba89e02180754": "Rust-based keylogger used by SloppyLemming",
+  "1ae99a454f6c11e30c346ca825e2d20bc5450ddb808f25dd20a4d952604d34f0": "SnowFlake Stealer",
+  "4f10f503422560da8a332c30323401af59a914af940716d06e139ed7371be53f": "SnowFlake Stealer",
+  "5e1626ac3140548619efba38a154b98234080908158378ad2e7e4af9e92cfbb8": "SnowFlake Stealer",
+  "674f31aed8544f2f54423de908559f3d1964ef4f3391d2bf989915766b8c42e9": "SnowFlake Stealer",
+  "8441c5d0d5ee30f94f54459ba89a3a2d20677d98313c120f32bf98015214049f": "SnowFlake Stealer",
+  "b44db0bf0992d55c7353fe368322fe0b1e912b2a381c4bf8b7c56c9fcd2a86ff": "SnowFlake Stealer",
+  "37c52481711631a5c73a6341bd8bea302ad57f02199db7624b580058547fb5a9": "SPICA",
+  "09ffc4188bf11bf059b616491fcb8a09a474901581f46ec7f2c350fbda4e1e1c": "SSLoad",
+  "e321a2348bfba68e642f8b13bbdbebc394a4364bddbdadf8b37e4bff80200de1": "Still Toolkit",
+  "404eb4ada6e161210611f1c8275f126ec24aad37c380ead130cf15667023d249": "Still Toolkit",
+  "5fc1251e474eae9253362a08095e989edc2b63de21d76052a2c849efc6792c3f": "Still Toolkit",
+  "d4095f8b2fd0e6deb605baa1530c32336298afd026afc0f41030fa43371e3e72": "SysJoker (Rust variant)",
+  "14ed3878b6623c287283a8a80020f68e1cb6bfc37b236f33a95f3a64c4f4611f": "Tetra Loader",
+  "1c38e3cda8ac6d79d9da40834367697a209c6b07e6b3ab93b3a4f375b161a901": "Tetra Loader",
+  "4ffc33bdc8527a2e8cb87e49cdc16c3b1480dfc135e507d552f581a67d1850a9": "Tetra Loader",
+  "fd6ec293c37abd2d832659697d42c781727b0d32ba6bba3f0387b0dedaabe74e": "Unnamed Rust DDoS Botnet",
+  "c482286a7fdfb64d308c197a4deabcd773b8b62d9e74d1d08fcfd02568d75d72": "VENON",
+  "fb57abf08a85f1d7ca0a6fdcd76b04ccf964a5b05f2f784492083994773e4590": "Zeon Ransomware (Rust variant)"
+ }
+}
