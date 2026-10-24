@@ -183,6 +183,16 @@ strings are IOC-shaped and chosen not to collide with crate or metadata tokens, 
 measures recovery rather than a coincidence of the literal text. More crates are planned
 (`rustfuscator`, `obfuse`), goldberg first.
 
+### Ghidra integration
+
+`scripts/ghidra_annotate.py` is a Ghidra post-script (PyGhidra) that reads `recover.py --json`
+and, in the decompiler, gives every decoding function a plate comment listing its recovered
+strings, a bookmark, and — only when the function still has a default `FUN_`/`SUB_` name — a
+rename after the strongest indicator. Verified headless on the Kali VM (Ghidra 12.1.3): on the
+goldberg AArch64 build, `main` gets a plate comment with both decoded strings
+(`C:\ProgramData\Helios\agent-state.db`, `https://cdn.helios-sync.net/v2/push`) and a bookmark,
+with real demangled names left untouched. IDA and Binary Ninja exporters are planned next.
+
 ### Real-malware reference
 
 `gallery/manifest.json` (built by `scripts/parse_gallery.py` from

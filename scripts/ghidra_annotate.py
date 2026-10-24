@@ -32,10 +32,13 @@ def _resolve(func_field):
     """recover.py reports the function as a hex virtual address in the binary's own terms.
     Ghidra may rebase (PIE, or a chosen image base), so try the raw address and the address
     shifted by the image base, and keep whichever lands in a real function or defined code."""
-    try:
-        va = int(func_field, 16)
-    except (TypeError, ValueError):
-        return None
+    if isinstance(func_field, int):
+        va = func_field
+    else:
+        try:
+            va = int(func_field, 16)
+        except (TypeError, ValueError):
+            return None
     base = currentProgram.getImageBase().getOffset()
     fm = currentProgram.getFunctionManager()
     seen = []
@@ -95,9 +98,7 @@ def main():
         plate = "rust-deobf: %d decoded string(s)\n" % len(strings)
         plate += "\n".join("  %s%s" % (s, "  [" + ",".join(sorted(t for t in tags)) + "]" if False else "")
                            for s in strings)
-        cu = listing.getCodeUnitAt(entry)
-        if cu is not None:
-            cu.setComment(CodeUnit.PLATE_COMMENT, plate)
+        listing.setComment(entry, CodeUnit.PLATE_COMMENT, plate)
         btm.setBookmark(entry, "Analysis", "rust-deobf",
                         "%d decoded: %s" % (len(strings), "; ".join(strings)[:160]))
         annotated += 1
