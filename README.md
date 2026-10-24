@@ -327,7 +327,14 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   fixing one profile's case has broken another before (VALIDATION.md §11). Recording the buffer
   each view came from is the planned fix.
 - **Benign corpus only**: the benchmark is synthetic. It now covers the shapes and profiles the
-  review asked for, but real malware will find shapes it does not — please report them.
+  review asked for, but real malware will find shapes it does not — please report them. First
+  runs on real binaries (a real Rust PE and a C/C++ negative control, static + emulation, never
+  executed) are in VALIDATION.md §12: robust and correct on metadata, but string *deobfuscation*
+  on real **obfuscated** Rust malware is still unvalidated (the real Rust sample to hand does not
+  obfuscate its strings). `gallery/manifest.json` lists 67 Rust families by hash for that step.
+- **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
+  signature; the bundled DB is for one toolchain (rustc 1.97 x86-64) and must be regenerated
+  (`--gen`) for another rustc or architecture, and generic-heavy labels flatten their type args.
 
 Full matrix: `RESULTS.md` · reproducible metrics: `METRICS.md` · real-binary validation and the
 generalisation work: `VALIDATION.md` (§10) · artifact tiers: `ARTIFACT_TIERS.md`.

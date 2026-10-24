@@ -794,3 +794,38 @@ suites above and the self-tests, but a new compiler or profile can still land on
 they do not cover. The durable fix is information the emulator does not record yet — which
 buffer (address) each view came from — so views of one buffer can be told from copies; that is
 the next step, not another rule.
+
+## 12. First runs on real binaries (Oct 2026, Kali VM, static + emulation only)
+
+The benchmark is synthetic; the README's standing caveat is "benign corpus only". The first
+runs on real, third-party binaries, on the Kali VM, **static + emulation only — the sample is
+never executed** (that is `recover.py`'s default: it emulates individual functions under
+Unicorn, no syscalls reach the host). Samples are referenced by hash; none is committed.
+
+| binary | sha256 (prefix) | kind | `recover_rust_meta` | emulation | decoded (obf.) | notes |
+|---|---|---|---|---|--:|---|
+| catthief.exe | `904e6720…cb94c22` | real Rust PE (FLARE-On 13, ch5) | **rust=True**, rustc 1.96.0, **17 crates** (ureq/rustls/ring/flate2/base64), 835 panic sites | 2391/2391 fns, 10 s, no crash | 1 | not string-obfuscated → little to decode, and nothing invented |
+| ToxicMiner.exe | `ee3a410d…a28a93` | real C/C++ PE (negative control) | **rust=False**, 0 crates | 4780/4780 fns, 11 s, no crash | 2 | 2 runtime-assembled strings (CPU brand, a hex table); correctly flags non-Rust |
+
+What this shows and does not. It shows the pipeline is **robust on real binaries** (full
+function coverage in seconds, no crash) and that the **metadata tier** works on a real Rust
+sample (17 crates + capability profile from catthief, exactly as ARTIFACT_TIERS §3 describes),
+and that it does **not invent strings** where there is no obfuscation (catthief ships plain/
+runtime strings; the decoder reports one, not noise) and correctly distinguishes Rust from
+non-Rust. It does **not** yet validate string *deobfuscation* on real **obfuscated** Rust
+malware — catthief does not obfuscate its strings. That needs real samples from a family that
+uses an obfuscation crate; `gallery/manifest.json` lists 67 Rust families by hash for fetching
+into the VM (MalwareBazaar now requires a free Auth-Key). That is the next real-sample step.
+
+## 13. Library-function identification across binaries (Oct 2026, rustc 1.97)
+
+`recover_libfuncs.py` (ARTIFACT_TIERS §3) signs library functions in an unstripped reference
+build and matches them in a stripped target. Held-out check: signatures from three programs
+(litcrypt, obfstr, cryptify) identified **277 library functions in two programs not in the DB
+(xor_custom, add_custom), 277/277 correct, 0 misidentified**, scored against each target's own
+symbols. `tests/test_libfuncs.py` reruns this (one program's signatures → a different stripped
+program) in CI. A signature that matches more than one function start in the target is dropped
+for that binary (e.g. `LowerHex`/`UpperHex` share a masked prologue), so an identification is
+never a guess. Verified into Ghidra headless on the stripped binary: all 277 functions renamed
+`lib_<name>`. The label flattens generic arguments (a monomorphised symbol reads as a long
+concatenated path); the identification — which address is which function — is exact.
