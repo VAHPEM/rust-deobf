@@ -255,7 +255,8 @@ resolution, unpacked stage-2 carving, Rust crate+version & panic-site recovery,
 **library-function identification** (name the std/crate functions in a stripped binary by
 byte signature, so the decoders stand out), and MBA / opaque-predicate analysis plus
 control-flow-flattening detection **and reconstruction** (recover a flattened function's
-state-transition graph) — see `ARTIFACT_TIERS.md`.
+state-transition graph, validated on both goldberg's XOR-delta transitions and the
+OLLVM `-fla` direct-assignment form) — see `ARTIFACT_TIERS.md`.
 
 Recovered strings and identified functions can be pushed straight into a decompiler:
 `scripts/ghidra_run.sh <binary>` runs the recovery and annotates a Ghidra project headless

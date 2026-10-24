@@ -16,3 +16,4 @@ build/arm64/
 build/build_manifest.jsonl
 obf_src/*/target/
 obf_src/*/Cargo.lock
+obf_src/ollvm_fla/fla

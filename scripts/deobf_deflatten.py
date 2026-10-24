@@ -20,6 +20,12 @@ So each case runs at a known state value and transitions to `state ^ delta`. Rec
 (state -> case, case -> next state) maps rebuilds the real control-flow graph; real branches in
 the original code (`if code < 10`) survive as a case with two deltas on two paths.
 
+Two transition forms are handled and tested: goldberg's XOR-delta (`state ^= delta`) and the
+classic OLLVM `-fla` **direct assignment** (`switchVar = next_const`, no update slot). The direct
+form is covered by `tests/test_deflatten.py::test_deflatten_ollvm_direct_assignment` against a
+clang-built target in `obf_src/ollvm_fla/` whose two original branches (a loop test and a parity
+check) must reappear as two-way transitions.
+
 This is observational static analysis: it reads the binary and runs nothing. It reconstructs the
 graph; it does not re-emit a binary.
 
