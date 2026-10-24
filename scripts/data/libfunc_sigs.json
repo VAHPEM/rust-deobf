@@ -1,0 +1,1391 @@
+{
+ "rustc-1.97.0": {
+  "x86_64": [
+   {
+    "name": "core::cell::once::OnceCell::result::Result::option::Option::alloc::boxed::Box::addr2line::unit::DwoUnit::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::Error::try_init::get_or_init::ResUnit::dwarf_and_unit",
+    "sym": "_RINvMNtNtCscI6d9CVNmLh_4core4cell4onceINtB3_8OnceCellINtNtB7_6result6ResultINtNtB7_6option6OptionINtNtCs40k4W9msRzi_5alloc5boxed3BoxINtNtCscIsuJ8n2VmD_9addr2line4unit7DwoUnitINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB2T_9endianity12LittleEndianEEEENtB2R_5ErrorEE8try_initNCINvB2_11get_or_initNCNvMB29_INtB29_7ResUnitB2M_E14dwarf_and_units2_0E0zECsgczF5crJ4sT_3std",
+    "pattern": "4889f00fb60e488b7608803ffe75..880f8b48018b4004894f01894704488977084889f8c380f9fe75..4889f8c35548"
+   },
+   {
+    "name": "core::cell::once::OnceCell::result::Result::addr2line::function::Function::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::Error::try_init::get_or_init::LazyFunction::borrow",
+    "sym": "_RINvMNtNtCscI6d9CVNmLh_4core4cell4onceINtB3_8OnceCellINtNtB7_6result6ResultINtNtCscIsuJ8n2VmD_9addr2line8function8FunctionINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB23_9endianity12LittleEndianEENtB21_5ErrorEE8try_initNCINvB2_11get_or_initNCNvMs_B1e_INtB1e_12LazyFunctionB1W_E6borrow0E0zECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534881ec280100004889fb488b0e488b4610488b094c8b69404c8b7008498b5630498b4e"
+   },
+   {
+    "name": "core::slice::sort::shared::smallsort::insertion_sort_shift_left::addr2line::function::InlinedFunctionAddress::alloc::slice::sort_by::Function::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6shared9smallsort25insertion_sort_shift_leftNtNtCscIsuJ8n2VmD_9addr2line8function22InlinedFunctionAddressNCINvMNtCs40k4W9msRzi_5alloc5sliceSB1m_7sort_byNCNvMs1_B1o_INtB1o_8FunctionINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3F_9endianity12LittleEndianEE5parse0E0ECsgczF5crJ4sT_3std",
+    "pattern": "41565348c1e6054801fe488d572031c04889f9eb..66662e0f1f8400000000004989fb4d89034d895308498953104d89"
+   },
+   {
+    "name": "core::cell::once::OnceCell::result::Result::addr2line::function::Functions::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::Error::try_init::get_or_init::LazyFunctions::borrow",
+    "sym": "_RINvMNtNtCscI6d9CVNmLh_4core4cell4onceINtB3_8OnceCellINtNtB7_6result6ResultINtNtCscIsuJ8n2VmD_9addr2line8function9FunctionsINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB24_9endianity12LittleEndianEENtB22_5ErrorEE8try_initNCINvB2_11get_or_initNCNvMB1e_INtB1e_13LazyFunctionsB1X_E6borrow0E0zECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534881ece80100004989ff48c78528ffffff0000000048c78530ffffff0800000048c785"
+   },
+   {
+    "name": "core::ptr::drop_glue::alloc::boxed::Box::addr2line::function::LazyFunction::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCs40k4W9msRzi_5alloc5boxed3BoxSINtNtCscIsuJ8n2VmD_9addr2line8function12LazyFunctionINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB28_9endianity12LittleEndianEEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504885f60f84........4989f64889fb4c8d7f204c8b25........4989f5eb..0f1f00"
+   },
+   {
+    "name": "core::ptr::drop_glue::alloc::vec::Vec::addr2line::function::LazyFunction::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCs40k4W9msRzi_5alloc3vec3VecINtNtCscIsuJ8n2VmD_9addr2line8function12LazyFunctionINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB25_9endianity12LittleEndianEEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504989fe488b5f084c8b7f104d85ff74..4c8d63204c8b2d........eb..0f1f440000"
+   },
+   {
+    "name": "core::cell::once::OnceCell::result::Result::addr2line::line::Lines::gimli::read::Error::try_init::get_or_init::LazyLines::borrow::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvMNtNtCscI6d9CVNmLh_4core4cell4onceINtB3_8OnceCellINtNtB7_6result6ResultNtNtCscIsuJ8n2VmD_9addr2line4line5LinesNtNtCs72oxeLBbweZ_5gimli4read5ErrorEE8try_initNCINvB2_11get_or_initNCINvMB1d_NtB1d_9LazyLines6borrowINtNtB1Q_12endian_slice11EndianSliceNtNtB1S_9endianity12LittleEndianEE0E0zECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534881eca802000048899590fdffff4889b598fdffff8b81000100008945d00f1081d800"
+   },
+   {
+    "name": "core::slice::sort::shared::smallsort::insertion_sort_shift_left::addr2line::line::LineSequence::alloc::slice::sort_by_key::Lines::parse::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6shared9smallsort25insertion_sort_shift_leftNtNtCscIsuJ8n2VmD_9addr2line4line12LineSequenceNCINvMNtCs40k4W9msRzi_5alloc5sliceSB1m_11sort_by_keyyNCINvMs_B1o_NtB1o_5Lines5parseINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3z_9endianity12LittleEndianEEs_0E0ECsgczF5crJ4sT_3std",
+    "pattern": "48c1e6054801fe488d5720b8200000004989f8eb..66662e0f1f8400000000004989fa0f284424e8410f11024a89540f"
+   },
+   {
+    "name": "core::ptr::drop_glue::alloc::boxed::Box::string::String",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCs40k4W9msRzi_5alloc5boxed3BoxSNtNtBG_6string6StringEECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504885f674..4989f64889fb4c8d7f084c8b25........4989f5eb..0f1f8000000000"
+   },
+   {
+    "name": "core::ptr::drop_glue::gimli::read::line::LineRows::endian_slice::EndianSlice::endianity::LittleEndian::IncompleteLineProgram",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtNtCs72oxeLBbweZ_5gimli4read4line8LineRowsINtNtBG_12endian_slice11EndianSliceNtNtBI_9endianity12LittleEndianEINtBE_21IncompleteLineProgramB1l_jEjEECsgczF5crJ4sT_3std",
+    "pattern": "554889e553504889fb488b77584885f674..488b7b6048c1e602ba02000000ff15........488b43704885c074..488b"
+   },
+   {
+    "name": "std::sync::once_lock::OnceLock::reentrant_lock::ReentrantLock::core::cell::RefCell::io::buffered::linewriter::LineWriter::stdio::StdoutRaw::initialize::get_or_init",
+    "sym": "_RINvMNtNtCsgczF5crJ4sT_3std4sync9once_lockINtB3_8OnceLockINtNtB5_14reentrant_lock13ReentrantLockINtNtCscI6d9CVNmLh_4core4cell7RefCellINtNtNtNtB7_2io8buffered10linewriter10LineWriterNtNtB2e_5stdio9StdoutRawEEEE10initializeNCINvB2_11get_or_initNCNvB2V_6stdout0E0zEB7_",
+    "pattern": "8b05........85c075..c3554889e54883ec20488d05........488d4de0488901488d45ff48894108488d55f048890a"
+   },
+   {
+    "name": "std::sync::once_lock::OnceLock::reentrant_lock::ReentrantLock::core::cell::RefCell::io::buffered::linewriter::LineWriter::stdio::StdoutRaw::initialize::get_or_init",
+    "sym": "_RINvMNtNtCsgczF5crJ4sT_3std4sync9once_lockINtB3_8OnceLockINtNtB5_14reentrant_lock13ReentrantLockINtNtCscI6d9CVNmLh_4core4cell7RefCellINtNtNtNtB7_2io8buffered10linewriter10LineWriterNtNtB2e_5stdio9StdoutRawEEEE10initializeNCINvB2_11get_or_initNCNvB2V_7cleanup0E0zEB7_",
+    "pattern": "8b05........85c075..c3554889e54883ec30488d45d8488938488d0d........48894808488d4dff48894810488d55"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::Cache::with_global",
+    "sym": "_RINvMs0_NtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimliNtB6_5Cache11with_globalNCNvB6_7resolves_0EBc_",
+    "pattern": "554889e54157415641554154534881ec0010000048c70424000000004881ec1803000048899518fdffff4889b538feff"
+   },
+   {
+    "name": "std::sys::fs::unix::File",
+    "sym": "_RNvMsi_NtNtNtCsgczF5crJ4sT_3std3sys2fs4unixNtB5_4File6open_c",
+    "pattern": "554889e54157415641554154534883ec184989f64889fb0fb64a090fb6420a807a080074..84c974..be0200000041bf"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::io::error",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNtNtNtCsgczF5crJ4sT_3std2io5error5ErrorEBH_",
+    "pattern": "554889e541574156415453488b0789c183e1038d51fe83fa0272..4885c975..5b415c415e415f5dc3488d58ff4c8b70"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::libs_dl_iterate_phdr",
+    "sym": "_RNvNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli20libs_dl_iterate_phdr8callback",
+    "pattern": "554889e54157415641554154534883ec684989d74c8b2f4c8b6708488b5f100fb74718488945b8488b42104d85e44889"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli",
+    "sym": "_RNvNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli4mmap",
+    "pattern": "554889e5415741564154534881ec000300004889fb48b800000000b6010000488945d0c745d80000000066c745dc0000"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf::Object",
+    "sym": "_RNvMs_NtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elfNtB4_6Object5parse",
+    "pattern": "554889e54157415641554154534881ec880000004889fb4883fa4073..48c703ffffffff4881c4880000005b415c415d"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf::Object",
+    "sym": "_RNvMs_NtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elfNtB4_6Object8build_id",
+    "pattern": "488b4f304885c90f84........415741564155415453488b772848c1e1064801f1488b471848894424f0488b47204889"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf",
+    "sym": "_RNvNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elf15locate_build_id",
+    "pattern": "554889e54157415641554154534883ec28488975b04989ff4883fa0272..4989d6e8........84c074..4f8d24364983"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf::Mapping",
+    "sym": "_RNvMNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elfNtB4_7Mapping9new_debug",
+    "pattern": "554889e54157415641554154534881ec080600004989cf4989d44889b560feffff4989fe488b59084c8b6910488dbdd8"
+   },
+   {
+    "name": "std::sys::fs::unix",
+    "sym": "_RNvNtNtNtCsgczF5crJ4sT_3std3sys2fs4unix12canonicalize",
+    "pattern": "554889e5415741564154534889fb4889f731f6ff15........4885c074..4989c64889c7ff15........4989c74885c0"
+   },
+   {
+    "name": "std::path::Component::core::cmp::PartialEq",
+    "sym": "_RNvXs1Y_NtCsgczF5crJ4sT_3std4pathNtB6_9ComponentNtNtCscI6d9CVNmLh_4core3cmp9PartialEq2eq",
+    "pattern": "554889e54156530fb60f4c8d41fb31c04883f9064c0f42c00fb6164c8d4afb4883fa064c0f42c84d39c875..4183f804"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf",
+    "sym": "_RNvNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elf17debug_path_exists",
+    "pattern": "0fb605........84c074..3c010f94c0c3554889e5534881ec5802000048b869622f6465627567488985a6fdffff48b8"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf::Mapping",
+    "sym": "_RNvMNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elfNtB4_7Mapping18load_dwarf_package",
+    "pattern": "554889e54157415641554154534881ec9800000048894db84989d74989f44889fb4885d274..ff15........be010000"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::Context",
+    "sym": "_RNvMs_NtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimliNtB4_7Context3new",
+    "pattern": "554889e54157415641554154534881ece80800004c8985a0feffff48898d30ffffff4989d64989f44889bdd8fdffff48"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::backtrace_rs::symbolize::gimli::stash",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNtNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli5stash5StashEBL_",
+    "pattern": "554889e5415741564155415453504889fb4c8b77084c8b7f104d85ff74..4d8d66084c8b2d........eb..0f1f440000"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::backtrace_rs::symbolize::gimli",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueTjNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli7MappingEEBL_",
+    "pattern": "554889e54156534889fb488b87d0010000f048ff0875..488dbbd0010000ff15........488dbbd8010000e8........"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf::Object",
+    "sym": "_RNvMs_NtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elfNtB4_6Object13search_symtab",
+    "pattern": "488b571031c04885d20f84........554889e5488b4f084883fa0174..31c04989d066666666662e0f1f840000000000"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::reserve::do_reserve_and_handle::alloc::Global",
+    "sym": "_RINvNvMs2_NtCs40k4W9msRzi_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECsgczF5crJ4sT_3std",
+    "pattern": "554889e54156534883ec204801d672..4d89c14989c84889fb488b074c8d34004c39f64c0f47f631c94983f9010f94c1"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf::Object",
+    "sym": "_RNvMs_NtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elfNtB4_6Object7section",
+    "pattern": "554889e54157415641554154534881ec0010000048c70424000000004881ec0010000048c70424000000004881ec5809"
+   },
+   {
+    "name": "std::sys::fs::unix::canonicalize::core::ops::function::Fn::ffi::c_str::CStr",
+    "sym": "_RNvYNvNtNtNtCsgczF5crJ4sT_3std3sys2fs4unix12canonicalizeINtNtNtCscI6d9CVNmLh_4core3ops8function2FnTRNtNtNtBZ_3ffi5c_str4CStrEE4callBa_",
+    "pattern": "554889e553504889fb4889d6e8........4889d84883c4085b5dc3"
+   },
+   {
+    "name": "core::ptr::drop_glue::option::Option::gimli::read::line::IncompleteLineProgram::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtB4_6option6OptionINtNtNtCs72oxeLBbweZ_5gimli4read4line21IncompleteLineProgramINtNtB12_12endian_slice11EndianSliceNtNtB14_9endianity12LittleEndianEjEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e55350833ffe0f84........4889fb488b77584885f674..488b7b6048c1e602ba02000000ff15........488b"
+   },
+   {
+    "name": "core::ptr::drop_glue::alloc::sync::ArcInner::gimli::read::dwarf::Dwarf::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCs40k4W9msRzi_5alloc4sync8ArcInnerINtNtNtCs72oxeLBbweZ_5gimli4read5dwarf5DwarfINtNtB1j_12endian_slice11EndianSliceNtNtB1l_9endianity12LittleEndianEEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e54156534889fb488b87000100004885c074..f048ff0875..488dbb00010000ff15........4881c308010000"
+   },
+   {
+    "name": "alloc::collections::btree::node::BalancingContext::std::sys::pal::unix::stack_overflow::thread_info::ThreadInfo::merge_tracking_child_edge::alloc",
+    "sym": "_RINvMs10_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB7_16BalancingContextjNtNtNtNtNtNtCsgczF5crJ4sT_3std3sys3pal4unix14stack_overflow11thread_info10ThreadInfoE25merge_tracking_child_edgeNtNtBd_5alloc6GlobalEB1w_",
+    "pattern": "554889e54157415641554154534881ec880000004c8b7e18450fb7b71a0200004c89f04883fa0175..488b46280fb780"
+   },
+   {
+    "name": "alloc::collections::btree::remove::node::Handle::NodeRef::marker::Mut::std::sys::pal::unix::stack_overflow::thread_info::ThreadInfo::Leaf::KV::remove_leaf_kv::map::entry::OccupiedEntry::remove_kv::alloc",
+    "sym": "_RINvMs_NtNtNtCs40k4W9msRzi_5alloc11collections5btree6removeINtNtB7_4node6HandleINtBY_7NodeRefNtNtBY_6marker3MutjNtNtNtNtNtNtCsgczF5crJ4sT_3std3sys3pal4unix14stack_overflow11thread_info10ThreadInfoNtB1v_4LeafENtB1v_2KVE14remove_leaf_kvNCNvMs5_NtNtB7_3map5entryINtB3S_13OccupiedEntryjB1M_E9remove_kv0NtNtBb_5alloc6GlobalEB1Y_",
+    "pattern": "554889e54157415641554154534881ec5801000048899530ffffff4889f34889bd20ffffff4c8b2e4c8b6610450fb7bd"
+   },
+   {
+    "name": "alloc::collections::btree::node::BalancingContext::std::sys::pal::unix::stack_overflow::thread_info::ThreadInfo",
+    "sym": "_RNvMs10_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB6_16BalancingContextjNtNtNtNtNtNtCsgczF5crJ4sT_3std3sys3pal4unix14stack_overflow11thread_info10ThreadInfoE15bulk_steal_leftB1v_",
+    "pattern": "554889e54157415641554154534881ec880000004c8b6728410fb78c241a020000488d040e4883f80c0f83........48"
+   },
+   {
+    "name": "alloc::collections::btree::node::BalancingContext::std::sys::pal::unix::stack_overflow::thread_info::ThreadInfo",
+    "sym": "_RNvMs10_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB6_16BalancingContextjNtNtNtNtNtNtCsgczF5crJ4sT_3std3sys3pal4unix14stack_overflow11thread_info10ThreadInfoE16bulk_steal_rightB1v_",
+    "pattern": "554889e54157415641554154534883ec784989fe4c8b7f18410fb7bf1a020000488d043e4883f80c0f83........4889"
+   },
+   {
+    "name": "core::ptr::drop_glue::addr2line::Context::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtCscIsuJ8n2VmD_9addr2line7ContextINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB1h_9endianity12LittleEndianEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e54156534889fb488b07f048ff0875..4889dfff15........488d7b08e8........488b7b28488b73305b415e"
+   },
+   {
+    "name": "core::ptr::drop_glue::addr2line::unit::ResUnits::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCscIsuJ8n2VmD_9addr2line4unit8ResUnitsINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB1p_9endianity12LittleEndianEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504989fe488b77084885f674..498b3e48c1e605ba08000000ff15........498b5e10"
+   },
+   {
+    "name": "core::ptr::drop_glue::addr2line::unit::SupUnits::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCscIsuJ8n2VmD_9addr2line4unit8SupUnitsINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB1p_9endianity12LittleEndianEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504885f674..4989f64889fb4c8dbf700100004c8b25........4989f5eb..0f1f4000"
+   },
+   {
+    "name": "core::ptr::drop_glue::result::Result::option::Option::alloc::boxed::Box::addr2line::unit::DwoUnit::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::Error",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtB4_6result6ResultINtNtB4_6option6OptionINtNtCs40k4W9msRzi_5alloc5boxed3BoxINtNtCscIsuJ8n2VmD_9addr2line4unit7DwoUnitINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB2F_9endianity12LittleEndianEEEENtB2D_5ErrorEECsgczF5crJ4sT_3std",
+    "pattern": "554889e54156534080ffff0f95c04885f60f94c108c174..5b415e5dc34889f3488b86c0010000f048ff0875..488dbb"
+   },
+   {
+    "name": "core::ptr::drop_glue::result::Result::addr2line::function::Functions::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::Error",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtB4_6result6ResultINtNtCscIsuJ8n2VmD_9addr2line8function9FunctionsINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB1Q_9endianity12LittleEndianEENtB1O_5ErrorEECsgczF5crJ4sT_3std",
+    "pattern": "554889e541574156415541545350488b074885c00f84........4889fb4c8b77084d85f60f84........488945d04c8d"
+   },
+   {
+    "name": "core::ptr::drop_glue::result::Result::std::sync::poison::mutex::MutexGuard",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtB4_6result6ResultINtNtNtNtCsgczF5crJ4sT_3std4sync6poison5mutex10MutexGuarduEINtB12_11PoisonErrorBX_EEEB16_",
+    "pattern": "554889e55350488b5f080fb64710803f0084c075..488b05........488b0048d1e04885c075..31c0870383f80274.."
+   },
+   {
+    "name": "core::ptr::drop_glue::result::Result::addr2line::line::Lines::gimli::read::Error",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtB4_6result6ResultNtNtCscIsuJ8n2VmD_9addr2line4line5LinesNtNtCs72oxeLBbweZ_5gimli4read5ErrorEECsgczF5crJ4sT_3std",
+    "pattern": "554889e541574156415541545350488b074885c00f84........4889fb4c8b77084d85f674..488945d04c8d60084c8b"
+   },
+   {
+    "name": "core::ptr::drop_glue::alloc::vec::Vec::addr2line::unit::ResUnit::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCs40k4W9msRzi_5alloc3vec3VecINtNtCscIsuJ8n2VmD_9addr2line4unit7ResUnitINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB1V_9endianity12LittleEndianEEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504989fe488b5f084c8b6f1049ffc54889df904983fd0174..4c8da73002000049ffcd"
+   },
+   {
+    "name": "core::ptr::drop_glue::addr2line::unit::ResUnit::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCscIsuJ8n2VmD_9addr2line4unit7ResUnitINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB1o_9endianity12LittleEndianEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e54156534889fb488b8770010000f048ff0875..488dbb70010000ff15........488d7b60e8........4883bb"
+   },
+   {
+    "name": "core::ptr::drop_glue::alloc::vec::Vec::addr2line::unit::SupUnit::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCs40k4W9msRzi_5alloc3vec3VecINtNtCscIsuJ8n2VmD_9addr2line4unit7SupUnitINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB1V_9endianity12LittleEndianEEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504989fe488b5f084c8b6f104d85ed74..4c8dbb700100004c8b25........eb..6690"
+   },
+   {
+    "name": "core::ptr::drop_glue::gimli::read::abbrev::AbbreviationsCache",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev18AbbreviationsCacheECsgczF5crJ4sT_3std",
+    "pattern": "554889e541574156534883ec68488b0f4885c974..488b5708488b471048c745900000000048894d98488955a048c745"
+   },
+   {
+    "name": "core::ptr::drop_glue::gimli::read::dwarf::Dwarf::endian_slice::EndianSlice::endianity::LittleEndian",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtNtCs72oxeLBbweZ_5gimli4read5dwarf5DwarfINtNtBG_12endian_slice11EndianSliceNtNtBI_9endianity12LittleEndianEEECsgczF5crJ4sT_3std",
+    "pattern": "554889e54156534889fb488b87f00000004885c074..f048ff0875..488dbbf0000000ff15........4881c3f8000000"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::sync::reentrant_lock::ReentrantLockGuard::cell::RefCell::io::buffered::linewriter::LineWriter::stdio",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtNtCsgczF5crJ4sT_3std4sync14reentrant_lock18ReentrantLockGuardINtNtB4_4cell7RefCellINtNtNtNtBI_2io8buffered10linewriter10LineWriterNtNtB27_5stdio9StdoutRawEEEEBI_",
+    "pattern": "ff4f0c75..4889fe48c7070000000031c087470883f80274..c34883c608bfca000000ba81000000b90100000031c0ff"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::io::buffered::linewriter::LineWriter::stdio",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtNtNtCsgczF5crJ4sT_3std2io8buffered10linewriter10LineWriterNtNtBI_5stdio9StdoutRawEEBK_",
+    "pattern": "554889e54156534883ec104889fb807f180075..4889dfe8........488945e84885c074..488d7de8e8........488b"
+   },
+   {
+    "name": "std::io::buffered::bufwriter::BufWriter::stdio::StdoutRaw",
+    "sym": "_RNvMs_NtNtNtCsgczF5crJ4sT_3std2io8buffered9bufwriterINtB4_9BufWriterNtNtB8_5stdio9StdoutRawE9flush_bufBa_",
+    "pattern": "554889e54157415641554154534883ec284c8b77104d85f60f84........4889fb488b4708488945d04531ffeb..6690"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::sync::poison::mutex::MutexGuard::alloc::vec",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtNtNtCsgczF5crJ4sT_3std4sync6poison5mutex10MutexGuardINtNtCs40k4W9msRzi_5alloc3vec3VechEEEBK_",
+    "pattern": "554889e5535040f6c60175..488b05........488b0048d1e04885c075..31c0870783f80274..4883c4085b5dc34889"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::sync::nonpoison::rwlock::RwLockReadGuard::panicking",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtNtNtCsgczF5crJ4sT_3std4sync9nonpoison6rwlock15RwLockReadGuardNtNtBK_9panicking4HookEEBK_",
+    "pattern": "befffffffff00fc137ffce89f025ffffffbff7d870..c3ff25........"
+   },
+   {
+    "name": "core::ptr::drop_glue::alloc::collections::btree::map::IntoIter::ops::drop::Drop::drop::DropGuard::result::Result::sync::Arc::gimli::read::abbrev::Abbreviations::Error::alloc::Global",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNvXsy_NtNtNtCs40k4W9msRzi_5alloc11collections5btree3mapINtBK_8IntoIterpppENtNtNtB4_3ops4drop4Drop4drop9DropGuardyINtNtB4_6result6ResultINtNtBQ_4sync3ArcNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev13AbbreviationsENtB3a_5ErrorENtNtBQ_5alloc6GlobalEECsgczF5crJ4sT_3std",
+    "pattern": "554889e541574156534883ec184889fb488d7dd04889dee8........488b7dd04885ff74..4c8b3d........4c8d75d0"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::sys::backtrace",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNCNvNtNtCsgczF5crJ4sT_3std3sys9backtrace10__print_fmt0EBJ_",
+    "pattern": "488b374885f67e..488b7f08ba01000000ff25........c3"
+   },
+   {
+    "name": "core::ptr::drop_glue::gimli::read::abbrev::Abbreviations",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev13AbbreviationsECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534883ec684889fb4c8b77084c8b7f104d85ff74..4d8d66104c8b2d........eb..6690"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::backtrace_rs::backtrace::libunwind",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9backtrace9libunwind4BombEBJ_",
+    "pattern": "40f6c70175..c3554889e5488d3d........488d15........be55000000ff15........"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::backtrace_rs::symbolize::gimli",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli7LibraryEBJ_",
+    "pattern": "554889e553504889fb488b374885f674..488b7b08ba01000000ff15........488b73184885f674..488b7b2048c1e6"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::backtrace_rs::symbolize::gimli::elf",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNtNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elf6ObjectEBL_",
+    "pattern": "4885ff74..48c1e703488d047fba080000004889f74889c6ff25........c3"
+   },
+   {
+    "name": "std::sys::pal::unix::stack_overflow::imp",
+    "sym": "_RNvNtNtNtNtNtCsgczF5crJ4sT_3std3sys3pal4unix14stack_overflow3imp12drop_handler",
+    "pattern": "554889e54157415641554154534881eca80000004885ff74..4889fbbf33000000ff15........483d0120000041be00"
+   },
+   {
+    "name": "core::ptr::drop_glue::std::io::buffered::bufwriter::BufWriter::flush_buf",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueNtNvMs_NtNtNtCsgczF5crJ4sT_3std2io8buffered9bufwriterINtBI_9BufWriterpE9flush_buf8BufGuardEBO_",
+    "pattern": "554889e54156534885f674..4889fb488b57104989d64929f672..488b7b084801fe4c89f2ff15........4c3b731077"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::finish_grow",
+    "sym": "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner11finish_growCsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564154534d89c74989d04889fb4c89c848f7e14989c60f90c048b900000000000000804c29f94939ce"
+   },
+   {
+    "name": "std::io::default_read_to_end::fs",
+    "sym": "_RINvNtCsgczF5crJ4sT_3std2io19default_read_to_endRNtNtB4_2fs4FileEB4_",
+    "pattern": "554889e54157415641554154534883ec584989d54989f148897dc84c8b064c8b7610bf002000004883fa014c8945b875"
+   },
+   {
+    "name": "std::rt",
+    "sym": "_RINvNtCsgczF5crJ4sT_3std2rt15handle_rt_paniciEB4_",
+    "pattern": "554889e54883ec10488d35........488d7dffba7b000000e8........488945f0488d7df0e8........ff15........"
+   },
+   {
+    "name": "std::alloc",
+    "sym": "_RNCNvNtCsgczF5crJ4sT_3std5alloc8rust_oom0B5_",
+    "pattern": "488b05........488b084885c975..488b0d........554889e5488b07488b77084889c7ff..ff15........"
+   },
+   {
+    "name": "std::panicking",
+    "sym": "_RNCNvNtCsgczF5crJ4sT_3std9panicking13panic_handler0B5_",
+    "pattern": "554889e5534883ec28488b0f488b4108a80175..48897df048c745d8ffffffff488b5708488b47100fb64810440fb640"
+   },
+   {
+    "name": "core::slice::sort::stable::drift::sort::addr2line::function::FunctionAddress::alloc::slice::sort_by_key::Functions::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable5drift4sortNtNtCscIsuJ8n2VmD_9addr2line8function15FunctionAddressNCINvMNtCs40k4W9msRzi_5alloc5sliceSBW_11sort_by_keyyNCNvMs0_BY_INtBY_9FunctionsINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3c_9endianity12LittleEndianEE5parses_0E0ECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534881ecf80200004c894db84489459c48897dc04883fe020f82........4989cc48b800"
+   },
+   {
+    "name": "core::slice::sort::stable::drift::sort::addr2line::function::InlinedFunctionAddress::alloc::slice::sort_by::Function::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable5drift4sortNtNtCscIsuJ8n2VmD_9addr2line8function22InlinedFunctionAddressNCINvMNtCs40k4W9msRzi_5alloc5sliceSBW_7sort_byNCNvMs1_BY_INtBY_8FunctionINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3c_9endianity12LittleEndianEE5parse0E0ECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534881ecf80200004c894db84489459c48897dc84883fe020f82........4989c948b800"
+   },
+   {
+    "name": "core::slice::sort::unstable::quicksort::quicksort::std::backtrace_rs::symbolize::gimli::elf::ParsedSym::sort_unstable_by_key::Object",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort8unstable9quicksort9quicksortNtNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elf9ParsedSymNCINvMB8_SB17_20sort_unstable_by_keyyNCNvMs_B19_NtB19_6Object5parses1_0E0EB1h_",
+    "pattern": "554889e54157415641554154534883ec384c8945b04889f34989fc4883fe2173..4c89e74889de4883c4385b415c415d"
+   },
+   {
+    "name": "std::sys::env::unix",
+    "sym": "_RNCNvNtNtNtCsgczF5crJ4sT_3std3sys3env4unix6getenv0B9_",
+    "pattern": "554889e5415741564154534989d64889fb8b05........3dfdffff3f0f87........8d4801f00fb10d........0f8596"
+   },
+   {
+    "name": "std::sys::helpers::small_c_string::run_with_cstr_allocating::fs::unix",
+    "sym": "_RINvNtNtNtCsgczF5crJ4sT_3std3sys7helpers14small_c_string24run_with_cstr_allocatingNtNtNtB6_2fs4unix4FileEB8_",
+    "pattern": "554889e54157415641554154534883ec284d89c74989cc4989fd488d7db8ff15........488b75b84883feff74..488d"
+   },
+   {
+    "name": "core::slice::sort::shared::pivot::median3_rec::addr2line::function::InlinedFunctionAddress::alloc::slice::sort_by::Function::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6shared5pivot11median3_recNtNtCscIsuJ8n2VmD_9addr2line8function22InlinedFunctionAddressNCINvMNtCs40k4W9msRzi_5alloc5sliceSB14_7sort_byNCNvMs1_B16_INtB16_8FunctionINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3n_9endianity12LittleEndianEE5parse0E0ECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504889d34989f64883f90872..48c1e9034989cf49c1e7074a8d343f4c69e1e0000000"
+   },
+   {
+    "name": "core::slice::sort::shared::pivot::median3_rec::gimli::common::DebugInfoOffset::DebugArangesOffset::alloc::slice::sort_by_key::addr2line::unit::ResUnits::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6shared5pivot11median3_recTNtNtCs72oxeLBbweZ_5gimli6common15DebugInfoOffsetNtB17_18DebugArangesOffsetENCINvMNtCs40k4W9msRzi_5alloc5sliceSB14_11sort_by_keyB15_NCNvMs_NtCscIsuJ8n2VmD_9addr2line4unitINtB3j_8ResUnitsINtNtNtB19_4read12endian_slice11EndianSliceNtNtB19_9endianity12LittleEndianEE5parse0E0ECsgczF5crJ4sT_3std",
+    "pattern": "554889e5415741564155415453504989d64889f34883f90872..48c1e9034989cf49c1e7064a8d343f4c6be1704a8d14"
+   },
+   {
+    "name": "core::slice::sort::shared::smallsort::sort4_stable::addr2line::function::InlinedFunctionAddress::alloc::slice::sort_by::Function::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6shared9smallsort12sort4_stableNtNtCscIsuJ8n2VmD_9addr2line8function22InlinedFunctionAddressNCINvMNtCs40k4W9msRzi_5alloc5sliceSB19_7sort_byNCNvMs1_B1b_INtB1b_8FunctionINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3s_9endianity12LittleEndianEE5parse0E0ECsgczF5crJ4sT_3std",
+    "pattern": "488b4710488b4f30b2014839c172..488b070f96c1483947200f92c220ca488b4f504c8b47704939c873..488d4760b9"
+   },
+   {
+    "name": "core::slice::sort::shared::smallsort::sort8_stable::gimli::common::DebugInfoOffset::DebugArangesOffset::alloc::slice::sort_by_key::addr2line::unit::ResUnits::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6shared9smallsort12sort8_stableTNtNtCs72oxeLBbweZ_5gimli6common15DebugInfoOffsetNtB1c_18DebugArangesOffsetENCINvMNtCs40k4W9msRzi_5alloc5sliceSB19_11sort_by_keyB1a_NCNvMs_NtCscIsuJ8n2VmD_9addr2line4unitINtB3o_8ResUnitsINtNtNtB1e_4read12endian_slice11EndianSliceNtNtB1e_9endianity12LittleEndianEE5parse0E0ECsgczF5crJ4sT_3std",
+    "pattern": "554889e541574156415541545350488b4710488b4f304531db4531c9483b07410f93c3410f92c14531c0483b4f20410f"
+   },
+   {
+    "name": "core::slice::sort::shared::smallsort::small_sort_general::std::backtrace_rs::symbolize::gimli::elf::ParsedSym::sort_unstable_by_key::Object",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6shared9smallsort18small_sort_generalNtNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elf9ParsedSymNCINvMB8_SB1f_20sort_unstable_by_keyyNCNvMs_B1h_NtB1h_6Object5parses1_0E0EB1p_",
+    "pattern": "554889e54157415641554154534881ec980400004883fe020f82........4989f64889fb4889f048d1e84883fe080f82"
+   },
+   {
+    "name": "std::sys::thread_local::native::eager::destroy::core::cell::Cell::option::Option::alloc::sync::Arc::sync::poison::mutex::Mutex::vec",
+    "sym": "_RINvNtNtNtNtCsgczF5crJ4sT_3std3sys12thread_local6native5eager7destroyINtNtCscI6d9CVNmLh_4core4cell4CellINtNtB1a_6option6OptionINtNtCs40k4W9msRzi_5alloc4sync3ArcINtNtNtNtBa_4sync6poison5mutex5MutexINtNtB25_3vec3VechEEEEEEBa_",
+    "pattern": "c6470802488b074885c074..f048ff0875..ff25........c3"
+   },
+   {
+    "name": "alloc::slice::to_vec_in::ConvertVec::to_vec::alloc::Global",
+    "sym": "_RINvXs_NvMNtCs40k4W9msRzi_5alloc5sliceSp9to_vec_inhNtB5_10ConvertVec6to_vecNtNtBa_5alloc6GlobalECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415653504989fe4885d274..4889d34989f7ff15........be010000004889dfff15........4885c074"
+   },
+   {
+    "name": "std::sync::once::Once::call_once::rt",
+    "sym": "_RNCINvMs0_NtNtCsgczF5crJ4sT_3std4sync4onceNtB8_4Once9call_onceNCNvNtBc_2rt7cleanup0E0Bc_",
+    "pattern": "554889e5534883ec38488b070fb608c6000080f9010f85........c645f7008b05........85c00f85........807df7"
+   },
+   {
+    "name": "std::thread::id::ThreadId::new",
+    "sym": "_RNvNvMNtNtCsgczF5crJ4sT_3std6thread2idNtB4_8ThreadId3new9exhausted",
+    "pattern": "554889e5488d3d........488d15........be6f000000ff15........"
+   },
+   {
+    "name": "std::thread::current::with_current_name::panicking",
+    "sym": "_RNCINvNtNtCsgczF5crJ4sT_3std6thread7current17with_current_nameNCNCNvNtB8_9panicking12default_hook00uE0B8_",
+    "pattern": "554889e54157415641554154534881ec980200004885f674..488b06488b48184885c974..488b402048ffc8eb..488b"
+   },
+   {
+    "name": "core::fmt::panic::location::Location::Display::fmt",
+    "sym": "_RNvXs1i_NtCscI6d9CVNmLh_4core3fmtRNtNtNtB8_5panic8location8LocationNtB6_7Display3fmtCsgczF5crJ4sT_3std",
+    "pattern": "554889e54883ec40488b07488b3e488b76080f10000f1145c0488d48104883c014488d55c0488955d0488d15........"
+   },
+   {
+    "name": "std::rt",
+    "sym": "_RNCNCNCNvNtCsgczF5crJ4sT_3std2rt19lang_start_internal00s_0B9_",
+    "pattern": "554889e54883ec10488d35........488d7dffba85000000e8........488945f0488d7df0e8........ff15........"
+   },
+   {
+    "name": "std::sys::backtrace",
+    "sym": "_RNCNCNvNtNtCsgczF5crJ4sT_3std3sys9backtrace10__print_fmts_00B9_",
+    "pattern": "554889e54157415641554154534883ec784989f64889fb488b07c60001488b47088038000f84........488b43108038"
+   },
+   {
+    "name": "core::str::pattern::Pattern",
+    "sym": "_RNvXst_NtNtCscI6d9CVNmLh_4core3str7patternReNtB5_7Pattern15is_contained_in",
+    "pattern": "554889e54157415641554154534881ec180100004989d64989f74989fc4839ce0f83........4889cb410fb60424498d"
+   },
+   {
+    "name": "std::backtrace_rs::print::BacktraceFrameFmt",
+    "sym": "_RNvMs_NtNtCsgczF5crJ4sT_3std12backtrace_rs5printNtB4_17BacktraceFrameFmt21print_raw_with_column",
+    "pattern": "554889e54157415641554154534881ec880000004c8b3f488b5f084889b550ffffff4885f675..41807f200075..48ff"
+   },
+   {
+    "name": "std::sys::fs::unix::File",
+    "sym": "_RNCNvMsi_NtNtNtCsgczF5crJ4sT_3std3sys2fs4unixNtB7_4File4open0Bd_",
+    "pattern": "554889e553504889fb488b064889d64889c2e8........4889d84883c4085b5dc3"
+   },
+   {
+    "name": "std::panicking",
+    "sym": "_RNCNvNtCsgczF5crJ4sT_3std9panicking12default_hook0B5_",
+    "pattern": "554889e54157415641554154534883ec284989d44989f74989fdff15........4889c34189d64180e601410f1045000f"
+   },
+   {
+    "name": "core::str::pattern::simd_contains",
+    "sym": "_RNCNvNtNtCscI6d9CVNmLh_4core3str7pattern13simd_containss0_0CsgczF5crJ4sT_3std",
+    "pattern": "85c974..31c0c34803374c8b4710488b7f184883ff0473..eb..660f1f4400008b00413b4438fc0f84........66b8fe"
+   },
+   {
+    "name": "std::sys::backtrace",
+    "sym": "_RNCNvNtNtCsgczF5crJ4sT_3std3sys9backtrace10__print_fmt0B7_",
+    "pattern": "0fb6471831c948833fff480f45cf4889f74889d689c2e9........"
+   },
+   {
+    "name": "std::sys::backtrace",
+    "sym": "_RNvNtNtCsgczF5crJ4sT_3std3sys9backtrace15output_filename",
+    "pattern": "554889e541574156534883ec384889fb803e0074..488d3d........be0900000084d274..eb..488b7e08488b761084"
+   },
+   {
+    "name": "std::sys::backtrace",
+    "sym": "_RNCNvNtNtCsgczF5crJ4sT_3std3sys9backtrace10__print_fmts_0B7_",
+    "pattern": "554889e54157415641554154534881ec980000004889fb488b0780380075..488b4b084883396476..31c0e9........"
+   },
+   {
+    "name": "std::sync::once::Once::call_once::rt::cleanup::core::ops::function::FnOnce::OnceState::call_once",
+    "sym": "_RNSNvYNCINvMs0_NtNtCsgczF5crJ4sT_3std4sync4onceNtBd_4Once9call_onceNCNvNtBh_2rt7cleanup0E0INtNtNtCscI6d9CVNmLh_4core3ops8function6FnOnceTRNtBd_9OnceStateEE9call_once6vtableBh_",
+    "pattern": "554889e54883ec10488b07488945f8488d7df8e8........4883c4105dc3"
+   },
+   {
+    "name": "std::sys::backtrace::_print_fmt::core::ops::function::FnOnce::fmt::Formatter::backtrace_rs::types::BytesOrWideString::call_once",
+    "sym": "_RNSNvYNCNvNtNtCsgczF5crJ4sT_3std3sys9backtrace10__print_fmt0INtNtNtCscI6d9CVNmLh_4core3ops8function6FnOnceTQNtNtB13_3fmt9FormatterNtNtNtBc_12backtrace_rs5types17BytesOrWideStringEE9call_once6vtableBc_",
+    "pattern": "554889e541574156534883ec284889f04989fe488975c8488d75d00f10020f1145d0488b4a1048894de00fb65718488b"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::stash::Stash",
+    "sym": "_RNvMNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli5stashNtB2_5Stash8allocate",
+    "pattern": "554889e5415741564155415453504889f34885f679..4531ed4c89ef4889deff15........4989ff4c8b771074..ff15"
+   },
+   {
+    "name": "std::sys::io::error::unix",
+    "sym": "_RNvNtNtNtNtCsgczF5crJ4sT_3std3sys2io5error4unix17decode_error_kind",
+    "pattern": "ffcf83ff7977..488d05........48630cb84801c1ff..b001c3b024c3b004c3b007c3b01ac3b027c3b009c3b008c3b0"
+   },
+   {
+    "name": "std::sys::fs::unix",
+    "sym": "_RNvNtNtNtCsgczF5crJ4sT_3std3sys2fs4unix9try_statx",
+    "pattern": "554889e541574156534881ec180100004889fb440fb635........4180fe0275..48c703feffffffe9........0f57c0"
+   },
+   {
+    "name": "std::backtrace_rs::backtrace::libunwind::trace",
+    "sym": "_RNvNvNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9backtrace9libunwind5trace8trace_fn",
+    "pattern": "554889e54883ec2048c745e00000000048897de8488b3e488b4608488d75e0ff....34010fb6c08d04c04883c4205dc3"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::std::alloc::System",
+    "sym": "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecINtB5_11RawVecInnerNtNtCsgczF5crJ4sT_3std5alloc6SystemE14grow_amortizedBW_",
+    "pattern": "554889e54156534883ec204889fb48ffc6488b07488d0c004839ce480f46f14883fe0541be040000004c0f43f6488b57"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::std::alloc::System",
+    "sym": "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecINtB5_11RawVecInnerNtNtCsgczF5crJ4sT_3std5alloc6SystemE11finish_growBW_",
+    "pattern": "554889e54157415653504889fb4989ce49c1e60448c1e93c0f95c048b9f8ffffffffffff7f4939ce0f97c141bf010000"
+   },
+   {
+    "name": "std::sync::poison::mutex::Mutex::alloc::vec::Vec",
+    "sym": "_RNvMs5_NtNtNtCsgczF5crJ4sT_3std4sync6poison5mutexINtB5_5MutexINtNtCs40k4W9msRzi_5alloc3vec3VechEE4lockBb_",
+    "pattern": "554889e5415653b90100000031c0f00fb10e75..488b05........488b0048d1e04885c075..31c00fb64e0431d284c9"
+   },
+   {
+    "name": "std::path::Components",
+    "sym": "_RNvMs8_NtCsgczF5crJ4sT_3std4pathNtB5_10Components25parse_next_component_back",
+    "pattern": "554889e5807e380273..4c8b06807e3a000f84........488b5608b8010000004885d275..488d0d........bf010000"
+   },
+   {
+    "name": "core::num",
+    "sym": "_RNvMsD_NtCscI6d9CVNmLh_4core3numy16from_ascii_radix",
+    "pattern": "0fb6064883fa0175..83f82d74..83f82b75..c6470101b0018807c34531c083f82b410f94c04889d14c29c14c01c64c"
+   },
+   {
+    "name": "alloc::boxed",
+    "sym": "_RNvNtCs40k4W9msRzi_5alloc5boxed14box_new_uninit",
+    "pattern": "554889e54156534889fb4885f674..4989f6ff15........4c89f74889deff15........4885c074..5b415e5dc34889"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::elf",
+    "sym": "_RNvNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elf15decompress_zlib",
+    "pattern": "554889e54157415641554154534881ec0010000048c70424000000004881ec0010000048c70424000000004881ec2809"
+   },
+   {
+    "name": "std::fs",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std2fs24buffer_capacity_required",
+    "pattern": "554889e54156534881ecc00000008b1f488d15........488dbd30ffffff89deb900100000e8........488b8530ffff"
+   },
+   {
+    "name": "std::sys::pal::unix::stack_overflow::imp",
+    "sym": "_RNvNtNtNtNtNtCsgczF5crJ4sT_3std3sys3pal4unix14stack_overflow3imp12make_handler",
+    "pattern": "554889e541574156534883ec680fb605........84c00f84........4084ff0f85........0f57c00f2945a00f294590"
+   },
+   {
+    "name": "std::sys::pal::unix::stack_overflow::thread_info",
+    "sym": "_RNvNtNtNtNtNtCsgczF5crJ4sT_3std3sys3pal4unix14stack_overflow11thread_info16set_current_info",
+    "pattern": "554889e54157415641554154534881ecd80000004889f34989fc48833d..........74..ff15........4189c6eb..bf"
+   },
+   {
+    "name": "std::sys::pal::unix::stack_overflow::imp",
+    "sym": "_RNvNtNtNtNtNtCsgczF5crJ4sT_3std3sys3pal4unix14stack_overflow3imp14signal_handler",
+    "pattern": "554889e54157415641554154534881ecc800000089fb4c8b7e104d85ff0f84........41bc80969800ff15........49"
+   },
+   {
+    "name": "std::io::stdio",
+    "sym": "_RNvNtNtCsgczF5crJ4sT_3std2io5stdio31print_to_buffer_if_capture_used",
+    "pattern": "554889e54157415641554154534883ec180fb605........84c00f84........4989f44989fd66666664488b04250000"
+   },
+   {
+    "name": "std::sys::fs::unix::stat::core::ops::function::Fn::ffi::c_str::CStr",
+    "sym": "_RNvYNvNtNtNtCsgczF5crJ4sT_3std3sys2fs4unix4statINtNtNtCscI6d9CVNmLh_4core3ops8function2FnTRNtNtNtBQ_3ffi5c_str4CStrEE4callBa_",
+    "pattern": "554889e54156534881ecb00000004989d64889fb488dbd40ffffffbe9cffffff31c9e8........83bd40fffffffe75.."
+   },
+   {
+    "name": "std::sys::thread_local::guard::key",
+    "sym": "_RNvNtNtNtNtCsgczF5crJ4sT_3std3sys12thread_local5guard3key6enable",
+    "pattern": "554889e5534883ec18488b3d........4885ff75..488b35........c745f000000000488d7df0ff15........85c075"
+   },
+   {
+    "name": "core::str::pattern::CharSearcher::Searcher",
+    "sym": "_RNvXs_NtNtCscI6d9CVNmLh_4core3str7patternNtB4_12CharSearcherNtB4_8Searcher10next_match",
+    "pattern": "554889e54157415641554154534883ec28488b4608488b5e18488945b04839c30f97c04c8b7e104c39fb0f92c108c174"
+   },
+   {
+    "name": "std::sys::thread_local::guard::key::enable",
+    "sym": "_RNvNvNtNtNtNtCsgczF5crJ4sT_3std3sys12thread_local5guard3key6enable3run",
+    "pattern": "554889e5535066666664488b0425000000004883b8b0ffffff0075..488d98b0ffffff666666662e0f1f840000000000"
+   },
+   {
+    "name": "std::io::default_write_fmt::Adapter::alloc::vec::Vec::core::fmt::Write",
+    "sym": "_RNvXNvNtCsgczF5crJ4sT_3std2io17default_write_fmtINtB2_7AdapterINtNtCs40k4W9msRzi_5alloc3vec3VechEENtNtCscI6d9CVNmLh_4core3fmt5Write9write_strB6_",
+    "pattern": "554889e5415741564154534889d34c8b37498b064d8b7e104c29f84839c277..4885db74..498b7e084c01ff4889daff"
+   },
+   {
+    "name": "std::io::default_write_fmt::Adapter::core::io::cursor::Cursor::fmt::Write",
+    "sym": "_RNvXNvNtCsgczF5crJ4sT_3std2io17default_write_fmtINtB2_7AdapterINtNtNtCscI6d9CVNmLh_4core2io6cursor6CursorQShEENtNtB15_3fmt5Write9write_strB6_",
+    "pattern": "554889e5415741564155415453504889d348897dd04c8b2f4d8b65084d8b75104d39f44c89f7490f42fc4929fc49037d"
+   },
+   {
+    "name": "std::io::default_write_fmt::Adapter::sys::stdio::unix::Stderr::core::fmt::Write",
+    "sym": "_RNvXNvNtCsgczF5crJ4sT_3std2io17default_write_fmtINtB2_7AdapterNtNtNtNtB6_3sys5stdio4unix6StderrENtNtCscI6d9CVNmLh_4core3fmt5Write9write_strB6_",
+    "pattern": "554889e54157415641554154534883ec184885d274..4989d64989f748897dd04c8b2d........488b1d........eb.."
+   },
+   {
+    "name": "std::sys::stdio::unix::Stderr::io::Write",
+    "sym": "_RNvYNtNtNtNtCsgczF5crJ4sT_3std3sys5stdio4unix6StderrNtNtBa_2io5Write18write_all_vectoredBa_",
+    "pattern": "554889e54157415641554154534883ec184885d20f84........4889d34989f64889d048c1e004488d48f048c1e90448"
+   },
+   {
+    "name": "std::path::StripPrefixError::core::fmt::Debug",
+    "sym": "_RNvXs2a_NtCsgczF5crJ4sT_3std4pathNtB6_16StripPrefixErrorNtNtCscI6d9CVNmLh_4core3fmt5Debug3fmt",
+    "pattern": "554889e54883ec104889f048897df8488d35........4c8d05........488d4df8ba100000004889c7ff15........48"
+   },
+   {
+    "name": "std::io::impls::alloc::vec::Vec::Write",
+    "sym": "_RNvXs9_NtNtCsgczF5crJ4sT_3std2io5implsINtNtCs40k4W9msRzi_5alloc3vec3VechENtB7_5Write14write_vectoredB9_",
+    "pattern": "554889e54157415641554154534883ec184885d274..4889f34889d048c1e004488945c84883fa0573..31c04531ffeb"
+   },
+   {
+    "name": "std::io::impls::alloc::vec::Vec::Write",
+    "sym": "_RNvXs9_NtNtCsgczF5crJ4sT_3std2io5implsINtNtCs40k4W9msRzi_5alloc3vec3VechENtB7_5Write18write_all_vectoredB9_",
+    "pattern": "4885d20f84........554889e5415741564155415453504889f34989fe4989d549c1e5044883fa0573..31c931c0eb.."
+   },
+   {
+    "name": "alloc::string::String::core::fmt::Write",
+    "sym": "_RNvXsZ_NtCs40k4W9msRzi_5alloc6stringNtB5_6StringNtNtCscI6d9CVNmLh_4core3fmt5Write10write_char",
+    "pattern": "554889e541574156415453488b5f1041be0100000081fe8000000072..41be0200000081fe0008000072..81fe000001"
+   },
+   {
+    "name": "std::io::default_write_fmt::Adapter::alloc::vec::Vec::core::fmt::Write",
+    "sym": "_RNvYINtNvNtCsgczF5crJ4sT_3std2io17default_write_fmt7AdapterINtNtCs40k4W9msRzi_5alloc3vec3VechEENtNtCscI6d9CVNmLh_4core3fmt5Write10write_charB9_",
+    "pattern": "554889e5415741565350c745e40000000081fe8000000073..408875e4bb01000000eb..89f0243f0c8089f1c1e90681"
+   },
+   {
+    "name": "std::io::default_write_fmt::Adapter::core::io::cursor::Cursor::fmt::Write",
+    "sym": "_RNvYINtNvNtCsgczF5crJ4sT_3std2io17default_write_fmt7AdapterINtNtNtCscI6d9CVNmLh_4core2io6cursor6CursorQShEENtNtB12_3fmt5Write10write_charB9_",
+    "pattern": "554889e54157415641554154534883ec18c745d40000000081fe8000000073..408875d441bf01000000eb..89f0243f"
+   },
+   {
+    "name": "std::io::default_write_fmt::Adapter::stdio::StdoutLock::core::fmt::Write",
+    "sym": "_RNvYINtNvNtCsgczF5crJ4sT_3std2io17default_write_fmt7AdapterNtNtB7_5stdio10StdoutLockENtNtCscI6d9CVNmLh_4core3fmt5Write10write_charB9_",
+    "pattern": "554889e54157415653504889fbc745e40000000081fe8000000073..408875e4ba01000000eb..89f0243f0c8089f1c1"
+   },
+   {
+    "name": "std::sys::stdio::unix::Stderr::io::Write",
+    "sym": "_RNvYNtNtNtNtCsgczF5crJ4sT_3std3sys5stdio4unix6StderrNtNtBa_2io5Write9write_allBa_",
+    "pattern": "554889e54157415641554154534883ec184885d274..4889d34989f64c8d7dd04c8b2d........4c8b25........eb.."
+   },
+   {
+    "name": "core::ptr::drop_glue::alloc::boxed::Box::panic_unwind::imp",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core3ptr9drop_glueINtNtCs40k4W9msRzi_5alloc5boxed3BoxNtNtCsbjk5XBwQ6hn_12panic_unwind3imp9ExceptionEEB1e_",
+    "pattern": "554889e5415741564154534889fb4c8b77284c8b6730498b04244885c074..4c89f7ff..498b7424084885f674..498b"
+   },
+   {
+    "name": "panic_unwind::imp::panic",
+    "sym": "_RNvNvNtCsbjk5XBwQ6hn_12panic_unwind3imp5panic17exception_cleanup",
+    "pattern": "554889e54889f7e8........ff15........ff15........"
+   },
+   {
+    "name": "core::str::pattern::StrSearcher::Searcher",
+    "sym": "_RNvXsv_NtNtCscI6d9CVNmLh_4core3str7patternNtB5_11StrSearcherNtB5_8Searcher4next",
+    "pattern": "554889e54157415641554154534883ec38833e010f85........488b5628488b465041b9020000004839c20f84ef0200"
+   },
+   {
+    "name": "core::escape::escape_unicode",
+    "sym": "_RINvNtCscI6d9CVNmLh_4core6escape14escape_unicodeKja_ECs8RI9jBTgU6F_14rustc_demangle",
+    "pattern": "4889f889f183c9010fbdc983f11cc1e902488d51fec64424f80066c74424f600004189f041c1e814488d3d........45"
+   },
+   {
+    "name": "core::str::iter::SplitInternal::next",
+    "sym": "_RNvMsf_NtNtCscI6d9CVNmLh_4core3str4iterINtB5_13SplitInternalcE4nextCs8RI9jBTgU6F_14rustc_demangle",
+    "pattern": "554889e54157415641554154534883ec28807f410074..31c0e9........4889fb488b4710488945d0488b47184c8b7f"
+   },
+   {
+    "name": "core::iter::sources::from_fn::FromFn::rustc_demangle::v0::HexNibbles::try_parse_str_chars::traits::iterator::Iterator",
+    "sym": "_RNvXNtNtNtCscI6d9CVNmLh_4core4iter7sources7from_fnINtB2_6FromFnNCNvMs1_NtCs8RI9jBTgU6F_14rustc_demangle2v0NtB17_10HexNibbles19try_parse_str_charss0_0ENtNtNtB6_6traits8iterator8Iterator4nextB19_",
+    "pattern": "554889e54156534883ec60488b4f08488b7720b8feffffff4829f10f82........4c8b07498d043048890748894f0848"
+   },
+   {
+    "name": "core::str::iter::Chars::iter::traits::iterator::Iterator",
+    "sym": "_RNvXNtNtCscI6d9CVNmLh_4core3str4iterNtB2_5CharsNtNtNtNtB6_4iter6traits8iterator8Iterator5count",
+    "pattern": "4829fe4883fe2073..ff25........ff25........"
+   },
+   {
+    "name": "core::fmt::Error::Debug",
+    "sym": "_RNvXsK_NtCscI6d9CVNmLh_4core3fmtNtB5_5ErrorNtB5_5Debug3fmt",
+    "pattern": "4889f7488d35........ba05000000ff25........"
+   },
+   {
+    "name": "core::num::error::ParseIntError::fmt::Debug",
+    "sym": "_RNvXsd_NtNtCscI6d9CVNmLh_4core3num5errorNtB5_13ParseIntErrorNtNtB9_3fmt5Debug3fmt",
+    "pattern": "554889e54883ec104889f04c8d4df8498939488d0d........48890c24488d35........488d0d........ba0d000000"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::reserve::do_reserve_and_handle::alloc",
+    "sym": "_RINvNvMs2_NtCs40k4W9msRzi_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalEBa_",
+    "pattern": "554889e54156534883ec204801d672..4889fb488b07488d0c004839ce480f47ce4883f90941be080000004c0f43f148"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner",
+    "sym": "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner11finish_growB7_",
+    "pattern": "554889e54157415653504889fb41bf010000004885c978..4989ce4885f674..4889d0ba010000004889c74c89f1ff15"
+   },
+   {
+    "name": "core::char::methods",
+    "sym": "_RNvMNtNtCscI6d9CVNmLh_4core4char7methodsc16escape_debug_ext",
+    "pattern": "554889e54156534883ec2083fe2777..89f0488d0d........486304814801c8ff..66c7075c30e9........83fe5c75"
+   },
+   {
+    "name": "core::fmt::Formatter::pad_integral",
+    "sym": "_RNvNvMsa_NtCscI6d9CVNmLh_4core3fmtNtB7_9Formatter12pad_integral12write_prefix",
+    "pattern": "554889e5415741564154534c89c34989ce4989f44989ff83faff74..4c89ff89d641........89c1b00184c975..4d85"
+   },
+   {
+    "name": "core::ops::range::Range::fmt::Debug",
+    "sym": "_RNvXs_NtNtCscI6d9CVNmLh_4core3ops5rangeINtB4_5RangejENtNtB8_3fmt5Debug3fmtB8_",
+    "pattern": "554889e54156534889f34989fee8........84c075..488b3b488b4308488d35........ba02000000ff....84c074.."
+   },
+   {
+    "name": "core::fmt::num::Debug",
+    "sym": "_RNvXsZ_NtNtCscI6d9CVNmLh_4core3fmt3numjNtB7_5Debug3fmt",
+    "pattern": "554889e54156534883ec204889f38b4610a90000000275..a90000000475..488b3f488d75dc41be14000000ba140000"
+   },
+   {
+    "name": "core::fmt::Debug",
+    "sym": "_RNvXs1g_NtCscI6d9CVNmLh_4core3fmtRyNtB6_5Debug3fmtB8_",
+    "pattern": "554889e54156534883ec204889f3488b07488b388b4610a90000000275..a90000000475..488d75dc41be14000000ba"
+   },
+   {
+    "name": "alloc::raw_vec",
+    "sym": "_RNvNtCs40k4W9msRzi_5alloc7raw_vec12handle_error",
+    "pattern": "554889e54885ff75..ff15........ff15........"
+   },
+   {
+    "name": "core::result",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core6result13unwrap_failed",
+    "pattern": "554889e54883ec4048897df0488975f8488955e048894de8488d45f0488945c0488d05........488945c8488d45e048"
+   },
+   {
+    "name": "core::fmt::Formatter",
+    "sym": "_RNvMsa_NtCscI6d9CVNmLh_4core3fmtNtB5_9Formatter25debug_tuple_field1_finish",
+    "pattern": "554889e54157415641554154534883ec484c8945c048894dc84989d74989fe4c8b27488b5f084c8b6b184c89e741...."
+   },
+   {
+    "name": "core::fmt::num::imp::Display",
+    "sym": "_RNvXNtNtNtCscI6d9CVNmLh_4core3fmt3num3imphNtB6_7Display3fmt",
+    "pattern": "554889e54883ec100fb60fb80300000089ca80f90a72..0fb6c18d14808d14d0c1ea0c6bc26489cf4028c7400fb6c748"
+   },
+   {
+    "name": "core::fmt::num::imp::Display",
+    "sym": "_RNvXsi_NtNtNtCscI6d9CVNmLh_4core3fmt3num3impjNtB9_7Display3fmt",
+    "pattern": "554889e54156534883ec204889f3488b3f488d75dc41be14000000ba14000000e8........4929c64c8d04284983c0dc"
+   },
+   {
+    "name": "core::fmt::Formatter",
+    "sym": "_RNvMsa_NtCscI6d9CVNmLh_4core3fmtNtB5_9Formatter10debug_list",
+    "pattern": "554889e54156534889f34989fe488b3e488b4608488d35........ba01000000ff....49891e4188460841c64609004c"
+   },
+   {
+    "name": "core::fmt::builders::DebugList",
+    "sym": "_RNvMs5_NtNtCscI6d9CVNmLh_4core3fmt8buildersNtB5_9DebugList6finish",
+    "pattern": "554889e553504889fbb001807f080075..488b03488b38488b4008488d35........ba01000000ff....8843084883c4"
+   },
+   {
+    "name": "std::rt",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std2rt19lang_start_internal",
+    "pattern": "554889e54157415641554154534881ecd80000004589c54989cf488955984889f34989fe64488b042500000000488d80"
+   },
+   {
+    "name": "core::slice::sort::stable::driftsort_main::addr2line::function::FunctionAddress::alloc::slice::sort_by_key::Functions::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::parse::vec::Vec",
+    "sym": "_RINvNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable14driftsort_mainNtNtCscIsuJ8n2VmD_9addr2line8function15FunctionAddressNCINvMNtCs40k4W9msRzi_5alloc5sliceSBZ_11sort_by_keyyNCNvMs0_B11_INtB11_9FunctionsINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3h_9endianity12LittleEndianEE5parses_0E0INtNtB1Z_3vec3VecBZ_EECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534881ec0010000048c70424000000004883ec184889d34889f148d1e94889f04829c848"
+   },
+   {
+    "name": "core::slice::sort::stable::driftsort_main::addr2line::line::LineSequence::alloc::slice::sort_by_key::Lines::parse::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::vec::Vec",
+    "sym": "_RINvNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable14driftsort_mainNtNtCscIsuJ8n2VmD_9addr2line4line12LineSequenceNCINvMNtCs40k4W9msRzi_5alloc5sliceSBZ_11sort_by_keyyNCINvMs_B11_NtB11_5Lines5parseINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3b_9endianity12LittleEndianEEs_0E0INtNtB1S_3vec3VecBZ_EECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534881ec0010000048c70424000000004883ec384989d14889f148d1e94889f04829c848"
+   },
+   {
+    "name": "std::fs::File::io::Read",
+    "sym": "_RNvXs7_NtCsgczF5crJ4sT_3std2fsRNtB5_4FileNtNtB7_2io4Read14read_to_string",
+    "pattern": "554889e54157415641554154534883ec284889f34c8b374c89f7e8........4989c74989d431f641f6c701480f45f248"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::gimli::parse_running_mmaps::MapsEntry::core::str::traits::FromStr",
+    "sym": "_RNvXs_NtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli19parse_running_mmapsNtB4_9MapsEntryNtNtNtCscI6d9CVNmLh_4core3str6traits7FromStr8from_str",
+    "pattern": "554889e54157415641554154534883ec784889f84885d20f84........31c990803c0e2075..48ffc14839ca75..4885"
+   },
+   {
+    "name": "std::path::Components::core::iter::traits::double_ended::DoubleEndedIterator",
+    "sym": "_RNvXsj_NtCsgczF5crJ4sT_3std4pathNtB5_10ComponentsNtNtNtNtCscI6d9CVNmLh_4core4iter6traits12double_ended19DoubleEndedIterator9next_back",
+    "pattern": "554889e54157415641554154534883ec484889fb0fb64e3841b5ff80f90375..44882b4889d84883c4485b415c415d41"
+   },
+   {
+    "name": "std::path::Components",
+    "sym": "_RNvMs8_NtCsgczF5crJ4sT_3std4pathNtB5_10Components7as_path",
+    "pattern": "554889e5415741564154534881ec800000000f10070f104f100f1057200f105f300f295dd00f2955c00f294db00f2945"
+   },
+   {
+    "name": "std::path::Path",
+    "sym": "_RNvMs16_NtCsgczF5crJ4sT_3std4pathNtB6_4Path13__strip_prefix",
+    "pattern": "554889e54157415641554154534881ecd80100004885f674..803f2f410f94c04885c974..803a2f0f94c0eb..4531c0"
+   },
+   {
+    "name": "alloc::sync::Arc::gimli::read::dwarf::Dwarf::endian_slice::EndianSlice::endianity::LittleEndian::drop_slow",
+    "sym": "_RNvMsn_NtCs40k4W9msRzi_5alloc4syncINtB5_3ArcINtNtNtCs72oxeLBbweZ_5gimli4read5dwarf5DwarfINtNtBL_12endian_slice11EndianSliceNtNtBN_9endianity12LittleEndianEEE9drop_slowCsgczF5crJ4sT_3std",
+    "pattern": "554889e5415653488b1f488b83000100004885c074..f048ff0875..488dbb00010000ff15........488dbb08010000"
+   },
+   {
+    "name": "alloc::sync::Arc::gimli::read::abbrev::Abbreviations::drop_slow",
+    "sym": "_RNvMsn_NtCs40k4W9msRzi_5alloc4syncINtB5_3ArcNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev13AbbreviationsE9drop_slowCsgczF5crJ4sT_3std",
+    "pattern": "554889e5415653488b1f488d7b10e8........4883fbff74..f048ff4b0875..be40000000ba080000004889df5b415e"
+   },
+   {
+    "name": "std::io::error::Error",
+    "sym": "_RINvMs3_NtNtCsgczF5crJ4sT_3std2io5errorNtB6_5Error3newReEBa_",
+    "pattern": "554889e5415741564154534889d34189fe4885d274..4989f4ff15........be010000004889dfff15........4885c0"
+   },
+   {
+    "name": "alloc::raw_vec::RawVec::gimli::read::line::FileEntryFormat::grow_one",
+    "sym": "_RNvMs3_NtCs40k4W9msRzi_5alloc7raw_vecINtB5_6RawVecNtNtNtCs72oxeLBbweZ_5gimli4read4line15FileEntryFormatE8grow_oneCsgczF5crJ4sT_3std",
+    "pattern": "554889e54156534883ec204889fb488b37488d04364883f80541be040000004c0f43f0488b5708488d7dd841b8020000"
+   },
+   {
+    "name": "std::panicking::panic_count",
+    "sym": "_RNvNtNtCsgczF5crJ4sT_3std9panicking11panic_count17is_zero_slow_path",
+    "pattern": "554889e566666664488b0425000000004883b8e0ffffff000f94c05dc3"
+   },
+   {
+    "name": "alloc::sync::Arc::std::sync::poison::mutex::Mutex::vec::Vec",
+    "sym": "_RNvMsn_NtCs40k4W9msRzi_5alloc4syncINtB5_3ArcINtNtNtNtCsgczF5crJ4sT_3std4sync6poison5mutex5MutexINtNtB7_3vec3VechEEE9drop_slowBP_",
+    "pattern": "554889e55350488b1f488b73184885f674..488b7b20ba01000000ff15........4883fbff74..f048ff4b0875..be30"
+   },
+   {
+    "name": "alloc::sync::Arc::std::thread::thread::Inner::alloc::System",
+    "sym": "_RNvMsn_NtCs40k4W9msRzi_5alloc4syncINtB5_3ArcNtNtNtCsgczF5crJ4sT_3std6thread6thread5InnerNtNtBM_5alloc6SystemE9drop_slowBM_",
+    "pattern": "554889e55350488b1f488b7b184885ff74..488b7320c607004885f674..ba01000000ff15........4883fbff74..f0"
+   },
+   {
+    "name": "std::sys::sync::rwlock::futex::RwLock",
+    "sym": "_RNvMNtNtNtNtCsgczF5crJ4sT_3std3sys4sync6rwlock5futexNtB2_6RwLock22wake_writer_or_readers",
+    "pattern": "554889e55350f7c6ffffff3f0f85........4889fb89f0f7d871..31c9b800000080f00fb10b75..f0ff43044883c304"
+   },
+   {
+    "name": "core::slice::sort::stable::driftsort_main::gimli::common::DebugInfoOffset::DebugArangesOffset::alloc::slice::sort_by_key::addr2line::unit::ResUnits::read::endian_slice::EndianSlice::endianity::LittleEndian::parse::vec::Vec",
+    "sym": "_RINvNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable14driftsort_mainTNtNtCs72oxeLBbweZ_5gimli6common15DebugInfoOffsetNtB12_18DebugArangesOffsetENCINvMNtCs40k4W9msRzi_5alloc5sliceSBZ_11sort_by_keyB10_NCNvMs_NtCscIsuJ8n2VmD_9addr2line4unitINtB3d_8ResUnitsINtNtNtB14_4read12endian_slice11EndianSliceNtNtB14_9endianity12LittleEndianEE5parse0E0INtNtB2l_3vec3VecBZ_EECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534881ec0010000048c7042400000000504989d64889f148d1e94889f04829c84881fe20"
+   },
+   {
+    "name": "core::slice::sort::unstable::ipnsort::std::backtrace_rs::symbolize::gimli::elf::ParsedSym::sort_unstable_by_key::Object",
+    "sym": "_RINvNtNtNtCscI6d9CVNmLh_4core5slice4sort8unstable7ipnsortNtNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elf9ParsedSymNCINvMB6_SBT_20sort_unstable_by_keyyNCNvMs_BV_NtBV_6Object5parses1_0E0EB13_",
+    "pattern": "4883fe020f82........4989d0488b07488b4f18ba020000004839c173..4883fe0274..4c8d4f304989ca0f1f440000"
+   },
+   {
+    "name": "core::slice::sort::stable::quicksort::quicksort::addr2line::function::FunctionAddress::alloc::slice::sort_by_key::Functions::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable9quicksort9quicksortNtNtCscIsuJ8n2VmD_9addr2line8function15FunctionAddressNCINvMNtCs40k4W9msRzi_5alloc5sliceSB15_11sort_by_keyyNCNvMs0_B17_INtB17_9FunctionsINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3o_9endianity12LittleEndianEE5parses_0E0ECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534883ec484c894dd048894dc84889d34989f74989fe4883fe210f83........4983ff02"
+   },
+   {
+    "name": "core::slice::sort::stable::quicksort::quicksort::addr2line::function::InlinedFunctionAddress::alloc::slice::sort_by::Function::gimli::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable9quicksort9quicksortNtNtCscIsuJ8n2VmD_9addr2line8function22InlinedFunctionAddressNCINvMNtCs40k4W9msRzi_5alloc5sliceSB15_7sort_byNCNvMs1_B17_INtB17_8FunctionINtNtNtCs72oxeLBbweZ_5gimli4read12endian_slice11EndianSliceNtNtB3o_9endianity12LittleEndianEE5parse0E0ECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534883ec784c894db84989cd4889d34989f64883fe2173..4889fee9........4589c44c"
+   },
+   {
+    "name": "core::slice::sort::stable::quicksort::quicksort::gimli::common::DebugInfoOffset::DebugArangesOffset::alloc::slice::sort_by_key::addr2line::unit::ResUnits::read::endian_slice::EndianSlice::endianity::LittleEndian::parse",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable9quicksort9quicksortTNtNtCs72oxeLBbweZ_5gimli6common15DebugInfoOffsetNtB18_18DebugArangesOffsetENCINvMNtCs40k4W9msRzi_5alloc5sliceSB15_11sort_by_keyB16_NCNvMs_NtCscIsuJ8n2VmD_9addr2line4unitINtB3k_8ResUnitsINtNtNtB1a_4read12endian_slice11EndianSliceNtNtB1a_9endianity12LittleEndianEE5parse0E0ECsgczF5crJ4sT_3std",
+    "pattern": "554889e54157415641554154534883ec584c894da84989cc4889d34989f64989ff4883fe2173..4c897dd04983fe020f"
+   },
+   {
+    "name": "core::slice::sort::unstable::heapsort::heapsort::std::backtrace_rs::symbolize::gimli::elf::ParsedSym::sort_unstable_by_key::Object",
+    "sym": "_RINvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort8unstable8heapsort8heapsortNtNtNtNtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolize5gimli3elf9ParsedSymNCINvMB8_SB15_20sort_unstable_by_keyyNCNvMs_B17_NtB17_6Object5parses1_0E0EB1f_",
+    "pattern": "4889f048d1e84801f075..c30f1f40004885c074..48ffc84889c24829f273..488d0c40488b571048895424f80f1007"
+   },
+   {
+    "name": "std::sys::sync::mutex::futex::Mutex",
+    "sym": "_RNvMNtNtNtNtCsgczF5crJ4sT_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended",
+    "pattern": "554889e5415741564154534883ec204889fb8b0783f80175..b99dffffff6690f3908b0383f80175..85c98d490175.."
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::Symbol",
+    "sym": "_RNvMs_NtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolizeNtB4_6Symbol4name",
+    "pattern": "554889e541574156534883ec784889fb833efe75..4c8b76084c8b7e10eb..4c8b76284d85f60f84........4c8b7e30"
+   },
+   {
+    "name": "std::alloc",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std5alloc24default_alloc_error_hook",
+    "pattern": "554889e541574156534883ec28b0018605........84c074..488d45d8488930488d55c8488902488b05........4889"
+   },
+   {
+    "name": "std::sys::backtrace",
+    "sym": "_RNvNtNtCsgczF5crJ4sT_3std3sys9backtrace4lock",
+    "pattern": "554889e5b90100000031c0f00fb10d........75..488b05........488b0048d1e04885c075..31d20fb605........"
+   },
+   {
+    "name": "std::sys::backtrace::BacktraceLock::print::DisplayBacktrace::core::fmt::Display",
+    "sym": "_RNvXNvMNtNtCsgczF5crJ4sT_3std3sys9backtraceNtB5_13BacktraceLock5printNtB2_16DisplayBacktraceNtNtCscI6d9CVNmLh_4core3fmt7Display3fmt",
+    "pattern": "554889e5415741564154534881ecc00000004889f3440fb627448865de4c8dbd60ffffff4c89ffff15........4c8bb5"
+   },
+   {
+    "name": "std::sys::sync::rwlock::futex::RwLock",
+    "sym": "_RNvMNtNtNtNtCsgczF5crJ4sT_3std3sys4sync6rwlock5futexNtB2_6RwLock14read_contended",
+    "pattern": "554889e54157415641554154534883ec284889fb8b073dffffff3f75..b99dffffff66666666662e0f1f840000000000"
+   },
+   {
+    "name": "std::panicking",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std9panicking12default_hook",
+    "pattern": "554889e541574156534883ec584889fbb0ff807f190075..66666664488b0425000000004889c1b0014883b9e0ffffff"
+   },
+   {
+    "name": "core::panicking",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core9panicking9panic_fmt",
+    "pattern": "554889e54883ec3048897df0488975f8488d45f0488945d8488955e066c745e80100488d7dd8ff15........"
+   },
+   {
+    "name": "core::option",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core6option13unwrap_failed",
+    "pattern": "554889e54889fa488d3d........be2b000000ff15........"
+   },
+   {
+    "name": "core::panicking::panic_const",
+    "sym": "_RNvNtNtCscI6d9CVNmLh_4core9panicking11panic_const23panic_const_rem_by_zero",
+    "pattern": "554889e54889fa488d3d........be73000000ff15........"
+   },
+   {
+    "name": "core::panicking::panic_const",
+    "sym": "_RNvNtNtCscI6d9CVNmLh_4core9panicking11panic_const23panic_const_div_by_zero",
+    "pattern": "554889e54889fa488d3d........be33000000ff15........"
+   },
+   {
+    "name": "core::panicking",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core9panicking16panic_in_cleanup",
+    "pattern": "554889e5488d3d........6a245eff15........"
+   },
+   {
+    "name": "core::ffi::c_str::CStr",
+    "sym": "_RNvMs3_NtNtCscI6d9CVNmLh_4core3ffi5c_strNtB5_4CStr19from_bytes_with_nul",
+    "pattern": "534889f84883fa0f77..4885d20f84........31ff66662e0f1f840000000000803c3e000f84........48ffc74839fa"
+   },
+   {
+    "name": "core::slice::index",
+    "sym": "_RNvNtNtCscI6d9CVNmLh_4core5slice5index16slice_index_fail",
+    "pattern": "554889e54883ec304839d776..48897df8488955f0488d45f8488945d0488b05........488945d8488d55f0488955e0"
+   },
+   {
+    "name": "core::panicking",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core9panicking18panic_bounds_check",
+    "pattern": "554889e54883ec30488d45f8488938488d4df0488931488d75d048890e488b0d........48894e084889461048894e18"
+   },
+   {
+    "name": "core::panicking",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core9panicking19assert_failed_inner",
+    "pattern": "554889e54881ec800000004889d0488b5518488975f0488945f848894de04c8945e8488d05........400fb6cf486334"
+   },
+   {
+    "name": "alloc::string::String",
+    "sym": "_RNvMNtCs40k4W9msRzi_5alloc6stringNtB2_6String15from_utf8_lossy",
+    "pattern": "554889e54157415641554154534883ec684989d448897db8488975a8488955b0488d7d88488d75a8ff15........4c8b"
+   },
+   {
+    "name": "core::slice::memchr",
+    "sym": "_RNvNtNtCscI6d9CVNmLh_4core5slice6memchr14memchr_aligned",
+    "pattern": "4156534889d1488d56074883e2f84829f275..488d41f031d2eb..4839d1480f42d14885c974..4531c0660f1f440000"
+   },
+   {
+    "name": "alloc::ffi::c_str::CString::new::SpecNewImpl",
+    "sym": "_RNvXs_NvMs_NtNtCs40k4W9msRzi_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl",
+    "pattern": "554889e54157415641554154534883ec284989d649ffc60f88........4989d74989f54889fbff15........b8010000"
+   },
+   {
+    "name": "core::slice::sort::shared::smallsort",
+    "sym": "_RNvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6shared9smallsort22panic_on_ord_violation",
+    "pattern": "554889e5488d3d........488d15........be99000000ff15........"
+   },
+   {
+    "name": "core::slice::sort::stable::drift",
+    "sym": "_RNvNtNtNtNtCscI6d9CVNmLh_4core5slice4sort6stable5drift11sqrt_approx",
+    "pattern": "4889f84883c801480fbdc889c8d1e883e10101c1b80100000048d3e048d3ef4801f848d1e8c3"
+   },
+   {
+    "name": "core::cell",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core4cell22panic_already_borrowed",
+    "pattern": "554889e54883ec204889fa488d45ff488945e8488b05........488945f0488d3d........488d75e8ff15........"
+   },
+   {
+    "name": "core::fmt",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core3fmt5write",
+    "pattern": "554889e54157415641554154534883ec384889cb4989d54989fef6c3010f85........410fb6450084c00f84........"
+   },
+   {
+    "name": "core::fmt::num::imp::Display",
+    "sym": "_RNvXs8_NtNtNtCscI6d9CVNmLh_4core3fmt3num3impmNtB9_7Display3fmt",
+    "pattern": "554889e5534883ec188b0fba0a000000488d05........89cf81f9e803000072..41b85917b7d14189c9660f1f440000"
+   },
+   {
+    "name": "core::panicking",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core9panicking19panic_cannot_unwind",
+    "pattern": "554889e5488d3d........6a265eff15........"
+   },
+   {
+    "name": "std::alloc",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std5alloc8rust_oom",
+    "pattern": "554889e54883ec1048897df0488975f8488d7df0ff15........"
+   },
+   {
+    "name": "core::option",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core6option13expect_failed",
+    "pattern": "554889e54883ec2048897df0488975f8488d45f0488945e0488d05........488945e8488d3d........488d75e0ff15"
+   },
+   {
+    "name": "std::path::PathBuf",
+    "sym": "_RNvMsr_NtCsgczF5crJ4sT_3std4pathNtB5_7PathBuf14__set_extension",
+    "pattern": "554889e54157415641554154534881ec880000004889d34989f74989fe4889b558ffffff48899560ffffff4885d274.."
+   },
+   {
+    "name": "std::io::error::Error::core::fmt::Display",
+    "sym": "_RNvXs5_NtNtCsgczF5crJ4sT_3std2io5errorNtB5_5ErrorNtNtCscI6d9CVNmLh_4core3fmt7Display3fmt",
+    "pattern": "554889e541574156534881ecc8000000488b3f89f883e003488d0d........486304814801c8ff..488b07488b4f0848"
+   },
+   {
+    "name": "std::path::Components::core::iter::traits::iterator::Iterator",
+    "sym": "_RNvXsi_NtCsgczF5crJ4sT_3std4pathNtB5_10ComponentsNtNtNtNtCscI6d9CVNmLh_4core4iter6traits8iterator8Iterator4next",
+    "pattern": "554889e55350440fb65e384180fb030f84........0fb64e3980f9030f84........488b06440fb607488b5608f6463a"
+   },
+   {
+    "name": "alloc::raw_vec::RawVec::std::alloc::System",
+    "sym": "_RNvMs3_NtCs40k4W9msRzi_5alloc7raw_vecINtB5_6RawVecTOhFUKCBN_EuENtNtCsgczF5crJ4sT_3std5alloc6SystemE8grow_oneB13_",
+    "pattern": "554889e5488b37e8........4883f8ff75..5dc34889c74889d6ff15........"
+   },
+   {
+    "name": "std::backtrace_rs::symbolize::SymbolName::core::fmt::Display",
+    "sym": "_RNvXs2_NtNtCsgczF5crJ4sT_3std12backtrace_rs9symbolizeNtB5_10SymbolNameNtNtCscI6d9CVNmLh_4core3fmt7Display3fmt",
+    "pattern": "554889e54157415641554154534883ec28833fff74..4883c4285b415c415d415e415f5dff25........4c8b77484d85"
+   },
+   {
+    "name": "std::sys::thread_local::destructors::linux_like",
+    "sym": "_RNvNtNtNtNtCsgczF5crJ4sT_3std3sys12thread_local11destructors10linux_like8register",
+    "pattern": "554889e5415741564154534883ec104889f34989fe48833d..........74..488d15........4889df4c89f64883c410"
+   },
+   {
+    "name": "std::io::buffered::bufwriter::BufWriter::stdio::StdoutRaw",
+    "sym": "_RNvMs_NtNtNtCsgczF5crJ4sT_3std2io8buffered9bufwriterINtB4_9BufWriterNtNtB8_5stdio9StdoutRawE14write_all_coldBa_",
+    "pattern": "554889e54157415653504989d64889fb488b074889c1482b4f104839ca76..4989f74889dfe8........4885c075..48"
+   },
+   {
+    "name": "alloc::ffi::c_str::CString",
+    "sym": "_RNvMs_NtNtCs40k4W9msRzi_5alloc3ffi5c_strNtB4_7CString19__from_vec_unchecked",
+    "pattern": "554889e541574156534883ec18488b1f4c8b77104c39f374..4c8b7f0843c604370049ffc64c39f376..ba010000004d"
+   },
+   {
+    "name": "std::sys::os_str::bytes::Slice::try_check_public_boundary",
+    "sym": "_RNvNvMs7_NtNtNtCsgczF5crJ4sT_3std3sys6os_str5bytesNtB7_5Slice25try_check_public_boundary9slow_path",
+    "pattern": "4829d673..31c0c3554889e54157415641554154534883ec184889d34989fe488d04174883fe04ba04000000480f42d6"
+   },
+   {
+    "name": "std::ffi::os_str::Display::core::fmt::Debug",
+    "sym": "_RNvXsP_NtNtCsgczF5crJ4sT_3std3ffi6os_strNtB5_7DisplayNtNtCscI6d9CVNmLh_4core3fmt5Debug3fmt",
+    "pattern": "554889e54883ec100f10070f1145f0488d7df0ff15........4883c4105dc3"
+   },
+   {
+    "name": "core::panicking",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core9panicking14panic_nounwind",
+    "pattern": "554889e5488d347501000000488d0d........31d2ff15........"
+   },
+   {
+    "name": "std::env",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std3env11current_dir",
+    "pattern": "554889e54157415641554154534883ec2848897db8ff15........bb00020000bf00020000be01000000ff15........"
+   },
+   {
+    "name": "std::env",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std3env11current_exe",
+    "pattern": "554889e54156534881ecb00100004889fb48b873656c662f65786548898546feffff48b82f70726f632f736548898540"
+   },
+   {
+    "name": "std::panic",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std5panic19get_backtrace_style",
+    "pattern": "554889e54156534881ecb00100000fb61d........fecb80fb030f82........48b841434b545241434548898546feff"
+   },
+   {
+    "name": "std::panicking",
+    "sym": "_RNvNtCsgczF5crJ4sT_3std9panicking14payload_as_str",
+    "pattern": "554889e54156534883ec104889fb4c8b7618488d7de04889de41....660f6f45e0660f7405........660fd7d0b90800"
+   },
+   {
+    "name": "std::io::stdio",
+    "sym": "_RNvNtNtCsgczF5crJ4sT_3std2io5stdio22try_set_output_capture",
+    "pattern": "554889e54156534883ec104889fb4885ff75..0fb605........84c074..c605..........48895de866666664488b04"
+   },
+   {
+    "name": "std::panicking::panic_count",
+    "sym": "_RNvNtNtCsgczF5crJ4sT_3std9panicking11panic_count8increase",
+    "pattern": "554889e55350488b05........f048ff007e..89fb66666664488b0425000000004889c1b00180b9e8ffffff0075..48"
+   },
+   {
+    "name": "std::io::stdio::Stdout::Write",
+    "sym": "_RNvXsf_NtNtCsgczF5crJ4sT_3std2io5stdioRNtB5_6StdoutNtB7_5Write9write_fmt",
+    "pattern": "554889e5415741564154534883ec204889d34989f6488b074c8b3864488b042500000000488d80f8ffffff4c8b204d85"
+   },
+   {
+    "name": "core::bstr::ByteStr::fmt::Display",
+    "sym": "_RNvXs3_NtCscI6d9CVNmLh_4core4bstrNtB5_7ByteStrNtNtB7_3fmt7Display3fmt",
+    "pattern": "554889e54157415641554154534883ec68448b721041f7c6000000080f84........0fb742146685c00f84........0f"
+   },
+   {
+    "name": "core::fmt::Display",
+    "sym": "_RNvXsk_NtCscI6d9CVNmLh_4core3fmtcNtB5_7Display3fmt",
+    "pattern": "f64613188b0774..554889e54883ec10c745fc000000003d8000000073..8845fcba01000000eb..488b3e488b4e0848"
+   },
+   {
+    "name": "core::fmt::builders::DebugStruct",
+    "sym": "_RNvMs1_NtNtCscI6d9CVNmLh_4core3fmt8buildersNtB5_11DebugStruct5field",
+    "pattern": "554889e54157415641554154534883ec484889fb41b401807f080074..44886308c64309014889d84883c4485b415c41"
+   },
+   {
+    "name": "core::fmt::Debug",
+    "sym": "_RNvXsh_NtCscI6d9CVNmLh_4core3fmteNtB5_5Debug3fmt",
+    "pattern": "554889e54157415641554154534883ec684989f64989ff488b1a4c8b6a084d8b65204889dfbe2200000041....b10184"
+   },
+   {
+    "name": "std::io::stdio::StdoutLock::Write",
+    "sym": "_RNvXsi_NtNtCsgczF5crJ4sT_3std2io5stdioNtB5_10StdoutLockNtB7_5Write9write_all",
+    "pattern": "554889e5415741564155415453504c8b2f49837d10000f85........4889d34989f649c74510ffffffffbf0a000000ff"
+   },
+   {
+    "name": "core::slice::memchr",
+    "sym": "_RNvNtNtCscI6d9CVNmLh_4core5slice6memchr7memrchr",
+    "pattern": "554889e54157415653504c8d46074983e0f84929f04889d04889d14c39c272..89d14429c183e10f4889d04829c80f82"
+   },
+   {
+    "name": "std::panicking::panic_handler::FormatStringPayload::core::fmt::Display",
+    "sym": "_RNvXs0_NvNtCsgczF5crJ4sT_3std9panicking13panic_handlerNtB5_19FormatStringPayloadNtNtCscI6d9CVNmLh_4core3fmt7Display3fmt",
+    "pattern": "48833fff74..488b4708488b57104889f74889c6ff25........488b4718488b00488b10488b4808488b3e488b7608ff"
+   },
+   {
+    "name": "core::str::lossy::Debug::fmt::Debug",
+    "sym": "_RNvXs0_NtNtCscI6d9CVNmLh_4core3str5lossyNtB5_5DebugNtNtB9_3fmt5Debug3fmt",
+    "pattern": "554889e54157415641554154534881eca80000004989ff488b3e4c8b6e08498b452048897dc8be22000000488945a8ff"
+   },
+   {
+    "name": "std::panicking::panic_handler::StaticStrPayload::core::panic::PanicPayload",
+    "sym": "_RNvXs1_NvNtCsgczF5crJ4sT_3std9panicking13panic_handlerNtB5_16StaticStrPayloadNtNtCscI6d9CVNmLh_4core5panic12PanicPayload8take_box",
+    "pattern": "554889e5415653488b1f4c8b7708ff15........bf10000000be08000000ff15........4885c074..4889184c897008"
+   },
+   {
+    "name": "core::fmt::num::imp::Display",
+    "sym": "_RNvXs9_NtNtNtCscI6d9CVNmLh_4core3fmt3num3implNtB9_7Display3fmt",
+    "pattern": "554889e5534883ec188b074189c041f7d8440f48c04889f7ba0a000000488d0d........4181f8e80300000f82d90000"
+   },
+   {
+    "name": "core::fmt::Formatter",
+    "sym": "_RNvMsa_NtCscI6d9CVNmLh_4core3fmtNtB5_9Formatter3pad",
+    "pattern": "554889e54157415641554154534883ec284989d5448b771041f7c6000000180f84........41f7c60000001075..4983"
+   },
+   {
+    "name": "std::sys::stdio::unix::Stderr::io::Write",
+    "sym": "_RNvXs3_NtNtNtCsgczF5crJ4sT_3std3sys5stdio4unixNtB5_6StderrNtNtBb_2io5Write5write",
+    "pattern": "554889e55350bf02000000ff15........4889c34889c24883f8ff75..ff15........8b1048c1e2204883ca0231c048"
+   },
+   {
+    "name": "alloc::string::String::core::convert::From::borrow::Cow",
+    "sym": "_RNvXsP_NtCs40k4W9msRzi_5alloc6stringNtB5_6StringINtNtCscI6d9CVNmLh_4core7convert4FromINtNtB7_6borrow3CoweEE4from",
+    "pattern": "554889e54157415641545348833eff74..488b4610488947100f10060f1107eb..488b5e104885db74..4989fc4c8b7e"
+   },
+   {
+    "name": "core::io::error::ErrorKind::fmt::Display",
+    "sym": "_RNvXs_NtNtCscI6d9CVNmLh_4core2io5errorNtB4_9ErrorKindNtNtB8_3fmt7Display3fmt",
+    "pattern": "0fb607488d0d........488b14c1488d0d........486304814801c8488b3e488b4e08488b49184889c6ff.."
+   },
+   {
+    "name": "alloc::string::String",
+    "sym": "_RNvMNtCs40k4W9msRzi_5alloc6stringNtB2_6String11try_reserve",
+    "pattern": "4889f1488b37488b57104989f04929d048c7c0ffffffff4c39c176..4801ca73..31c0c3554889e54156534883ec2048"
+   },
+   {
+    "name": "std::panicking::panic_handler::FormatStringPayload::core::panic::PanicPayload",
+    "sym": "_RNvXs_NvNtCsgczF5crJ4sT_3std9panicking13panic_handlerNtB4_19FormatStringPayloadNtNtCscI6d9CVNmLh_4core5panic12PanicPayload3get",
+    "pattern": "554889e5534883ec3848833fff75..4889fb488b471848c745e00000000048c745e80100000048c745f000000000488b"
+   },
+   {
+    "name": "std::panicking::panic_handler::FormatStringPayload::core::panic::PanicPayload",
+    "sym": "_RNvXs_NvNtCsgczF5crJ4sT_3std9panicking13panic_handlerNtB4_19FormatStringPayloadNtNtCscI6d9CVNmLh_4core5panic12PanicPayload8take_box",
+    "pattern": "554889e541574156534883ec38488b1f4883fbff75..4889fb488b471848c745d00000000048c745d80100000048c745"
+   },
+   {
+    "name": "core::fmt",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core3fmt17pointer_fmt_inner",
+    "pattern": "554889e54156534883ec104889f34c8b76104489f041f7c60000800074..41f7c60000000875..0d0000000966c74314"
+   },
+   {
+    "name": "core::fmt::Formatter",
+    "sym": "_RNvMsa_NtCscI6d9CVNmLh_4core3fmtNtB5_9Formatter26debug_struct_field1_finish",
+    "pattern": "554889e54157415641554154534883ec184c89cb4d89c64989cf4989fc4c8b6d10488b3f498b442408ff....4c8965c8"
+   },
+   {
+    "name": "core::str::pattern::StrSearcher",
+    "sym": "_RNvMsu_NtNtCscI6d9CVNmLh_4core3str7patternNtB5_11StrSearcher3new",
+    "pattern": "554889e54157415641554154534883ec184989cc4989fa4d85c074..4c89c34983f801488975c075..41bf0100000031"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::reserve::do_reserve_and_handle::alloc::Global",
+    "sym": "_RINvNvMs2_NtCs40k4W9msRzi_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECscIsuJ8n2VmD_9addr2line",
+    "pattern": "554889e5ff15........4883f8ff75..5dc34889c74889d6ff15........"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::grow_amortized",
+    "sym": "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner14grow_amortizedCs72oxeLBbweZ_5gimli",
+    "pattern": "4d85c075..31c0c34801f272..554889e541574156534883ec184889fb488b074801c04839c2480f47c231d24981f801"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::try_allocate_in",
+    "sym": "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner15try_allocate_inCs72oxeLBbweZ_5gimli",
+    "pattern": "554889e5415741564155415453504c89c04989ce4189d54889fb48f7e64989c40f90c048b900000000000000804c29f1"
+   },
+   {
+    "name": "alloc::collections::btree::node::NodeRef::marker::Owned::gimli::read::abbrev::Abbreviation::Internal::new_internal::alloc",
+    "sym": "_RINvMs9_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB6_7NodeRefNtNtB6_6marker5OwnedyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB1a_8InternalE12new_internalNtNtBc_5alloc6GlobalEB1z_",
+    "pattern": "554889e54157415653504989f64989ffff15........4889c348c780d00400000000000066c7803205000000004c89b8"
+   },
+   {
+    "name": "alloc::collections::btree::node::Handle::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Leaf::Edge::insert::alloc",
+    "sym": "_RINvMsK_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB6_6HandleINtB6_7NodeRefNtNtB6_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB1n_4LeafENtB1n_4EdgeE6insertNtNtBc_5alloc6GlobalEB1K_",
+    "pattern": "554889e54157415641554154534881ecf80000004989ce4989d74889fb488b066683b8320500000b72..4c8b66104983"
+   },
+   {
+    "name": "alloc::collections::btree::node::Handle::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Leaf::Edge",
+    "sym": "_RNvMsJ_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB5_6HandleINtB5_7NodeRefNtNtB5_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB1m_4LeafENtB1m_4EdgeE10insert_fitB1J_",
+    "pattern": "554889e54157415641554154534881ec880000004989c84889f04889fb4c8b3e4c8b6e10450fb7a732050000498d4d01"
+   },
+   {
+    "name": "alloc::collections::btree::node::Handle::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Leaf::KV::split::alloc",
+    "sym": "_RINvMsV_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB6_6HandleINtB6_7NodeRefNtNtB6_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB1n_4LeafENtB1n_2KVE5splitNtNtBc_5alloc6GlobalEB1K_",
+    "pattern": "554889e541574156534883ec784989f74989feff15........4889c348c780d00400000000000066c780320500000000"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::deallocate",
+    "sym": "_RNvMs2_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner10deallocateCs72oxeLBbweZ_5gimli",
+    "pattern": "488d4424f04885d274..488b0f4885c974..480fafca488b7f0848897424f0488d4424f8eb..31c9488908488b5424f0"
+   },
+   {
+    "name": "alloc::collections::btree::node::Handle::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Internal::Edge::insert::alloc",
+    "sym": "_RINvMsM_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB6_6HandleINtB6_7NodeRefNtNtB6_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB1n_8InternalENtB1n_4EdgeE6insertNtNtBc_5alloc6GlobalEB1K_",
+    "pattern": "554889e54157415641554154534881ecd80000004989d4488b4608488d50ff4939d10f85........4d89c74989fe488b"
+   },
+   {
+    "name": "alloc::collections::btree::node::Handle::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Internal::Edge",
+    "sym": "_RNvMsM_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB5_6HandleINtB5_7NodeRefNtNtB5_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB1m_8InternalENtB1m_4EdgeE10insert_fitB1J_",
+    "pattern": "554889e54157415641554154534881ec8800000048894dc04989d04989f74c8b274c8b6f10410fb79c24320500008d43"
+   },
+   {
+    "name": "alloc::collections::btree::node::Handle::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Internal::KV::split::alloc",
+    "sym": "_RINvMsW_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB6_6HandleINtB6_7NodeRefNtNtB6_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB1n_8InternalENtB1n_2KVE5splitNtNtBc_5alloc6GlobalEB1K_",
+    "pattern": "554889e54157415641554154534881ec880000004989f74989fe488b06488945d0440fb7a032050000ff15........48"
+   },
+   {
+    "name": "alloc::collections::btree::node::Handle::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Leaf::Edge::insert_recursing::alloc::Global::map::entry::VacantEntry",
+    "sym": "_RINvMsN_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB6_6HandleINtB6_7NodeRefNtNtB6_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB1n_4LeafENtB1n_4EdgeE16insert_recursingNtNtBc_5alloc6GlobalNCNvMs4_NtNtB8_3map5entryINtB3C_11VacantEntryyB1E_E12insert_entry0EB1K_",
+    "pattern": "554889e54157415641554154534881ec680100004d89c74989fe488d9de8feffff4889dfff15........837b08ff0f84"
+   },
+   {
+    "name": "alloc::collections::btree::node::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Internal",
+    "sym": "_RNvMsv_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB5_7NodeRefNtNtB5_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB19_8InternalE4pushB1w_",
+    "pattern": "554889e54156534889c84889d3488b4f0848ffc94939c875..4c8b07410fb790320500004883fa0a77..8d4a01664189"
+   },
+   {
+    "name": "alloc::collections::btree::map::BTreeMap::gimli::read::abbrev::Abbreviation",
+    "sym": "_RINvMsi_NtNtNtCs40k4W9msRzi_5alloc11collections5btree3mapINtB6_8BTreeMapyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationE3getyEB1f_",
+    "pattern": "488b0f4885c974..488b5708488b3631c0440fb781320500004d6bd07048c7c7ffffffff4531c94d89d34d01cb74..48"
+   },
+   {
+    "name": "alloc::raw_vec::RawVecInner::finish_grow",
+    "sym": "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs72oxeLBbweZ_5gimli",
+    "pattern": "554889e5415741564154534883ec104989cf4889fb4c89c048f7e24989c60f90c048b900000000000000804c29f94939"
+   },
+   {
+    "name": "alloc::collections::btree::map::BTreeMap::gimli::read::abbrev::Abbreviation",
+    "sym": "_RNvMsi_NtNtNtCs40k4W9msRzi_5alloc11collections5btree3mapINtB5_8BTreeMapyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationE5entryB1e_",
+    "pattern": "4889f8488b0e4885c974..488b7e08440fb789320500004589ca41c1e20349c7c0ffffffff4d85d274..4a3b94c1e004"
+   },
+   {
+    "name": "alloc::collections::btree::map::entry::VacantEntry::gimli::read::abbrev::Abbreviation",
+    "sym": "_RNvMs4_NtNtNtNtCs40k4W9msRzi_5alloc11collections5btree3map5entryINtB5_11VacantEntryyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationE12insert_entryB1q_",
+    "pattern": "554889e5415741564154534883ec304989d64989f74889fb48837e100074..498d7710498b5708488d7dc84c89f14d89"
+   },
+   {
+    "name": "alloc::collections::btree::node::NodeRef::marker::Mut::gimli::read::abbrev::Abbreviation::Leaf",
+    "sym": "_RNvMsu_NtNtNtCs40k4W9msRzi_5alloc11collections5btree4nodeINtB5_7NodeRefNtNtB5_6marker3MutyNtNtNtCs72oxeLBbweZ_5gimli4read6abbrev12AbbreviationNtB19_4LeafE16push_with_handleB1w_",
+    "pattern": "554889e54156534889cb4c8b16450fb78a320500004983f90b73..4989f04889f8418d49016641898a320500004b8994"
+   },
+   {
+    "name": "core::str::trim_start_matches",
+    "sym": "_RINvMNtCscI6d9CVNmLh_4core3stre18trim_start_matchesReECs8RI9jBTgU6F_14rustc_demangle",
+    "pattern": "554889e5415741564154534881ec800000004989c84889d14889f34989fe4c8dbd60ffffff4c89ff4c89f64889daff15"
+   },
+   {
+    "name": "core::unicode::unicode_data::grapheme_extend",
+    "sym": "_RNvNtNtNtCscI6d9CVNmLh_4core7unicode12unicode_data15grapheme_extend11lookup_slow",
+    "pattern": "31d281ffab0e01000f93c289f8c1e00bc1e204488d7208488d0d........448b44912041c1e00b4139c0480f47f2488d"
+   },
+   {
+    "name": "core::unicode::printable",
+    "sym": "_RNvNtNtCscI6d9CVNmLh_4core7unicode9printable12is_printable",
+    "pattern": "554889e5535083ff2073..31c0eb..b00183ff7f73..24014883c4085b5dc381ff000001000f83........89f9c1e908"
+   },
+   {
+    "name": "core::str::count",
+    "sym": "_RNvNtNtCscI6d9CVNmLh_4core3str5count14do_count_chars",
+    "pattern": "4c8d4f074983e1f84d89c84929f84889f04c29c073..4885f674..4883fe0473..31c931c0e9........4889c148c1e9"
+   },
+   {
+    "name": "core::fmt::num::error::IntErrorKind::Debug::fmt",
+    "sym": "_RNvXs1g_NtCscI6d9CVNmLh_4core3fmtRNtNtNtB8_3num5error12IntErrorKindNtB6_5Debug3fmtCs8RI9jBTgU6F_14rustc_demangle",
+    "pattern": "4889f0488b0f0fb609488d15........488b14ca488d3d........4863348f4801fe4889c7ff25........"
+   },
+   {
+    "name": "core::fmt::Debug::fmt",
+    "sym": "_RNvXs1g_NtCscI6d9CVNmLh_4core3fmtRhNtB6_5Debug3fmtCs8RI9jBTgU6F_14rustc_demangle",
+    "pattern": "488b3f8b46100fbae01972..0fbae01a72..ff25........ff25........ff25........"
+   },
+   {
+    "name": "core::fmt::Debug::fmt",
+    "sym": "_RNvXsr_NtCscI6d9CVNmLh_4core3fmtShNtB5_5Debug3fmtCs8RI9jBTgU6F_14rustc_demangle",
+    "pattern": "554889e54157415641554154534883ec184889f34989fe488d7dc04889d6ff15........4885db74..4c8d65c04c8d6d"
+   },
+   {
+    "name": "core::slice::copy_within::ops::range::RangeInclusive",
+    "sym": "_RINvMNtCscI6d9CVNmLh_4core5sliceSh11copy_withinINtNtNtB5_3ops5range14RangeInclusivejEECs6GjPWCamJNA_11miniz_oxide",
+    "pattern": "554889e5415741564154534c89c34989ce4989f44989ff4889d7ff15........4829c24929d44d39e677..4c01f84d01"
+   },
+   {
+    "name": "core::slice::index::range::ops::range::RangeInclusive",
+    "sym": "_RINvNtNtCscI6d9CVNmLh_4core5slice5index5rangeINtNtNtB6_3ops5range14RangeInclusivejEECs6GjPWCamJNA_11miniz_oxide",
+    "pattern": "554889e54889f2488b07488b7708807f100074..4839d676..488d0d........eb..4839d673..48ffc64839f077..48"
+   },
+   {
+    "name": "core::slice::copy_from_slice_impl",
+    "sym": "_RNvNvNtCscI6d9CVNmLh_4core5slice20copy_from_slice_impl17len_mismatch_fail",
+    "pattern": "554889e54883ec30488975f848897df0488d45f8488945d0488b05........488945d8488d4df048894de0488945e848"
+   },
+   {
+    "name": "core::panicking",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core9panicking18panic_nounwind_fmt",
+    "pattern": "554889e54883ec3048897dd8488975e0488d45d8488945e848894df0c645f8008855f9488d7de8ff15........0f0bff"
+   },
+   {
+    "name": "core::str::lossy::Utf8Chunks::iter::traits::iterator::Iterator",
+    "sym": "_RNvXs2_NtNtCscI6d9CVNmLh_4core3str5lossyNtB5_10Utf8ChunksNtNtNtNtB9_4iter6traits8iterator8Iterator4next",
+    "pattern": "4889f8488b56084885d20f84........415653488b0e31ff4c8d0d........4c8d15........eb..4883c7044989f84c"
+   },
+   {
+    "name": "alloc::raw_vec",
+    "sym": "_RNvNtCs40k4W9msRzi_5alloc7raw_vec17capacity_overflow",
+    "pattern": "554889e5488d3d........488d15........be23000000ff15........"
+   },
+   {
+    "name": "core::fmt::builders::PadAdapter::Write",
+    "sym": "_RNvXs0_NtNtCscI6d9CVNmLh_4core3fmt8buildersNtB5_10PadAdapterNtB7_5Write9write_str",
+    "pattern": "554889e54157415641554154534883ec3848bb808080808080808049bc0a0a0a0a0a0a0a0a488b4710488945b0488b07"
+   },
+   {
+    "name": "core::fmt::Formatter",
+    "sym": "_RNvMsa_NtCscI6d9CVNmLh_4core3fmtNtB5_9Formatter12pad_integral",
+    "pattern": "554889e54157415641554154534883ec484d89ce4c8945b84989cd4989fc448b7f104489f8250000200083f801b90000"
+   },
+   {
+    "name": "core::str",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core3str19slice_error_fail_rt",
+    "pattern": "554889e54883ec60488955b848894dc0488975b04839f20f87........4839f177..4839ca0f87........4885d20f95"
+   },
+   {
+    "name": "core::fmt::Debug",
+    "sym": "_RNvXsj_NtCscI6d9CVNmLh_4core3fmtcNtB5_5Debug3fmt",
+    "pattern": "554889e5415741564154534883ec104989fe488b1e4c8b66084d8b7c24204889dfbe2700000041....89c1b00184c975"
+   },
+   {
+    "name": "core::cell::BorrowMutError::fmt::Display",
+    "sym": "_RNvXsr_NtCscI6d9CVNmLh_4core4cellNtB5_14BorrowMutErrorNtNtB7_3fmt7Display3fmt",
+    "pattern": "4889f7488d35........ba18000000ff25........"
+   },
+   {
+    "name": "core::panicking",
+    "sym": "_RNvNtCscI6d9CVNmLh_4core9panicking26panic_nounwind_nobacktrace",
+    "pattern": "554889e5488d347501000000488d0d........ba01000000ff15........"
+   },
+   {
+    "name": "core::fmt::Arguments::Display",
+    "sym": "_RNvXs8_NtCscI6d9CVNmLh_4core3fmtNtB5_9ArgumentsNtB5_7Display3fmt",
+    "pattern": "488b06488b7608488b17488b4f084889c7ff25........"
+   },
+   {
+    "name": "core::fmt::builders::PadAdapter::Write",
+    "sym": "_RNvXs0_NtNtCscI6d9CVNmLh_4core3fmt8buildersNtB5_10PadAdapterNtB7_5Write10write_char",
+    "pattern": "554889e5415741564154534c8b7710488b1f4c8b7f0841803e0074..488d05........ba040000004889df4189f44889"
+   }
+  ]
+ }
+}

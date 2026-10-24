@@ -20,6 +20,7 @@ ring networking) and **ToxicMiner.exe** (a C/C++ MSVC PE, used as a negative con
 | 2 | **`recover_apihash.py`** | static immediates | resolve hash-obfuscated imports |
 | 2 | **`dump_unpacked.py`** | dynamic (W→X hook) | dump + carve unpacked stage-2 |
 | 3 | **`recover_rust_meta.py`** | static rodata/struct parse | Rust panic/crate/type recovery |
+| 3 | **`recover_libfuncs.py`** | static byte-signature match | identify Rust std/crate functions |
 | 4 | **`deobf_expr.py`** | z3 (new engine) | prove/simplify MBA + opaque predicates |
 | 4 | **`deobf_cff.py`** | static CFG heuristic | locate control-flow-flattening dispatchers |
 
@@ -76,6 +77,36 @@ is not misflagged.
 - rodata even surfaced a leaked indicator `http://192.168.56.102:8080/exfil`
 
 **Negative control:** ToxicMiner.exe → `is_rust=False`, no crates (correct).
+
+---
+
+## Tier 3 — library-function identification (`recover_libfuncs.py`)
+
+A stripped Rust binary is mostly prebuilt std/core/alloc and crate code, linked and
+monomorphised **identically** across every program built with the same toolchain. Take an
+*unstripped* reference build, sign the first 48 bytes of each library function with the same
+position-independent masking the runtime signatures use (`gen_runtime_sigs.py`: blank
+relocation/branch bytes), and those signatures match the same functions in a *stripped*
+target. The analyst then reads `alloc::raw_vec::RawVecInner::finish_grow` instead of `FUN_`,
+and the string decoders stand out from the library noise around them.
+
+- **Generate** (per toolchain + arch, keyed by rust release from `recover_rust_meta`):
+  `recover_libfuncs.py --gen build/*release*nostrip`
+- **Identify:** `recover_libfuncs.py target` or `recover.py target --libfuncs`; feeds
+  `ghidra_annotate.py`, which renames the matched `FUN_`/`SUB_` functions `lib_<name>`.
+- **Collision handling:** a signature that matches more than one function start in the target
+  (two functions with an identical masked prologue, e.g. `LowerHex` vs `UpperHex`) is dropped
+  for that binary — precision over recall, so an identification is never a guess.
+- **Selftest:** v0 path demangling + library classification. **Cross-binary test**
+  (`tests/test_libfuncs.py`): signatures from one program identify library functions in a
+  *different, stripped* program, scored against the target's own symbols.
+- **Measured (rustc 1.97, x86-64 ELF):** signatures from three programs identify **277
+  functions in two held-out programs, 277/277 correct, 0 misidentified**. The bundled DB
+  (`scripts/data/libfunc_sigs.json`) covers that toolchain; another rustc or arch regenerates
+  with `--gen`.
+- **Honesty:** the label flattens generic arguments (so a monomorphised symbol reads as a
+  long concatenated path); the identification — which address is which library function — is
+  exact. Names are only as current as the signed toolchain.
 
 ---
 

@@ -251,8 +251,16 @@ Every recovered string says where it came from, indicator shapes are tagged (`[u
 results document so the strings appear in `floss`/`floss --html` next to the static ones.
 
 Beyond strings, the same engines drive config/C2 extraction, hash-obfuscated API-import
-resolution, unpacked stage-2 carving, Rust crate+version & panic-site recovery, and
-MBA / opaque-predicate / control-flow-flattening analysis — see `ARTIFACT_TIERS.md`.
+resolution, unpacked stage-2 carving, Rust crate+version & panic-site recovery,
+**library-function identification** (name the std/crate functions in a stripped binary by
+byte signature, so the decoders stand out), and MBA / opaque-predicate /
+control-flow-flattening analysis — see `ARTIFACT_TIERS.md`.
+
+Recovered strings and identified functions can be pushed straight into a decompiler:
+`scripts/ghidra_run.sh <binary>` runs the recovery and annotates a Ghidra project headless
+(plate comments + bookmarks on the decoding functions, `lib_<name>` renames on the library
+functions). It is a PyGhidra script — Ghidra 11.3+ dropped Jython — and the wrapper handles
+the PyGhidra launch for you.
 
 ## Quick start
 
@@ -267,7 +275,14 @@ python3 scripts/recover.py path/to/binary --floss-json out.json
 python3 scripts/recover.py path/to/binary --emulate never       # static passes only, seconds
 python3 scripts/recover.py path/to/binary --time-budget 600     # big binaries: emulate longer
 python3 scripts/recover.py path/to/binary --max-ram 2G          # cap memory (fewer processes)
+python3 scripts/recover.py path/to/binary --libfuncs            # also name Rust std/crate functions
 python3 scripts/recover.py samples/ --jsonl triage.jsonl        # a whole directory
+
+# name library functions in a stripped binary (needs a signature DB for its toolchain):
+python3 scripts/recover_libfuncs.py --gen build/*release*nostrip   # build the DB once per toolchain
+python3 scripts/recover_libfuncs.py path/to/binary                 # identify; --json for records
+# push strings + library names into Ghidra (headless, PyGhidra):
+scripts/ghidra_run.sh path/to/binary
 
 # runtime-only decoders, inside an isolated analysis VM ONLY (pip install frida frida-tools)
 python3 scripts/recover_dynamic.py path/to/binary [-- arg1 arg2 ...]

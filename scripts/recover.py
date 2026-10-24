@@ -91,12 +91,12 @@ def _parse_size_mb(text: str) -> int:
 
 def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len: int = 6,
         time_budget: float = 120.0, max_funcs: int = 0, literals: bool = True,
-        max_ram_mb: int = 0) -> dict:
+        max_ram_mb: int = 0, libfuncs: bool = False) -> dict:
     """Run the applicable recoverers and return {"format", "arch", "decoded", "stack", ...}."""
     fmt, arch, imagebase = detect(path)
     result = {"file": str(path), "format": fmt, "arch": arch, "imagebase": imagebase,
               "decoded": [], "stack": [], "literals": [], "literals_missed": [],
-              "engines": [], "notes": []}
+              "libfuncs": [], "engines": [], "notes": []}
     if arch not in ("x86_64", "aarch64"):
         result["notes"].append(f"no static or emulation engine for arch={arch}; use recover_dynamic.py")
         return result
@@ -162,6 +162,20 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
                                   "strings": len(result["literals"]), "unexplained": len(lit["missed"]),
                                   "seconds": round(time.monotonic() - t0, 1)})
 
+    if libfuncs:
+        import recover_libfuncs as LF
+        t0 = time.monotonic()
+        db = LF.load_db()
+        if db:
+            lf = LF.match_binary(path, db)
+            result["libfuncs"] = lf
+            result["engines"].append({"engine": "library functions (recover_libfuncs)",
+                                      "identified": len(lf),
+                                      "seconds": round(time.monotonic() - t0, 1)})
+        else:
+            result["notes"].append("--libfuncs: no signature DB at scripts/data/libfunc_sigs.json; "
+                                   "generate it with recover_libfuncs.py --gen <unstripped builds>")
+
     if not result["decoded"]:
         result["notes"].append("no decoded strings: for AEAD (e.g. muddy) or decoders that only run at "
                                "runtime, use recover_dynamic.py inside an isolated analysis VM")
@@ -186,8 +200,12 @@ def _hex(v):
 def print_text(result: dict, all_literals: bool = False) -> None:
     print(f"binary: {Path(result['file']).name}   format={result['format']}   arch={result['arch']}")
     for e in result["engines"]:
-        extra = "  ".join(f"{k}={v}" for k, v in e.items() if k not in ("engine", "strings"))
-        print(f"  {e['engine']}: {e['strings']} strings  {extra}")
+        if "strings" in e:
+            extra = "  ".join(f"{k}={v}" for k, v in e.items() if k not in ("engine", "strings"))
+            print(f"  {e['engine']}: {e['strings']} strings  {extra}")
+        else:
+            extra = "  ".join(f"{k}={v}" for k, v in e.items() if k != "engine")
+            print(f"  {e['engine']}: {extra}")
     if result["decoded"]:
         print("\n== decoded strings ==")
         for x in result["decoded"]:
@@ -202,6 +220,13 @@ def print_text(result: dict, all_literals: bool = False) -> None:
         print("\n== stack strings ==")
         for x in result["stack"]:
             print(f"  {x['string']}{_tags(x)}\n      store {_hex(x['pc'])}  [{x['base']}{x['offset']:+#x}]")
+    lf = result.get("libfuncs", [])
+    if lf:
+        print(f"\n== library functions identified ({len(lf)}) ==")
+        for x in lf[:40]:
+            print(f"  {_hex(x['va'])}  {x['name']}")
+        if len(lf) > 40:
+            print(f"  ... and {len(lf) - 40} more (--json for all)")
     lits = result.get("literals", [])
     shown = lits if all_literals else [x for x in lits if x.get("tags")]
     if shown:
@@ -284,6 +309,9 @@ def main(argv=None):
     ap.add_argument("--max-ram", metavar="SIZE", default="",
                     help="RAM budget for emulation, e.g. 4G or 2048 (MB); fewer worker processes "
                          "fit a smaller budget, trading speed for memory (also RUST_DEOBF_MAX_RAM_MB)")
+    ap.add_argument("--libfuncs", action="store_true",
+                    help="identify Rust std/crate functions by byte signature (needs a DB built with "
+                         "recover_libfuncs.py --gen); surfaces library names so the decoders stand out")
     args = ap.parse_args(argv)
 
     path = Path(args.binary)
@@ -297,14 +325,14 @@ def main(argv=None):
         run_dir(path, Path(args.jsonl) if args.jsonl else None, emulate=args.emulate,
                 stackstrings=not args.no_stackstrings, min_len=args.min_length,
                 time_budget=args.time_budget, max_funcs=args.max_funcs,
-                literals=not args.no_literals, max_ram_mb=max_ram_mb)
+                literals=not args.no_literals, max_ram_mb=max_ram_mb, libfuncs=args.libfuncs)
         return
     if not path.is_file():
         ap.error(f"no such file: {path}")
 
     result = run(path, emulate=args.emulate, stackstrings=not args.no_stackstrings,
                  min_len=args.min_length, time_budget=args.time_budget, max_funcs=args.max_funcs,
-                 literals=not args.no_literals, max_ram_mb=max_ram_mb)
+                 literals=not args.no_literals, max_ram_mb=max_ram_mb, libfuncs=args.libfuncs)
 
     if args.floss_json:
         import floss_export

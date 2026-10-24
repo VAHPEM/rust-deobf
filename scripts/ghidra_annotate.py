@@ -94,6 +94,32 @@ def main():
 
     listing = currentProgram.getListing()
     btm = currentProgram.getBookmarkManager()
+    fm = currentProgram.getFunctionManager()
+
+    # Library-function identifications (recover_libfuncs): rename still-default FUN_/SUB_
+    # functions to their std/crate name so the decoders stand out from the library noise.
+    lib_renamed = 0
+    for rec in data.get("libfuncs", []):
+        r = _resolve(rec.get("va"))
+        if r is None:
+            continue
+        entry, func = r
+        if func is None:
+            continue
+        name = func.getName()
+        if not (name.startswith("FUN_") or name.startswith("SUB_")):
+            continue
+        sym = _SANE.sub("_", rec.get("name", "")).strip("_")
+        if not sym:
+            continue
+        try:
+            func.setName("lib_" + sym[:60], SourceType.ANALYSIS)
+            btm.setBookmark(entry, "Analysis", "rust-deobf",
+                            "library fn: %s" % rec.get("name", ""))
+            lib_renamed += 1
+        except Exception as e:
+            print("libfunc rename failed at %s: %s" % (entry, e))
+
     annotated = renamed = 0
     for key, info in by_func.items():
         r = _resolve(key)
@@ -119,7 +145,8 @@ def main():
                         renamed += 1
                     except Exception as e:
                         print("rename failed at %s: %s" % (entry, e))
-    print("ghidra_annotate: annotated %d function(s), renamed %d" % (annotated, renamed))
+    print("ghidra_annotate: annotated %d function(s), renamed %d, library fns named %d"
+          % (annotated, renamed, lib_renamed))
 
 
 main()
