@@ -930,3 +930,46 @@ backdoor (universal Mach-O, ~2 MB x86-64 slice): it ran clean — 4808/4808 func
 crash — and the emulator **recovered an obfuscated C2 URL, `https://juchesoviet48.com/`**, even
 though the sample is stripped of Rust metadata (`recover_rust_meta` reported non-Rust). The §12
 format gap for Mach-O is closed; `gallery/results.jsonl` records the result by hash.
+
+## 16. Independent held-out evaluation (Oct 2026)
+
+The five canary strings in `bench_src/` are the strings the engine's heuristics were tuned
+against, so recall on them overstates how the engine does on strings it has never seen. This
+round measures generalisation honestly, with a **disjoint** set and a **frozen** engine:
+`scripts/heldout_eval.py` generates ten held-out secrets deliberately varied in shape (a URL with
+a query, a unix socket path, a Windows path, a registry key, an `ip:port`, a GUID, an
+API-key-shaped token, a 2-character string, a 64-character hyphen-rich string, an HTTP-header
+fragment), runs them through the **same real obfuscator crates** (`obfstr`, `litcrypt`,
+`litcrypt2`, `cryptify`) and the custom XOR/ADD ciphers but **with fresh keys**, builds each into a
+throwaway directory (the committed benchmark is untouched), and scores the current engine. No
+engine code was changed after seeing the numbers — the misses below are reported as misses, which
+is the whole point of a held-out set.
+
+**Result (rustc 1.97, x86-64 ELF):**
+
+| obfuscator | recall | false positives |
+|---|--:|--:|
+| xor_custom | 7/10 | 0 |
+| add_custom | 7/10 | 0 |
+| obfstr | 7/10 | 0 |
+| litcrypt | 7/10 | 0 |
+| litcrypt2 | 7/10 | 0 |
+| cryptify | 7/10 | 0 |
+| **total** | **42/60 (70%)** | **0 (precision 100%)** |
+
+**What this shows.** Precision held at **100% across all six obfuscators on strings the engine was
+never tuned on** — zero invented strings — which is the result the buffer-address overlap work
+(§11) and the junk filters were meant to protect, now confirmed off the tuning set.
+
+**What it also shows, honestly.** Recall is **70%, not the ~100% the canary benchmark reports**,
+and the gap is systematic: the *same three* secrets are missed under *every* obfuscator, so the
+cause is the string content, not any cipher. All three are decoded correctly by the emulator and
+then dropped by the `looks_like_text` gate (verified directly): the GUID
+`b3f1a9d0-7c42-4e18-9a55-0cc1e2f67d84`, the token `sk_live_51MeridianQZx7Kp0294aBc`, and the
+2-character `no`. That gate is exactly what buys the 100% precision — it rejects high-entropy,
+non-natural-language runs — but GUIDs, API keys and random tokens are precisely the indicators a
+malware analyst most wants, and the `canary::name::value` benchmark strings (all natural-language)
+never exercised that trade-off. So the honest headline is: **strong precision, and a real recall
+gap on indicator-shaped high-entropy strings.** Widening the text gate to admit structured IOCs
+(GUID / key / token shapes) without losing precision is the next-work item — and it must be
+validated on a *fresh* held-out set, never tuned against this one.
