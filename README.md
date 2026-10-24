@@ -250,6 +250,13 @@ Every recovered string says where it came from, indicator shapes are tagged (`[u
 `[domain]`, `[path]`, `[registry]`, `[mutex]`, `[email]`, `[guid]`, `[token]`), and `--floss-json` writes a FLOSS
 results document so the strings appear in `floss`/`floss --html` next to the static ones.
 
+For a first-pass read, `scripts/soc_triage.py <binary>` prints a one-screen SOC triage card —
+format/arch, Rust toolchain + panic-site count, a crate capability fingerprint (networking /
+crypto / recon / persistence / staging), indicators grouped by tag with benign Rust std/compiler
+paths filtered out, a decoded-string sample, and a calibrated LOW/MEDIUM/HIGH triage *signal* with
+its evidence (an analyst aid, not a verdict). `--fast` is metadata+literals only (sub-second);
+`--json` emits a record for a SIEM/case system. Static + emulation only; never executes the sample.
+
 Beyond strings, the same engines drive config/C2 extraction, hash-obfuscated API-import
 resolution, unpacked stage-2 carving, Rust crate+version & panic-site recovery,
 **library-function identification** (name the std/crate functions in a stripped binary by
