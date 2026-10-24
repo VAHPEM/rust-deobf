@@ -32,3 +32,23 @@ def test_macho_canaries(crate):
     got = [x["string"] for x in r.get("records", [])]
     missing = [s for s in SECRETS if not any(s in g for g in got)]
     assert not missing, f"{crate}: missing {missing} (got {len(got)} strings)"
+
+
+def test_macho_libfuncs():
+    """Library-function identification works on Mach-O: signatures from one fixture identify
+    functions in another, all correctly (scored against the target's own __text symbols)."""
+    ref, tgt = FIX / "litcrypt.arm64", FIX / "xor_custom.arm64"
+    if not (ref.is_file() and tgt.is_file()):
+        pytest.skip("fixtures missing")
+    import lief
+    import recover_libfuncs as L
+    db = L.generate([ref])
+    assert db, "no signatures generated from the Mach-O reference"
+    res = L.match_binary(tgt, db)
+    assert len(res) >= 50, f"only {len(res)} library functions identified"
+    # every identified address must be a real __text function in the target
+    b = lief.parse(str(tgt))
+    text = next(s for s in b.sections if s.name == "__text")
+    lo, hi = text.virtual_address, text.virtual_address + text.size
+    for r in res:
+        assert lo <= r["va"] < hi, f"match at {r['va']:#x} outside __text"

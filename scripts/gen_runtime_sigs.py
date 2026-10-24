@@ -40,9 +40,17 @@ _ARM_PCREL = {"adrp", "adr", "b", "bl", "cbz", "cbnz", "tbz", "tbnz"}
 
 
 def _arch(binary):
-    m = (binary.header.machine_type.name if hasattr(binary.header, "machine_type")
-         else str(binary.header.machine)).upper()
-    return "aarch64" if "AARCH64" in m or "ARM64" in m else "x86_64"
+    m = ""
+    for attr in ("machine_type", "cpu_type", "machine"):   # ELF/PE: machine_type; Mach-O: cpu_type
+        if hasattr(binary.header, attr):
+            v = getattr(binary.header, attr)
+            m = (v.name if hasattr(v, "name") else str(v)).upper()
+            break
+    if "AARCH64" in m or "ARM64" in m:
+        return "aarch64"
+    if "I386" in m or "80386" in m or ("X86" in m and "64" not in m):
+        return "x86"
+    return "x86_64"
 
 
 def mask(code: bytes, va: int, arch: str) -> str:
@@ -60,7 +68,8 @@ def mask(code: bytes, va: int, arch: str) -> str:
                                                           and "[" not in ins[3]):
                 out[off:off + 4] = [".."] * 4
         return "".join(out)
-    md = Cs(CS_ARCH_X86, CS_MODE_64)
+    from capstone import CS_MODE_32
+    md = Cs(CS_ARCH_X86, CS_MODE_32 if arch == "x86" else CS_MODE_64)
     md.detail = True
     for ins in md.disasm(code, va):
         o = ins.address - va
@@ -87,7 +96,16 @@ def matches(pattern: str, data: bytes) -> bool:
 def function_starts(binary):
     import recover_emulate as E
     starts = set(E._eh_frame_starts(binary))
-    starts.update(s.value for s in binary.symbols if s.value and getattr(s, "is_function", False))
+    macho = binary.format.name == "MACHO"
+    if macho:
+        # Mach-O reports is_function=False for all symbols; a symbol whose value lands in __text
+        # is a function. Also seed from direct call targets via the emulator's Image.
+        text = next((x for x in binary.sections if x.name == "__text"), None)
+        if text is not None:
+            lo, hi = text.virtual_address, text.virtual_address + text.size
+            starts.update(s.value for s in binary.symbols if lo <= s.value < hi)
+    else:
+        starts.update(s.value for s in binary.symbols if s.value and getattr(s, "is_function", False))
     return starts
 
 

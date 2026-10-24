@@ -341,8 +341,9 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   arch.) The benchmark's obfuscation crates model one real pattern, not all of them;
   `gallery/manifest.json` lists 67 families by hash.
 - **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
-  signature; the bundled DB is for one toolchain (rustc 1.97 x86-64) and must be regenerated
-  (`--gen`) for another rustc or architecture, and generic-heavy labels flatten their type args.
+  signature on ELF, PE and Mach-O (x86-64, AArch64, 32-bit x86); the bundled DB is for one
+  toolchain (rustc 1.97 x86-64) and must be regenerated (`--gen`) for another rustc, architecture
+  or format, and generic-heavy labels flatten their type args.
 
 Full matrix: `RESULTS.md` · reproducible metrics: `METRICS.md` · real-binary validation and the
 generalisation work: `VALIDATION.md` (§10) · artifact tiers: `ARTIFACT_TIERS.md`.

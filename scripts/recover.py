@@ -204,7 +204,7 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
                                   "strings": len(result["literals"]), "unexplained": len(lit["missed"]),
                                   "seconds": round(time.monotonic() - t0, 1)})
 
-    if libfuncs and static_ok:
+    if libfuncs and emu_ok:
         import recover_libfuncs as LF
         t0 = time.monotonic()
         db = LF.load_db()

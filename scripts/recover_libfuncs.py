@@ -158,14 +158,25 @@ def _toolchain(path: Path) -> str:
     return "unknown"
 
 
+
+def _macho_sym(name: str) -> str:
+    """Mach-O prefixes symbols with '_': '__RNv...' / '__ZN...' -> strip one so the demanglers
+    (which expect '_R' / '_ZN') see the real name."""
+    if name.startswith("__R") or name.startswith("__Z"):
+        return name[1:]
+    return name
+
+
 def _own_crate(binary) -> str | None:
     """The program's own crate = the C-root that appears as the final instantiating crate of
     most symbols (heuristic: the most common last path root among functions)."""
     from collections import Counter
+    macho = binary.format.name == "MACHO"
     c = Counter()
     for s in binary.symbols:
-        if getattr(s, "is_function", False) and s.name.startswith("_R"):
-            p = _v0_path(s.name)
+        nm = _macho_sym(s.name) if macho else s.name
+        if (macho or getattr(s, "is_function", False)) and nm.startswith("_R"):
+            p = _v0_path(nm)
             if p:
                 c[p.split("::", 1)[0]] += 1
     for root, _n in c.most_common():
@@ -182,8 +193,9 @@ def generate(paths):
     for p in paths:
         b = lief.parse(str(p))
         arch = G._arch(b)
+        macho = b.format.name == "MACHO"
         tool = _toolchain(Path(p))
-        text = next((s for s in b.sections if s.name == ".text"), None)
+        text = next((s for s in b.sections if s.name == ("__text" if macho else ".text")), None)
         if text is None:
             continue
         code, base = bytes(text.content), text.virtual_address
@@ -198,11 +210,12 @@ def generate(paths):
         per_group.setdefault((tool, arch), 0)
         per_group[(tool, arch)] += 1
         for sym in b.symbols:
-            if not getattr(sym, "is_function", False) or not sym.value:
+            if not sym.value or not (base <= sym.value < base + len(code)):
                 continue
-            if not (base <= sym.value < base + len(code)):
+            if not macho and not getattr(sym, "is_function", False):
                 continue
-            if not _is_library_symbol(sym.name, own, crates):
+            nm = _macho_sym(sym.name) if macho else sym.name
+            if not _is_library_symbol(nm, own, crates):
                 continue
             size = sym.size or SIG_LEN
             if size < MIN_SIZE:
@@ -217,7 +230,7 @@ def generate(paths):
                     and G.matches(pat, code[a - base:a - base + n])]
             if hits != [sym.value]:
                 continue
-            name = readable(sym.name)
+            name = readable(nm)
             key = (tool, arch, name, pat)
             rec = seen.setdefault(key, {"files": set(), "sym": sym.name})
             rec["files"].add(str(p))
@@ -248,7 +261,7 @@ def match_binary(path: Path, db=None):
         db = load_db()
     b = lief.parse(str(path))
     arch = G._arch(b)
-    text = next((s for s in b.sections if s.name == ".text"), None)
+    text = next((s for s in b.sections if s.name == ("__text" if b.format.name == "MACHO" else ".text")), None)
     if text is None:
         return []
     code, base = bytes(text.content), text.virtual_address
