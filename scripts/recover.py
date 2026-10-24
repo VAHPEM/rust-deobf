@@ -43,20 +43,48 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lief
 
 
+def _macho_slice(b):
+    """A universal (fat) Mach-O parses to several slices; pick one (prefer x86-64, else the
+    first). lief may already return a single Binary for a fat file, in which case pass through."""
+    if hasattr(b, "sections") or not hasattr(b, "__iter__"):
+        return b
+    try:
+        slices = list(b)
+    except TypeError:
+        return b
+    if not slices:
+        return b
+    for s in slices:
+        if "X86_64" in str(getattr(s.header, "cpu_type", "")).upper():
+            return s
+    return slices[0]
+
+
 def detect(path):
     b = lief.parse(str(path))
     if b is None:
         return None, None, 0
     fmt = b.format.name if hasattr(b, "format") else "?"
+    if fmt == "MACHO" or b.__class__.__name__ in ("FatBinary", "Binary") and not hasattr(b, "optional_header") and not hasattr(b, "sections"):
+        b = _macho_slice(b)
+        fmt = b.format.name if hasattr(b, "format") else fmt
     arch = "?"
     try:
         hdr = b.header
-        m = (hdr.machine_type.name if hasattr(hdr, "machine_type") else str(hdr.machine)).upper()
-        if "AARCH64" in m or "ARM64" in m:
+        # ELF/PE expose machine_type/machine; Mach-O exposes cpu_type
+        cand = ""
+        for attr in ("machine_type", "cpu_type", "machine"):
+            if hasattr(hdr, attr):
+                v = getattr(hdr, attr)
+                cand = (v.name if hasattr(v, "name") else str(v)).upper()
+                break
+        if "AARCH64" in cand or "ARM64" in cand:
             arch = "aarch64"
-        elif "X86_64" in m or "AMD64" in m or "86_64" in m:
+        elif "X86_64" in cand or "AMD64" in cand or "86_64" in cand:
             arch = "x86_64"
-        elif "ARM" in m:
+        elif "I386" in cand or "80386" in cand or ("X86" in cand and "64" not in cand) or "INTEL" in cand:
+            arch = "x86"                     # 32-bit x86
+        elif "ARM" in cand:
             arch = "arm"
     except Exception:
         pass
@@ -97,37 +125,46 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
     result = {"file": str(path), "format": fmt, "arch": arch, "imagebase": imagebase,
               "decoded": [], "stack": [], "literals": [], "literals_missed": [],
               "libfuncs": [], "engines": [], "notes": []}
-    if arch not in ("x86_64", "aarch64"):
-        result["notes"].append(f"no static or emulation engine for arch={arch}; use recover_dynamic.py")
-        return result
+    # The static call-site and emulation engines are ELF/PE loaders for x86-64 and AArch64.
+    # 32-bit x86 and Mach-O are not emulated yet; still run the arch-agnostic literal recovery,
+    # and point at recover_rust_meta.py (crates/panics, works on both) and dynamic recovery.
+    emu_ok = fmt in ("ELF", "PE") and arch in ("x86_64", "aarch64")
+    static_records = []
+    if not emu_ok:
+        result["notes"].append(
+            f"static call-site + emulation support ELF/PE on x86-64/aarch64 only (this is "
+            f"{fmt}/{arch}): skipped. Literal recovery still runs; for strings also try "
+            f"recover_rust_meta.py (crates, panic sites — works here) and, in a VM, "
+            f"recover_dynamic.py.")
 
-    t0 = time.monotonic()
-    if arch == "x86_64":
-        import recover_callsite as R
-        engine = "static x86-64 (recover_callsite)"
-    else:
-        import recover_arm64 as R
-        engine = "static aarch64 (recover_arm64)"
-    r = R.recover(path, [])
-    static_records = [x for x in r.get("records", []) if len(x["string"]) >= min_len]
-    result["decoded"].extend(static_records)
-    result["engines"].append({"engine": engine, "decoders": r.get("decoders", 0),
-                              "strings": len(static_records), "seconds": round(time.monotonic() - t0, 1)})
+    if emu_ok:
+        t0 = time.monotonic()
+        if arch == "x86_64":
+            import recover_callsite as R
+            engine = "static x86-64 (recover_callsite)"
+        else:
+            import recover_arm64 as R
+            engine = "static aarch64 (recover_arm64)"
+        r = R.recover(path, [])
+        static_records = [x for x in r.get("records", []) if len(x["string"]) >= min_len]
+        result["decoded"].extend(static_records)
+        result["engines"].append({"engine": engine, "decoders": r.get("decoders", 0),
+                                  "strings": len(static_records), "seconds": round(time.monotonic() - t0, 1)})
 
-    import recover_cryptify as C
-    t0 = time.monotonic()
-    c = C.recover(path)
-    if c["cryptify"]:
-        known = {x["string"] for x in result["decoded"]}
-        crypt = [x for x in c["records"] if len(x["string"]) >= min_len and x["string"] not in known]
-        result["decoded"].extend(crypt)
-        static_records += crypt
-        result["engines"].append({"engine": "cryptify (recover_cryptify)", "strings": len(crypt),
-                                  "seconds": round(time.monotonic() - t0, 1)})
-        if c["note"]:
-            result["notes"].append(c["note"])
+        import recover_cryptify as C
+        t0 = time.monotonic()
+        c = C.recover(path)
+        if c["cryptify"]:
+            known = {x["string"] for x in result["decoded"]}
+            crypt = [x for x in c["records"] if len(x["string"]) >= min_len and x["string"] not in known]
+            result["decoded"].extend(crypt)
+            static_records += crypt
+            result["engines"].append({"engine": "cryptify (recover_cryptify)", "strings": len(crypt),
+                                      "seconds": round(time.monotonic() - t0, 1)})
+            if c["note"]:
+                result["notes"].append(c["note"])
 
-    if emulate == "always" or (emulate == "auto" and not static_records):
+    if emu_ok and (emulate == "always" or (emulate == "auto" and not static_records)):
         import recover_emulate as E
         t0 = time.monotonic()
         e = E.recover(path, [], max_funcs=max_funcs, time_budget=time_budget, max_ram_mb=max_ram_mb)
@@ -144,7 +181,7 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
         if e.get("ram_note"):
             result["notes"].append(e["ram_note"])
 
-    if stackstrings:
+    if stackstrings and emu_ok:
         import recover_stackstrings as S
         t0 = time.monotonic()
         s = S.recover(path, min_len=min_len)
@@ -162,7 +199,7 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
                                   "strings": len(result["literals"]), "unexplained": len(lit["missed"]),
                                   "seconds": round(time.monotonic() - t0, 1)})
 
-    if libfuncs:
+    if libfuncs and emu_ok:
         import recover_libfuncs as LF
         t0 = time.monotonic()
         db = LF.load_db()

@@ -332,10 +332,13 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   recovered **32 obfuscated strings** including the hidden **C2 domain and URL path** (published
   IOCs) and the API names the sample hides — end-to-end deobfuscation of real obfuscated Rust
   malware. Honest caveats from the same run: **KrustyLoader** encrypts its config at run time
-  (cfb-mode), so static string deobf correctly finds nothing (metadata is the win there); and two
-  **format gaps** surfaced — **32-bit x86 PE** (FickleStealer) and **Mach-O** (RustDoor) are not
-  handled (the engine is x86-64/AArch64 ELF/PE only). The benchmark's obfuscation crates model
-  one real pattern, not all of them; `gallery/manifest.json` lists 67 families by hash.
+  (cfb-mode), so static string deobf correctly finds nothing (metadata is the win there). Two
+  **format gaps** surfaced — **32-bit x86** (FickleStealer) and **Mach-O** (RustDoor): these are
+  now detected and routed through the arch-agnostic tiers (`recover_rust_meta.py` crates/panics,
+  literal recovery), but the **string-decoding emulation engine is still ELF/PE on x86-64/AArch64
+  only**, so it does not decode obfuscated strings on those two yet — full emulation support is
+  the next step. (FickleStealer is also packed.) The benchmark's obfuscation crates model one
+  real pattern, not all of them; `gallery/manifest.json` lists 67 families by hash.
 - **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
   signature; the bundled DB is for one toolchain (rustc 1.97 x86-64) and must be regenerated
   (`--gen`) for another rustc or architecture, and generic-heavy labels flatten their type args.
