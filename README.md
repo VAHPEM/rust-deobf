@@ -1,16 +1,23 @@
 # rust-deobf
 
-**Recover obfuscated strings from Rust binaries** — static, emulation and dynamic recovery, on
-**x86-64 and ARM64**, ELF and PE, with a reproducible benchmark against Mandiant FLOSS.
+**Deobfuscation and triage for Rust malware.** Recovers obfuscated **strings**, **indicators
+(IOCs)**, **crate / capability fingerprints**, **library functions** and **flattened control
+flow** — by static analysis, Unicorn **emulation** and Frida **dynamic** recovery — across
+**ELF, PE and Mach-O** on **x86-64, ARM64 and 32-bit x86**. Ships a reproducible benchmark against
+Mandiant FLOSS, a one-screen **SOC triage** card, and a FLOSS-compatible export.
 
-Rust malware is rising and the string-deobfuscation tooling for it is effectively absent.
-`strings` only ever sees plaintext, and FLOSS — the standard open-source string deobfuscator —
-recovers nothing from the common Rust obfuscation crates. This project closes that gap and
-publishes the benchmark that measures it, including the cases where it does *not* work.
+Rust malware is rising and the deobfuscation tooling for it is effectively absent. `strings` only
+ever sees plaintext, and FLOSS — the standard open-source string deobfuscator — recovers nothing
+from the common Rust obfuscation crates (`litcrypt`, `obfstr`, `cryptify`, `muddy`, `goldberg`).
+This project closes that gap, publishes the benchmark that measures it (including the cases where
+it does *not* work), and validates end-to-end on **nine real Rust-malware families** — EDDIESTEALER,
+AmnesiaStealer, SPICA, RustDoor and more — recovering their C2, config and capability indicators.
 
-> Defensive reverse-engineering research for malware triage. All test inputs are **benign**
-> programs built from author-written sources (`bench_src/`) — no payloads, no real malware, no
-> live indicators.
+> Defensive reverse-engineering for malware triage. The benchmark and test inputs are **benign**
+> programs built from author-written sources (`bench_src/`) — no payloads, no live indicators.
+> Real-malware validation (`gallery/`) is **static + emulation only**: samples are **never executed**
+> and **never committed** — only their hashes and the results. Run dynamic analysis solely inside an
+> isolated VM, against samples you are authorised to analyse.
 
 ---
 
