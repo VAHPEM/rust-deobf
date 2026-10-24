@@ -6,9 +6,16 @@
 # strings are the triage headline; surfacing them in the decompiler is where an analyst reads
 # them. Observational: it changes only comments, bookmarks and default names.
 #
-# Run headless, e.g. on the Kali VM:
+# Run headless. This is a PyGhidra (Python 3) script: since Ghidra 11.3 dropped Jython,
+# plain `analyzeHeadless ... -postScript *.py` fails with "Ghidra was not started with
+# PyGhidra. Python is not available". Launch it through PyGhidra instead (pip install the
+# wheel bundled at Ghidra/Features/PyGhidra/pypkg/dist/ first):
 #   recover.py sample --json > sample.rd.json
-#   analyzeHeadless <proj_dir> <proj> -import sample -postScript ghidra_annotate.py sample.rd.json
+#   GHIDRA_INSTALL_DIR=/path/to/ghidra \
+#     python3 -m pyghidra.ghidra_launch ghidra.app.util.headless.AnalyzeHeadless \
+#       <proj_dir> <proj> -import sample \
+#       -postScript ghidra_annotate.py sample.rd.json
+# Easiest: scripts/ghidra_run.sh sample [sample.rd.json]  (does recover + import + annotate).
 #
 # @category Rust
 # @runtime PyGhidra
