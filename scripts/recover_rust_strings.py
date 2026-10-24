@@ -80,12 +80,19 @@ class _Ranges:
 
 
 def _string_sections(binary):
-    pe = binary.format.name == "PE"
+    fmt = binary.format.name
+    pe, macho = fmt == "PE", fmt == "MACHO"
     base = binary.optional_header.imagebase if pe else 0
     out = []
     for s in binary.sections:
         name = s.name
-        if (pe and name == ".rdata") or (not pe and (name == ".rodata" or name.startswith(".rodata."))):
+        if pe:
+            ok = name == ".rdata"
+        elif macho:
+            ok = name in ("__cstring", "__const")          # packed &str data + C strings
+        else:
+            ok = name == ".rodata" or name.startswith(".rodata.")
+        if ok:
             out.append((base + s.virtual_address, bytes(s.content)))
     return out, base
 
@@ -115,12 +122,16 @@ def _clean(raw: bytes):
 
 def data_pairs(binary, strs: _Ranges, base: int):
     """(pointer, length) &str fields in the image's constant data."""
-    pe = binary.format.name == "PE"
-    relocs = {} if pe else _relative_relocs(binary)
+    fmt = binary.format.name
+    pe, macho = fmt == "PE", fmt == "MACHO"
+    relocs = {} if (pe or macho) else _relative_relocs(binary)   # Mach-O: in-place ptr (slide 0)
     for s in binary.sections:
         name = s.name
         if pe:
             if name not in (".rdata", ".data"):
+                continue
+        elif macho:
+            if name not in ("__const", "__data"):
                 continue
         elif not (name.startswith(".data.rel.ro") or name in (".data", ".rodata") or name.startswith(".rodata.")):
             continue
@@ -411,15 +422,25 @@ def _arm64_pairs(insns, strs: _Ranges):
 
 
 def code_pairs(binary, strs: _Ranges, base: int):
-    from capstone import Cs, CS_ARCH_ARM64, CS_ARCH_X86, CS_MODE_64, CS_MODE_LITTLE_ENDIAN
-    mach = (binary.header.machine_type.name if hasattr(binary.header, "machine_type")
-            else str(binary.header.machine)).upper()
+    from capstone import (Cs, CS_ARCH_ARM64, CS_ARCH_X86, CS_MODE_64, CS_MODE_32,
+                          CS_MODE_LITTLE_ENDIAN)
+    mach = ""
+    for attr in ("machine_type", "cpu_type", "machine"):   # ELF/PE: machine_type; Mach-O: cpu_type
+        if hasattr(binary.header, attr):
+            v = getattr(binary.header, attr)
+            mach = (v.name if hasattr(v, "name") else str(v)).upper()
+            break
     arm = "AARCH64" in mach or "ARM64" in mach
-    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN) if arm else Cs(CS_ARCH_X86, CS_MODE_64)
+    x32 = (not arm) and ("I386" in mach or "80386" in mach or ("X86" in mach and "64" not in mach))
+    if arm:
+        md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    else:
+        md = Cs(CS_ARCH_X86, CS_MODE_32 if x32 else CS_MODE_64)
     md.detail = True
     img = _Image(binary, base)
+    text_name = "__text" if binary.format.name == "MACHO" else ".text"
     for s in binary.sections:
-        if s.name != ".text":
+        if s.name != text_name:
             continue
         insns = Insns(md, bytes(s.content), base + s.virtual_address)
         if arm:
