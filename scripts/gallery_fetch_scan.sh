@@ -107,6 +107,18 @@ dest="$SAMPLES/$H.d"; mkdir -p "$dest"
 # NO space (-pinfected, not -p infected -- the latter means empty password + a file named infected).
 7z x -pinfected -y -o"$dest" "$zip" >/dev/null || die "extract failed (need p7zip-full? 'sudo apt install p7zip-full')"
 
+# MalwareBazaar often double-packs: a .gz/.xz/.bz2 (or .tar) INSIDE the zip hides the real binary.
+# Decompress those so the binary surfaces. Decompression only -- the sample is still never executed.
+while IFS= read -r -d '' a; do
+    case "$a" in
+        *.gz)  gunzip  -kf "$a" 2>/dev/null || true ;;
+        *.xz)  unxz    -kf "$a" 2>/dev/null || true ;;
+        *.bz2) bunzip2 -kf "$a" 2>/dev/null || true ;;
+    esac
+done < <(find "$dest" -type f \( -name '*.gz' -o -name '*.xz' -o -name '*.bz2' \) -print0)
+while IFS= read -r -d '' t; do tar -xf "$t" -C "$dest" 2>/dev/null || true; done \
+    < <(find "$dest" -type f -name '*.tar' -print0)
+
 # triage every extracted file that is actually a binary (usually one); NEVER run them
 found=0
 while IFS= read -r -d '' b; do
