@@ -873,3 +873,30 @@ the x86-64 and AArch64 paths are unchanged (benchmark + self-tests still pass). 
 call-site recoverers, cryptify, stack-strings and libfuncs remain x86-64/AArch64 only, so on a
 32-bit binary strings come from emulation + literal recovery. PE32 (32-bit Windows) uses the same
 engine; it is exercised on real samples rather than the ELF canary suite.
+
+## 15. Mach-O emulation (Oct 2026)
+
+With 32-bit x86 done (§14), the remaining format gap from §12 was Mach-O (the macOS format; real
+Rust macOS malware such as RustDoor and RustBucket ships as Mach-O). The canary crates were built
+on an Apple-Silicon Mac for `aarch64-apple-darwin` and staged into the workspace; the engine now
+loads Mach-O. What it took:
+
+- **parsing**: the text section is `__text` (not `.text`); the architecture is on the header's
+  `cpu_type` (ARM64 / X86_64), not `machine_type`, so a Mach-O was being mis-read as x86 until
+  that was added; executable sections are flagged `S_ATTR_PURE_INSTRUCTIONS`/`SOME_INSTRUCTIONS`
+  (plus `__stubs`/`__stub_helper`).
+- **relocations**: Mach-O internal pointers (REBASE) are correct as long as the image is mapped at
+  its native vmaddr (slide 0), which it is, so only **bindings** need fixing — each `__got` /
+  `__la_symbol_ptr` / `__tlv` slot that holds an undefined symbol is pointed at a named trampoline.
+- **function discovery**: Mach-O reports `is_function = False` for every symbol and has no
+  `.eh_frame_hdr`, so only call targets were found and `main` (reached from the entry stub) was
+  missed — the pipeline then never ran it. A symbol whose value lands in `__text` is now taken as
+  a function, which restored `main` and the rest.
+
+**Result:** every canary crate built for `aarch64-apple-darwin` returns **5/5** with no junk —
+`xor_custom`, `litcrypt`, `obfstr`, `litcrypt2`, `add_custom`, `cryptify`. Three are committed as
+fixtures (`tests/fixtures/macho/`) and asserted by `tests/test_macho.py` (Mach-O cannot be built
+on a Linux CI runner). The ELF/PE x86-64, AArch64 and 32-bit x86 paths are unchanged. The static
+call-site recoverers remain ELF/PE x86-64/AArch64, so on Mach-O strings come from emulation (+
+literal recovery). The arm64 std path emulated cleanly here — unlike the statically-linked musl
+std in §14 — so no further sync/TLS work was needed beyond the loader.

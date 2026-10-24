@@ -125,22 +125,22 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
     result = {"file": str(path), "format": fmt, "arch": arch, "imagebase": imagebase,
               "decoded": [], "stack": [], "literals": [], "literals_missed": [],
               "libfuncs": [], "engines": [], "notes": []}
-    # The emulation engine is an ELF/PE loader for x86-64, AArch64 and 32-bit x86. The static
-    # call-site recoverers, cryptify, stack-strings and libfuncs are x86-64/AArch64 only; for
-    # 32-bit x86 only emulation + literals run. Mach-O is detected but not emulated yet.
-    emu_ok = fmt in ("ELF", "PE") and arch in ("x86_64", "aarch64", "x86")
+    # The emulation engine loads ELF, PE and Mach-O on x86-64, AArch64 and 32-bit x86. The static
+    # call-site recoverers, cryptify, stack-strings and libfuncs are ELF/PE x86-64/AArch64 only;
+    # elsewhere (32-bit x86, Mach-O) only emulation + literals run.
+    emu_ok = fmt in ("ELF", "PE", "MACHO") and arch in ("x86_64", "aarch64", "x86")
     static_ok = fmt in ("ELF", "PE") and arch in ("x86_64", "aarch64")
     static_records = []
     if not emu_ok:
         result["notes"].append(
-            f"the emulation/static engines support ELF/PE on x86-64/aarch64/x86 (this is "
+            f"the emulation engine supports ELF/PE/Mach-O on x86-64/aarch64/x86 (this is "
             f"{fmt}/{arch}): skipped. Literal recovery still runs; for strings also try "
             f"recover_rust_meta.py (crates, panic sites — works here) and, in a VM, "
             f"recover_dynamic.py.")
-    elif arch == "x86":
+    elif not static_ok:
         result["notes"].append(
-            "32-bit x86: static call-site recovery is x86-64/aarch64 only; strings come from "
-            "emulation and literal recovery here.")
+            f"{fmt}/{arch}: static call-site recovery is ELF/PE x86-64/aarch64 only; strings come "
+            "from emulation and literal recovery here.")
 
     if static_ok:
         t0 = time.monotonic()

@@ -212,9 +212,9 @@ listed source and analysed in an isolated VM, never stored here.
   ABI-aware dataflow, decodes. Fast (seconds), exact attribution (decoder, call site,
   ciphertext). Only as good as its idiom recognisers: it recognises the benchmark's release
   idioms, not every build profile — that is what emulation is for.
-- **Emulation** (`recover_emulate.py`, Unicorn) — the general engine, x86-64 and AArch64, ELF and
-  PE. It runs functions of the binary (never the binary itself) and collects the plaintext the
-  code builds. What makes that work on real Rust code:
+- **Emulation** (`recover_emulate.py`, Unicorn) — the general engine, x86-64, AArch64 and 32-bit
+  x86, across ELF, PE and Mach-O. It runs functions of the binary (never the binary itself) and
+  collects the plaintext the code builds. What makes that work on real Rust code:
   - *real calls*: callees run up to 8 levels deep, so a call site runs its out-of-line decoder
     (`lc!` → `decrypt_bytes` → `Iterator::next`); each callee has an instruction budget and a
     callee that overruns it (a spinning lock, a loop over a fake length) or faults is abandoned
@@ -333,12 +333,13 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   IOCs) and the API names the sample hides — end-to-end deobfuscation of real obfuscated Rust
   malware. Honest caveats from the same run: **KrustyLoader** encrypts its config at run time
   (cfb-mode), so static string deobf correctly finds nothing (metadata is the win there). Two
-  format gaps surfaced. **32-bit x86 is now fully emulated** (ELF/PE i386): the engine decodes
-  obfuscated strings on 32-bit binaries, verified at **5/5 on all six canary crates** built for
-  `i686-unknown-linux-gnu` (VALIDATION.md §14, `tests/test_32bit.py`). **Mach-O** is detected and
-  routed through metadata/literals but not yet emulated. (FickleStealer is also packed, so it
-  needs unpacking regardless of arch.) The benchmark's obfuscation crates model one real pattern,
-  not all of them; `gallery/manifest.json` lists 67 families by hash.
+  format gaps surfaced and are now closed. **32-bit x86** (ELF/PE i386) and **Mach-O** (the macOS
+  format, x86-64 and arm64) are both fully emulated: the engine decodes obfuscated strings on
+  them, verified at **5/5 on all six canary crates** for `i686-unknown-linux-gnu` (VALIDATION.md
+  §14, `tests/test_32bit.py`) and **5/5 on all six built for `aarch64-apple-darwin`** (§15,
+  `tests/test_macho.py`). (FickleStealer is also packed, so it needs unpacking regardless of
+  arch.) The benchmark's obfuscation crates model one real pattern, not all of them;
+  `gallery/manifest.json` lists 67 families by hash.
 - **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
   signature; the bundled DB is for one toolchain (rustc 1.97 x86-64) and must be regenerated
   (`--gen`) for another rustc or architecture, and generic-heavy labels flatten their type args.

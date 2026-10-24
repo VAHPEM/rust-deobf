@@ -119,7 +119,9 @@ class Image:
         self.binary = b = lief.parse(str(path))
         if b is None:
             raise ValueError("unparseable")
-        self.text = next((s for s in b.sections if s.name == ".text"), None)
+        self.macho = b.format.name == "MACHO"
+        text_name = "__text" if self.macho else ".text"
+        self.text = next((s for s in b.sections if s.name == text_name), None)
         if self.text is None:
             raise ValueError("no .text")
         self.code = bytes(self.text.content)
@@ -135,15 +137,13 @@ class Image:
         else:
             self.md = Cs(CS_ARCH_X86, CS_MODE_32 if self.x32 else CS_MODE_64)
         self.file_bytes = _static_bytes(path)
+        _nontext = {"__text", "__bss", "__thread_bss", "__common"} if self.macho \
+            else {".text", ".bss", ".tbss"}
         self.data = []      # (va, bytes) of non-executable sections, for the ciphertext feature
         for s in b.sections:
-            if not s.virtual_address or not s.size or s.name in (".text", ".bss", ".tbss"):
+            if not s.virtual_address or not s.size or s.name in _nontext:
                 continue
-            if self.pe:
-                exe = bool(int(s.characteristics) & 0x20000000)
-            else:
-                exe = bool(int(s.flags) & 0x4)
-            if not exe:
+            if not self._exec_sec(s):
                 self.data.append((s.virtual_address, _content(s)))
         self.data.sort()
         vas = [s.virtual_address for s in b.sections if s.virtual_address]
@@ -154,8 +154,7 @@ class Image:
         for sec in b.sections:
             if not sec.virtual_address or not sec.size:
                 continue
-            ex = (int(sec.characteristics) & 0x20000000) if self.pe else (int(sec.flags) & 0x4)
-            if ex:
+            if self._exec_sec(sec):
                 self.exec_ranges.append((sec.virtual_address, sec.virtual_address + sec.size))
         self.named = {}     # va -> name of a C-runtime function linked into .text (static builds)
         try:
@@ -199,6 +198,29 @@ class Image:
         self.tramp.append(name or "?")
         return TRAMP + 16 * (len(self.tramp) - 1)
 
+    def _exec_sec(self, s):
+        """Is section `s` executable?"""
+        if self.pe:
+            return bool(int(s.characteristics) & 0x20000000)
+        if self.macho:
+            # S_ATTR_PURE_INSTRUCTIONS (0x80000000) / S_ATTR_SOME_INSTRUCTIONS (0x400), plus stubs
+            return bool(int(s.flags) & 0x80000400) or s.name in ("__text", "__stubs", "__stub_helper")
+        return bool(int(s.flags) & 0x4)                             # ELF SHF_EXECINSTR
+
+    def _relocate_macho(self):
+        """Mach-O: internal pointers (REBASE) are already correct because the image is mapped at
+        its native vmaddr (slide 0), so only imports need fixing. Each binding (a __got /
+        __la_symbol_ptr / __tlv slot holding an undefined symbol) is pointed at a named trampoline
+        so a call through it lands where the emulator knows the import's name."""
+        b = self.binary
+        try:
+            for bind in b.bindings:
+                sym = bind.symbol.name if bind.symbol else None
+                if sym and bind.address:
+                    self.patches[bind.address] = self._import(sym)
+        except Exception:
+            pass
+
     def _relocate(self):
         """Apply the relocations the loader would, and point every import at a named trampoline.
 
@@ -209,6 +231,9 @@ class Image:
         import all land on one place where the emulator knows the import's name.
         """
         b = self.binary
+        if self.macho:
+            self._relocate_macho()
+            return
         try:
             if self.pe:
                 ib = b.optional_header.imagebase
@@ -271,6 +296,11 @@ class Image:
                     if not 0 < idx <= len(secs) or not getattr(sym, "is_function", False):
                         continue
                     out.append((secs[idx - 1].virtual_address + sym.value, sym.name))
+                elif self.macho:
+                    # Mach-O reports is_function=False for everything; a symbol whose value lands
+                    # in __text is a function (data symbols sit in __const/__data, outside it).
+                    if self.text_va <= sym.value < self.text_end:
+                        out.append((sym.value, sym.name))
                 elif getattr(sym, "is_function", False):
                     out.append((sym.value, sym.name))
         except Exception:
@@ -504,10 +534,13 @@ def _eh_frame_starts(binary):
 
 def _machine(binary):
     try:
-        return (binary.header.machine_type.name if hasattr(binary.header, "machine_type")
-                else str(binary.header.machine)).upper()
+        for attr in ("machine_type", "cpu_type", "machine"):   # ELF/PE: machine_type; Mach-O: cpu_type
+            if hasattr(binary.header, attr):
+                v = getattr(binary.header, attr)
+                return (v.name if hasattr(v, "name") else str(v)).upper()
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def _is_32bit(binary):
