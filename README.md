@@ -253,8 +253,9 @@ results document so the strings appear in `floss`/`floss --html` next to the sta
 Beyond strings, the same engines drive config/C2 extraction, hash-obfuscated API-import
 resolution, unpacked stage-2 carving, Rust crate+version & panic-site recovery,
 **library-function identification** (name the std/crate functions in a stripped binary by
-byte signature, so the decoders stand out), and MBA / opaque-predicate /
-control-flow-flattening analysis — see `ARTIFACT_TIERS.md`.
+byte signature, so the decoders stand out), and MBA / opaque-predicate analysis plus
+control-flow-flattening detection **and reconstruction** (recover a flattened function's
+state-transition graph) — see `ARTIFACT_TIERS.md`.
 
 Recovered strings and identified functions can be pushed straight into a decompiler:
 `scripts/ghidra_run.sh <binary>` runs the recovery and annotates a Ghidra project headless

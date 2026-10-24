@@ -23,6 +23,7 @@ ring networking) and **ToxicMiner.exe** (a C/C++ MSVC PE, used as a negative con
 | 3 | **`recover_libfuncs.py`** | static byte-signature match | identify Rust std/crate functions |
 | 4 | **`deobf_expr.py`** | z3 (new engine) | prove/simplify MBA + opaque predicates |
 | 4 | **`deobf_cff.py`** | static CFG heuristic | locate control-flow-flattening dispatchers |
+| 4 | **`deobf_deflatten.py`** | static state-machine recovery | rebuild a flattened function's CFG |
 
 ---
 
@@ -130,6 +131,26 @@ blocks that jump to it, not counted across all of `.text`), scored `min(in_degre
 - **Honesty:** a large compiler `match`/jump table has the same shape — output is flagged as
   *candidates to inspect*, not proof of obfuscation. On catthief.exe the top in-degree block
   (376) is correctly demoted (small local ladder → score 22); real match-heavy Rust code.
+
+### `deobf_deflatten.py` — rebuild a flattened function's control flow (static)
+Where `deobf_cff.py` *locates* a dispatcher, this *recovers the state machine*. goldberg's debug
+build of `band()` is a worked example: a `sub <state>, imm; je case` ladder over a stack state
+slot, and **XOR-based transitions** — each case sets a delta and the shared tail does
+`state ^= delta`. The tool finds the dispatcher, the state slot and update slot, walks the ladder
+to map `state const → case block`, then follows each case to recover its successor state(s),
+rebuilding the transition graph.
+- **Recovered on goldberg debug `band()`:** dispatcher `0x16a8a`, state `[rsp+0x40]`, update
+  `[rsp+0x44]`, **6 states** in the chain `0x181aa403 → 0xa9a94f2d → 0xc8100b67 → 0x0dbee841 →
+  0x768b02be → 0x9ecf39a7 (return)` — each edge is `state ^ delta`, verified closed and
+  terminating (`tests/test_deflatten.py`).
+- **Selftest:** XOR transition invariant, operand decode, and no false dispatcher on flat code.
+- **Scope / honesty (important):** source-macro flattening (`goldberg_stmts!`) survives only at
+  **opt-level=0** — in the release build rustc inlines `band` away entirely, so there is nothing
+  to deflatten. On real (optimised) malware the target is LLVM-pass / OLLVM flattening, which
+  survives `-O`; goldberg's debug output is the controlled worked example, not a claim about
+  optimised binaries. Nested/data-dependent branches inside a case (band's `if code < 10`) are
+  not fully expanded in this version — the outer state machine is; opaque predicates on real
+  branches can be classified with `deobf_expr.py`.
 
 ---
 
