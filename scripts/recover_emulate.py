@@ -2478,7 +2478,46 @@ def _workers():
     return n if n > 0 else max(1, min(4, os.cpu_count() or 1))
 
 
-def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers=None):
+# Each worker process holds its own loaded image and Unicorn instance; the peak resident set
+# grows with the size of .text. Measured points (whole pipeline, one process): git .text 3.1 MB
+# -> ~0.25 GB, gdb 5.7 MB -> ~0.48 GB, cargo 19.6 MB -> ~1.1 GB. A line through them is about
+# 250 MB of base plus 45 MB per MB of .text; used to size the worker pool to a RAM budget.
+_PROC_BASE_MB = 250
+_PROC_MB_PER_MB_TEXT = 45
+
+
+def _per_proc_mb(text_bytes):
+    return _PROC_BASE_MB + _PROC_MB_PER_MB_TEXT * (text_bytes / (1 << 20))
+
+
+def _max_ram_mb(explicit=None):
+    """The RAM budget in MB: the explicit argument, else RUST_DEOBF_MAX_RAM_MB, else none (0)."""
+    if explicit:
+        return explicit
+    raw = os.environ.get("RUST_DEOBF_MAX_RAM_MB", "").strip()
+    try:
+        return int(raw) if raw else 0
+    except ValueError:
+        return 0
+
+
+def _fit_workers(workers, text_bytes, max_ram_mb):
+    """Reduce the worker count so that workers x per-process RSS stays under the RAM budget.
+    Returns (workers, note). A budget below one process still runs, with one process, slower."""
+    if not max_ram_mb:
+        return workers, None
+    per = _per_proc_mb(text_bytes)
+    fit = max(1, int(max_ram_mb // per))
+    if fit >= workers:
+        return workers, None
+    note = (f"RAM budget {max_ram_mb} MB with ~{per:.0f} MB per process: "
+            f"{workers} -> {fit} worker process(es)"
+            + ("; one process alone may exceed the budget" if fit == 1 and per > max_ram_mb else ""))
+    return fit, note
+
+
+def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers=None,
+            max_ram_mb=None):
     """Emulate functions and collect the strings they materialise in memory.
 
     Returns, besides the canary bookkeeping used by the benchmark, ``recovered_texts`` and
@@ -2491,6 +2530,8 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
     forward branches flipped, to reach strings on paths the fake arguments do not take.
     workers: processes for a large binary (PARALLEL_MIN+ functions); default RUST_DEOBF_WORKERS
     or min(4, CPUs). Each takes every n-th function of the score order.
+    max_ram_mb: a RAM budget in MB (else RUST_DEOBF_MAX_RAM_MB). The worker count is reduced so
+    the processes fit it, trading speed for memory; a low budget runs serially on one process.
     """
     try:
         img = Image(path)
@@ -2503,6 +2544,11 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
     if max_funcs:
         order = order[:max_funcs]
     workers = workers or _workers()
+    text_bytes = len(img.code)
+    workers, ram_note = _fit_workers(workers, text_bytes, _max_ram_mb(max_ram_mb))
+    if workers > 1 and len(order) < PARALLEL_MIN:
+        workers = 1                        # small binary: one in-process pass, no children
+        ram_note = None
     if workers > 1 and len(order) >= PARALLEL_MIN:
         import concurrent.futures as cf
         import multiprocessing as mp
@@ -2530,7 +2576,8 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
     records = _drop_junk_factories(records, img.file_bytes)
     records = _drop_overlap_artifacts(records)
     return {"functions_tried": tried, "functions_total": len(funcs), "runs": runs,
-            "timed_out": timed_out, "recovered": sorted(found),
+            "timed_out": timed_out, "recovered": sorted(found), "workers": workers,
+            "ram_note": ram_note,
             "recall": len(found), "n": len(canaries), "arch": "aarch64" if img.arm else "x86-64",
             "recovered_texts": [r["string"] for r in records], "records": records}
 

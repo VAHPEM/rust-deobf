@@ -238,6 +238,7 @@ python3 scripts/recover.py path/to/binary --json
 python3 scripts/recover.py path/to/binary --floss-json out.json
 python3 scripts/recover.py path/to/binary --emulate never       # static passes only, seconds
 python3 scripts/recover.py path/to/binary --time-budget 600     # big binaries: emulate longer
+python3 scripts/recover.py path/to/binary --max-ram 2G          # cap memory (fewer processes)
 python3 scripts/recover.py samples/ --jsonl triage.jsonl        # a whole directory
 
 # runtime-only decoders, inside an isolated analysis VM ONLY (pip install frida frida-tools)
@@ -246,7 +247,12 @@ python3 scripts/recover_dynamic.py path/to/binary [-- arg1 arg2 ...]
 
 Emulation runs by default and is bounded by `--time-budget` (120 s): functions are tried in
 decoder-score order, and the output says how many were emulated (`functions=412/1671`) and
-whether the budget ran out.
+whether the budget ran out. Memory is the other knob: a large binary is split across worker
+processes (`RUST_DEOBF_WORKERS`, default `min(4, CPUs)`), each holding its own loaded image and
+Unicorn instance — roughly 250 MB plus 45 MB per MB of `.text`, so ≈0.5 GB for gdb and ≈1.1 GB
+for cargo. `--max-ram 2G` (or `RUST_DEOBF_MAX_RAM_MB`) caps the process count to fit that
+budget, trading speed for memory; a budget below one process's footprint runs serially, slower,
+and the output reports both the process count and the reduction.
 
 ---
 
@@ -262,7 +268,9 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   instructions/s per process). A first pass runs every function once with a small budget, a
   second explores decoder-like functions, and binaries with 2,000+ functions are split over
   processes (`RUST_DEOBF_WORKERS`), but within 120 s gdb (15,760 functions) is still covered only
-  in part (≈2,000 of its 15,760 functions on 2 CPUs). The output reports the coverage; give a larger `--time-budget` for more.
+  in part (≈2,000 of its 15,760 functions on 2 CPUs). The output reports the coverage; give a
+  larger `--time-budget`, or more CPUs, for more. `--max-ram` trades that speed back for memory
+  on a small machine.
 - **Static recovery is idiom-bound** by design; it covers the release idioms of the benchmark
   crates. Under `size-lto` most keyed decoders are recovered by emulation, not statically.
 - **musl runtime signatures** describe the musl that current rustc bundles; another version may

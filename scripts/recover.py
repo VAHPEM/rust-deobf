@@ -69,8 +69,29 @@ def detect(path):
     return fmt, arch, imagebase
 
 
+def _parse_size_mb(text: str) -> int:
+    """Parse a RAM size to whole MB: '' -> 0 (no limit), '2048' -> 2048, '4G'/'4g' -> 4096,
+    '512M' -> 512. Raises ValueError on anything else."""
+    text = text.strip()
+    if not text:
+        return 0
+    mult, num = 1, text
+    if text[-1] in "gG":
+        mult, num = 1024, text[:-1]
+    elif text[-1] in "mM":
+        mult, num = 1, text[:-1]
+    try:
+        val = float(num) * mult
+    except ValueError:
+        raise ValueError(f"--max-ram: cannot parse {text!r} (use e.g. 4G or 2048)")
+    if val < 1:
+        raise ValueError("--max-ram must be at least 1 MB")
+    return int(val)
+
+
 def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len: int = 6,
-        time_budget: float = 120.0, max_funcs: int = 0, literals: bool = True) -> dict:
+        time_budget: float = 120.0, max_funcs: int = 0, literals: bool = True,
+        max_ram_mb: int = 0) -> dict:
     """Run the applicable recoverers and return {"format", "arch", "decoded", "stack", ...}."""
     fmt, arch, imagebase = detect(path)
     result = {"file": str(path), "format": fmt, "arch": arch, "imagebase": imagebase,
@@ -109,16 +130,19 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
     if emulate == "always" or (emulate == "auto" and not static_records):
         import recover_emulate as E
         t0 = time.monotonic()
-        e = E.recover(path, [], max_funcs=max_funcs, time_budget=time_budget)
+        e = E.recover(path, [], max_funcs=max_funcs, time_budget=time_budget, max_ram_mb=max_ram_mb)
         known = {x["string"] for x in result["decoded"]}
         emu = [x for x in e.get("records", []) if len(x["string"]) >= min_len and x["string"] not in known]
         result["decoded"].extend(emu)
         result["engines"].append({"engine": "emulation (recover_emulate)", "strings": len(emu),
                                   "functions": f'{e.get("functions_tried", 0)}/{e.get("functions_total", 0)}',
                                   "timed_out": e.get("timed_out", False),
+                                  "workers": e.get("workers", 1),
                                   "seconds": round(time.monotonic() - t0, 1)})
         if e.get("timed_out"):
             result["notes"].append("emulation stopped at --time-budget; raise it to try more functions")
+        if e.get("ram_note"):
+            result["notes"].append(e["ram_note"])
 
     if stackstrings:
         import recover_stackstrings as S
@@ -257,22 +281,30 @@ def main(argv=None):
     ap.add_argument("--time-budget", type=float, default=120.0, help="emulation time budget in seconds")
     ap.add_argument("--max-funcs", type=int, default=0,
                     help="maximum functions to emulate (default 0: no cap, the time budget decides)")
+    ap.add_argument("--max-ram", metavar="SIZE", default="",
+                    help="RAM budget for emulation, e.g. 4G or 2048 (MB); fewer worker processes "
+                         "fit a smaller budget, trading speed for memory (also RUST_DEOBF_MAX_RAM_MB)")
     args = ap.parse_args(argv)
 
     path = Path(args.binary)
     if args.min_length < 1:
         ap.error("--min-length must be a positive integer")
+    try:
+        max_ram_mb = _parse_size_mb(args.max_ram)
+    except ValueError as e:
+        ap.error(str(e))
     if path.is_dir():
         run_dir(path, Path(args.jsonl) if args.jsonl else None, emulate=args.emulate,
                 stackstrings=not args.no_stackstrings, min_len=args.min_length,
-                time_budget=args.time_budget, max_funcs=args.max_funcs, literals=not args.no_literals)
+                time_budget=args.time_budget, max_funcs=args.max_funcs,
+                literals=not args.no_literals, max_ram_mb=max_ram_mb)
         return
     if not path.is_file():
         ap.error(f"no such file: {path}")
 
     result = run(path, emulate=args.emulate, stackstrings=not args.no_stackstrings,
                  min_len=args.min_length, time_budget=args.time_budget, max_funcs=args.max_funcs,
-                 literals=not args.no_literals)
+                 literals=not args.no_literals, max_ram_mb=max_ram_mb)
 
     if args.floss_json:
         import floss_export
