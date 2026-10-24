@@ -71,6 +71,19 @@ _REG_NOHIVE = r"(?:SOFTWARE|Software|SYSTEM|System)\\[\w .{}$-]+(?:\\[\w .{}$-]+
 # Windows kernel-object names: mutexes, events, sections in the Global/Local/Session namespaces
 _KOBJ = r"(?:Global|Local|Session\\\d+|\\?BaseNamedObjects)\\[\w.{}$#@+-]{3,}"
 _WINPATH = r"(?:[A-Za-z]:|\\\\[\w.$-]+\\[\w.$-]+|%[A-Za-z_]+%)\\(?:[\w .$()~-]+\\)*[\w .$()~-]+"
+# Canonical UUID/GUID (8-4-4-4-12 hex). The exact hyphen positions make this shape essentially
+# impossible to hit by chance in XOR garbage, so it is precision-safe to accept directly -- and
+# GUIDs (campaign IDs, handler paths, hard-coded machine/mutex GUIDs) are high-value indicators.
+_GUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+# Credential / API-key tokens with well-known vendor prefixes. Only recognised prefixes are
+# accepted (not any long alphanumeric run), so this stays specific enough to protect precision
+# while catching the keys a triage analyst cares about most.
+_TOKEN = (r"(?:sk|pk|rk|ak)_(?:live|test|prod)_[A-Za-z0-9]{8,}"      # Stripe-style
+          r"|AKIA[0-9A-Z]{16}"                                        # AWS access key id
+          r"|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}"  # GitHub
+          r"|xox[baprs]-[A-Za-z0-9-]{10,}"                            # Slack
+          r"|AIza[0-9A-Za-z_-]{35}"                                   # Google API key
+          r"|eyJ[A-Za-z0-9_=-]{8,}\.[A-Za-z0-9_=-]{8,}\.[A-Za-z0-9_=-]*")  # JWT
 
 # (kind, pattern). Each pattern describes the whole indicator; looks_like_ioc() matches it
 # against the whole string, contains_ioc() finds it inside a longer one.
@@ -84,6 +97,8 @@ _IOC_RULES = [
     ("registry", _REG_NOHIVE),
     ("mutex", _KOBJ),
     ("email", r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+    ("guid", _GUID),
+    ("token", _TOKEN),
 ]
 _IOC_PATTERNS = [re.compile("^" + p + "$", re.I if k in ("url", "domain", "registry") else 0)
                  for k, p in _IOC_RULES]

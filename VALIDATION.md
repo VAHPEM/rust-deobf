@@ -971,5 +971,37 @@ non-natural-language runs — but GUIDs, API keys and random tokens are precisel
 malware analyst most wants, and the `canary::name::value` benchmark strings (all natural-language)
 never exercised that trade-off. So the honest headline is: **strong precision, and a real recall
 gap on indicator-shaped high-entropy strings.** Widening the text gate to admit structured IOCs
-(GUID / key / token shapes) without losing precision is the next-work item — and it must be
-validated on a *fresh* held-out set, never tuned against this one.
+(GUID / key / token shapes) without losing precision was the next-work item — addressed, and
+validated on a *fresh* held-out set rather than this one, in §17.
+
+## 17. Closing the held-out recall gap: structured-IOC recognition (Oct 2026)
+
+§16's held-out set showed the `looks_like_text` gate dropping three decoded strings that are
+exactly the indicators triage wants (a GUID, a vendor API-key token, a 2-char string). The gate
+already had an accept-path for indicator *shapes* (`looks_like_ioc` / `contains_ioc`: URLs, IPs,
+domains, paths, registry keys, mutexes, emails); it was missing two standard ones. Added:
+
+- **canonical UUID/GUID** — `8-4-4-4-12` hex with the exact hyphen positions. The positions make
+  it essentially impossible to hit by chance in XOR garbage, so it is accepted directly. Plain
+  hex *without* the canonical hyphens is **not** accepted (that would be a generic-hex loosening
+  and would cost precision).
+- **credential tokens with known vendor prefixes** — Stripe `sk_live_…`, AWS `AKIA…`, GitHub
+  `ghp_…`/`github_pat_…`, Slack `xox[baprs]-…`, Google `AIza…`, JWT `eyJ….….…`. Only recognised
+  prefixes are accepted, never an arbitrary long alphanumeric run.
+
+These are industry-standard IOC definitions, not shapes reverse-engineered from §16's two
+examples, and they also enrich `ioc_tags` (recovered GUIDs/keys are now tagged `guid`/`token`).
+
+**Validation on a *fresh* held-out set** (ten new secrets — different GUID, AWS/GitHub/Slack
+tokens, paths, URL, registry key, long hyphenated id — none seen by the engine before), frozen
+otherwise:
+
+| | recall | false positives |
+|---|--:|--:|
+| all six obfuscators | **60/60** | **0** |
+
+Recall on the indicator shapes went from 7/10 (§16) to **10/10 on the fresh set** — generalisation,
+not a fit to §16. Precision held: on the 28 MB real unobfuscated binary (`rg`) the engine produced
+**no** GUID/token-tagged strings (zero new false positives from these rules), and the full test
+suite is unchanged (46 passed). The 2-character `no` from §16 is still dropped by design — below any
+useful length and indistinguishable from noise — which is the right precision call.

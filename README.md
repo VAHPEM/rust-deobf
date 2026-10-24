@@ -247,7 +247,7 @@ listed source and analysed in an isolated VM, never stored here.
   Cipher-agnostic, but only for code paths that execute. **Isolated analysis VM only.**
 
 Every recovered string says where it came from, indicator shapes are tagged (`[url]`, `[ip]`,
-`[domain]`, `[path]`, `[registry]`, `[mutex]`, `[email]`), and `--floss-json` writes a FLOSS
+`[domain]`, `[path]`, `[registry]`, `[mutex]`, `[email]`, `[guid]`, `[token]`), and `--floss-json` writes a FLOSS
 results document so the strings appear in `floss`/`floss --html` next to the static ones.
 
 Beyond strings, the same engines drive config/C2 extraction, hash-obfuscated API-import

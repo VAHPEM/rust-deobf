@@ -45,6 +45,23 @@ SECRETS = [
     "x-meridian-signature: v1=",                           # header fragment with punctuation
 ]
 
+# A second, disjoint held-out set used to validate the structured-IOC recognition added after the
+# first set exposed the recall gap (VALIDATION.md §17). New GUID / AWS / GitHub / Slack tokens and
+# a long hyphenated id -- none seen by the engine when the recognisers were written -- so the 60/60
+# recall it reports is generalisation, not a fit to the first set. Select with --set fresh.
+FRESH_SECRETS = [
+    "https://cdn.auroralink.io/beacon/ingest",
+    "/etc/aurora/keyring.d/agent.key",
+    "D:\\Aurora\\Spool\\queue\\outbound.tmp",
+    "SYSTEM\\CurrentControlSet\\Services\\AuroraSvc",
+    "203.0.113.77:8080",
+    "7d2e5f01-aa93-4c6b-b1e0-9f3c82d14e6a",
+    "AKIA2E4KQ7ZB9XYLMNOP",
+    "ghp_Q7xK2pL9mN4rT8wZ1aB3cD5eF6gH0jK2lM4xY",
+    "xoxb-209348-ZkQp0294aBcLmNoPqR",
+    "aurora-session-rotate-interval-1800-seconds",
+]
+
 # litcrypt(v1) strips one char from each end of the literal's *source* when the literal is a raw
 # string (a crate quirk the benchmark documents). None of our secrets need a raw string except
 # the two with backslashes, so those two are written as raw strings and their litcrypt runtime
@@ -148,7 +165,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", action="store_true", help="keep the temp build dir")
     ap.add_argument("--time-budget", type=int, default=90)
+    ap.add_argument("--set", choices=("heldout", "fresh"), default="heldout",
+                    help="which held-out set: 'heldout' (§16) or 'fresh' (§17 validation set)")
     args = ap.parse_args(argv)
+
+    global SECRETS
+    if args.set == "fresh":
+        SECRETS = FRESH_SECRETS
 
     import recover
 
