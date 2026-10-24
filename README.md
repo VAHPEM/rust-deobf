@@ -327,12 +327,15 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   is decided from text, write ages and which function produced it, not from buffer addresses;
   fixing one profile's case has broken another before (VALIDATION.md §11). Recording the buffer
   each view came from is the planned fix.
-- **Benign corpus only**: the benchmark is synthetic. It now covers the shapes and profiles the
-  review asked for, but real malware will find shapes it does not — please report them. First
-  runs on real binaries (a real Rust PE and a C/C++ negative control, static + emulation, never
-  executed) are in VALIDATION.md §12: robust and correct on metadata, but string *deobfuscation*
-  on real **obfuscated** Rust malware is still unvalidated (the real Rust sample to hand does not
-  obfuscate its strings). `gallery/manifest.json` lists 67 Rust families by hash for that step.
+- **Real malware (VALIDATION.md §12):** on four real Rust-malware families (static + emulation,
+  never executed) the pipeline is robust and the metadata tier is strong. On **EDDIESTEALER** it
+  recovered **32 obfuscated strings** including the hidden **C2 domain and URL path** (published
+  IOCs) and the API names the sample hides — end-to-end deobfuscation of real obfuscated Rust
+  malware. Honest caveats from the same run: **KrustyLoader** encrypts its config at run time
+  (cfb-mode), so static string deobf correctly finds nothing (metadata is the win there); and two
+  **format gaps** surfaced — **32-bit x86 PE** (FickleStealer) and **Mach-O** (RustDoor) are not
+  handled (the engine is x86-64/AArch64 ELF/PE only). The benchmark's obfuscation crates model
+  one real pattern, not all of them; `gallery/manifest.json` lists 67 families by hash.
 - **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
   signature; the bundled DB is for one toolchain (rustc 1.97 x86-64) and must be regenerated
   (`--gen`) for another rustc or architecture, and generic-heavy labels flatten their type args.

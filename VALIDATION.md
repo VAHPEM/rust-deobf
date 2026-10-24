@@ -797,25 +797,37 @@ the next step, not another rule.
 
 ## 12. First runs on real binaries (Oct 2026, Kali VM, static + emulation only)
 
-The benchmark is synthetic; the README's standing caveat is "benign corpus only". The first
-runs on real, third-party binaries, on the Kali VM, **static + emulation only — the sample is
-never executed** (that is `recover.py`'s default: it emulates individual functions under
-Unicorn, no syscalls reach the host). Samples are referenced by hash; none is committed.
+The benchmark is synthetic; the README's standing caveat is "benign corpus only". These are the
+first runs on real, third-party binaries — four real Rust-malware families plus two controls, on
+the Kali VM, **static + emulation only — the sample is never executed** (that is `recover.py`'s
+default: it emulates individual functions under Unicorn, no syscalls reach the host; no dynamic
+/Frida on real malware). Samples are referenced by hash; none is committed.
 
-| binary | sha256 (prefix) | kind | `recover_rust_meta` | emulation | decoded (obf.) | notes |
+| family | sha256 (prefix) | format | `recover_rust_meta` | emulation | decoded (obf.) | result |
 |---|---|---|---|---|--:|---|
-| catthief.exe | `904e6720…cb94c22` | real Rust PE (FLARE-On 13, ch5) | **rust=True**, rustc 1.96.0, **17 crates** (ureq/rustls/ring/flate2/base64), 835 panic sites | 2391/2391 fns, 10 s, no crash | 1 | not string-obfuscated → little to decode, and nothing invented |
-| ToxicMiner.exe | `ee3a410d…a28a93` | real C/C++ PE (negative control) | **rust=False**, 0 crates | 4780/4780 fns, 11 s, no crash | 2 | 2 runtime-assembled strings (CPU brand, a hex table); correctly flags non-Rust |
+| **EDDIESTEALER** | `5330cf6a…e995f42` | PE x86-64 | **rust=True**, rustc 6d9f6ae, 157 panic sites | 1376/1376 fns, 11 s, no crash | **32** | **recovered the hidden C2 domain `xxxivi.com` + C2 URL path `/don/api/handler/73da58c0-…`, plus the dynamically-resolved API names it hides (`ReadProcessMemory`, `InternetConnectW`, `NtQuerySystemInformation`, `encryption_key`, `username`…). static/FLOSS get 0; emulation got all 32.** |
+| KrustyLoader | `030eb56e…84228b0` | ELF x86-64 | **rust=True**, rustc 1.70.0, **18 crates** (tokio/hyper/socket2/hex/cfb-mode), 220 panic sites | 2072/2072 fns, 6 s, no crash | 0 | metadata + capability profile recovered; **no macro-obfuscated strings** — its config is encrypted at run time (cfb-mode) and loaded dynamically, so static string deobf has nothing to decode (7 benign literal paths only). Correct, not a miss. |
+| FickleStealer | `e9bc44cf…a6c599c` | **PE32 i386 (32-bit)** | rust=False | — (arch `?`) | 0 | **format gap: the engine is x86-64/AArch64 only**, so a 32-bit x86 sample is not analysed. Documented limitation, next-work item. |
+| RustDoor | `a900ec81…9b56faa5` | **Mach-O universal** | rust=False | — (arch `?`) | 0 | **format gap: Mach-O not supported** (ELF/PE only). Next-work item. |
+| catthief.exe | `904e6720…cb94c22` | PE x86-64 (FLARE-On) | **rust=True**, rustc 1.96, 17 crates | 2391/2391 fns, 10 s | 1 | not string-obfuscated → little to decode, nothing invented |
+| ToxicMiner.exe | `ee3a410d…a28a93` | PE x86-64 (C/C++ control) | **rust=False** | 4780/4780 fns, 11 s | 2 | correctly flags non-Rust; 2 runtime-assembled strings |
 
-What this shows and does not. It shows the pipeline is **robust on real binaries** (full
-function coverage in seconds, no crash) and that the **metadata tier** works on a real Rust
-sample (17 crates + capability profile from catthief, exactly as ARTIFACT_TIERS §3 describes),
-and that it does **not invent strings** where there is no obfuscation (catthief ships plain/
-runtime strings; the decoder reports one, not noise) and correctly distinguishes Rust from
-non-Rust. It does **not** yet validate string *deobfuscation* on real **obfuscated** Rust
-malware — catthief does not obfuscate its strings. That needs real samples from a family that
-uses an obfuscation crate; `gallery/manifest.json` lists 67 Rust families by hash for fetching
-into the VM (MalwareBazaar now requires a free Auth-Key). That is the next real-sample step.
+**What this shows.** On **EDDIESTEALER** the project does exactly what it claims: it recovers
+obfuscated strings from real Rust malware that `strings` and FLOSS do not — including the C2
+domain and URL path (both known, published EDDIESTEALER indicators) and the Windows API names the
+sample hides. That is the end-to-end result the synthetic benchmark was a proxy for. Across all
+four families the pipeline is **robust** (full function coverage in seconds, no crash) and the
+**metadata tier is strong** (EDDIESTEALER, KrustyLoader, catthief all give exact crate/capability
+fingerprints).
+
+**What it also shows, honestly.** (1) Not every Rust malware uses the compile-time string
+obfuscators the emulator targets: **KrustyLoader** encrypts its config with a real cipher
+(cfb-mode) at run time, so static deobfuscation correctly finds nothing to decode — the win there
+is the metadata, and the strings would need dynamic recovery. (2) Two **format gaps** surfaced
+immediately on real samples: **32-bit x86 PE** (FickleStealer) and **Mach-O** (RustDoor) are not
+handled — the engine is x86-64/AArch64 ELF/PE only. Both are concrete next-work items. The
+benchmark's obfuscation crates (litcrypt/obfstr/…) model one real pattern (EDDIESTEALER-style),
+not all of them.
 
 ## 13. Library-function identification across binaries (Oct 2026, rustc 1.97)
 
