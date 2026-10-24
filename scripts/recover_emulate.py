@@ -702,7 +702,7 @@ class _Writes:
         pg = self.pages.get(a >> 12)
         return pg[a & 0xfff] if pg else 0
 
-    def capture(self, uc, out):
+    def capture(self, uc, out, addrs=None):
         if not self.dirty:
             return
         spans = sorted(self.dirty)
@@ -748,8 +748,10 @@ class _Writes:
                 buf += pg[x & 0xfff:(x & 0xfff) + n] if pg is not None else b"\x00" * n
                 x += n
             for m in _PRINTABLE_RUN.finditer(bytes(buf)):
-                for piece in self._split(s + m.start(), m.group()):
+                for piece, addr in self._split(s + m.start(), m.group()):
                     out.add(piece)
+                    if addrs is not None:
+                        addrs.setdefault(piece, set()).add(addr)
 
     def _split(self, start, run):
         """Cut a printable run where it mixes writes of different ages.
@@ -773,11 +775,14 @@ class _Writes:
             # up too, so a new string stored right after an older one stays glued; the overlap
             # rules deal with that.)
             if b[2] < a[2]:
-                pieces.append(run[cur:b[0]])
+                pieces.append((cur, run[cur:b[0]]))
                 cur = b[0]
-        pieces.append(run[cur:])
-        out = [p.decode("ascii") for p in pieces if len(p) >= 6]
-        return out if len(pieces) > 1 else [run.decode("ascii")]
+        pieces.append((cur, run[cur:]))
+        # (piece text, absolute start address) -- the address lets the overlap rules tell two
+        # views of one buffer from two different buffers that merely share a prefix
+        if len(pieces) > 1:
+            return [(p.decode("ascii"), start + off) for off, p in pieces if len(p) >= 6]
+        return [(run.decode("ascii"), start + pieces[0][0])]
 
 
 # --------------------------------------------------------------------------------------------
@@ -1345,7 +1350,7 @@ class Emulator:
         return True
 
     def _capture(self):
-        self.writes.capture(self.uc, self.strings)
+        self.writes.capture(self.uc, self.strings, self.straddr)
 
     def _plausible(self, p):
         return (self.STACK <= p < self.STACK + STACK_SIZE or HEAP <= p < HEAP + HEAP_SIZE
@@ -1363,6 +1368,7 @@ class Emulator:
             t = b.decode("ascii")
             self.strings.add(t)
             self.used.add(t)
+            self.straddr.setdefault(t, set()).add(ptr)
             # the code says the string ends here. If the next byte holds printable text written
             # *before* the string's own last byte, that text is a stale tail of an older,
             # longer string in the same buffer (not this string still being built)
@@ -1683,6 +1689,7 @@ class Emulator:
         self.last_text_at = -BUDGET
         self.wrote = 0
         self.strings = set()
+        self.straddr = {}                   # string -> {buffer start addresses it was seen at}
         if not getattr(self, "keep_exact", False):
             self.exact = set()
             self.used = set()
@@ -1753,6 +1760,7 @@ class Emulator:
     def _explore(self, func_va, size, max_runs, t_end):
         strings, branches, covered = self.run(func_va, size)
         out = set(strings)
+        addr_acc = {k: set(v) for k, v in self.straddr.items()}   # run() resets straddr each pass
         self.natural = set(strings)        # what the unforced run produced
         all_cov = set(covered)
         queue = deque()
@@ -1778,10 +1786,13 @@ class Emulator:
             runs += 1
             spent += self.count
             out |= strings
+            for k, v in self.straddr.items():
+                addr_acc.setdefault(k, set()).update(v)
             new = covered - all_cov
             all_cov |= covered
             if new:
                 enqueue(plan, branches)
+        self.straddr = addr_acc
         return out, runs
 
 
@@ -2234,6 +2245,16 @@ def _drop_overlap_artifacts(records):
         funcs.setdefault(r["string"], set()).add(r.get("function"))
         per_func[r.get("function")] = per_func.get(r.get("function"), 0) + 1
     natural_ = {r["string"] for r in records if not r.get("forced")}
+    # Buffer addresses recorded during emulation turn "same buffer" from a guess into a fact: a
+    # prefix/tail pair is only a view of one decode when the two strings were materialised at the
+    # same buffer start. When both addresses are known and share no start, they are two different
+    # buffers that merely share a prefix -- the stale-tail / partial-view drops below must not fire.
+    addrof = {r["string"]: set(r.get("addr", ())) for r in records}
+
+    def diff_buffer(p, q):
+        ap, aq = addrof.get(p), addrof.get(q)
+        return bool(ap) and bool(aq) and ap.isdisjoint(aq)
+
     stale, partial, whole_tails = set(), set(), set()
     # a string the code used at a known length, followed by more text in memory: that text is a
     # stale tail from an earlier, longer string in the same buffer
@@ -2279,6 +2300,8 @@ def _drop_overlap_artifacts(records):
     for p, q in pairs:
         if q in stale or (q in used and p not in exact):
             continue
+        if diff_buffer(p, q):
+            continue                       # different buffers, prefix shared by coincidence
         tail = q[len(p):]
         # P complete in a function of its own and S = P + a few characters from another
         # function: not a decode seen half-way (that is one buffer, one function) but P's
@@ -2306,6 +2329,8 @@ def _drop_overlap_artifacts(records):
             if tail in natural_:
                 whole_tails.add(tail)      # S = junk + a string found on its own: keep that one
     for p, q in pairs:
+        if diff_buffer(p, q):
+            continue                       # different buffers: P is not a half-done view of S
         if p not in exact and (q in used or q not in stale):
             partial.add(p)                 # S, longer, is the string; P a view of it half-done
     garbled = set()
@@ -2554,6 +2579,9 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
                                        "forced": True}
             elif rec is False:
                 continue
+            seen = emu.straddr.get(st)      # buffer start address(es) this string materialised at
+            if seen:
+                rec["addr"] = sorted(set(rec.get("addr", ())) | seen)[:8]
             if st in natural:
                 rec.pop("forced", None)    # reached without forcing a branch, in some run
             if st in used:
@@ -2627,6 +2655,8 @@ def _merge(into, other):
             for flag in ("used", "exact"):
                 if rec.get(flag):
                     cur[flag] = True
+            if rec.get("addr"):
+                cur["addr"] = sorted(set(cur.get("addr", ())) | set(rec["addr"]))[:8]
 
 
 PARALLEL_MIN = 2000      # functions: below this one process finishes well within the budget

@@ -791,9 +791,19 @@ dropped obfstr's `--skip-update-check` on the Kali VM's rustc 1.99 PE build (a s
 a function that decoded only the first 16 bytes looked like the same string without its "stray"
 tail), and the fix for that briefly broke a set-3 ARM64 cell. Every rule is now held by the
 suites above and the self-tests, but a new compiler or profile can still land on a combination
-they do not cover. The durable fix is information the emulator does not record yet — which
-buffer (address) each view came from — so views of one buffer can be told from copies; that is
-the next step, not another rule.
+they do not cover. The durable fix is information the emulator did not record then — which buffer
+(address) each view came from — so views of one buffer can be told from copies.
+
+**That fix is now in place.** Every emulation record carries `addr`, the buffer start address(es)
+the string was materialised at (captured in `_Writes.capture`/`_split`, accumulated across the
+explore re-runs, and merged across parallel workers). `_drop_overlap_artifacts` uses it as a
+*guard*: a prefix/tail pair (`P`, `S = P + tail`) is still resolved by the heuristics when the two
+share a buffer start, but when both addresses are known and share no start they are two different
+buffers that merely share a prefix, and the stale-tail / partial-view drops are skipped so neither
+is lost. The heuristics remain as the fallback where an address is unknown, so this only ever keeps
+a string the rules would otherwise have dropped by coincidence — it cannot drop a real one. Verified
+against the canary suites (recall unchanged, ELF/Mach-O still 5/5) and the precision tests
+(`tests/test_benchmark.py`, `tests/test_obf.py`, `tests/test_scatter.py`).
 
 ## 12. First runs on real binaries (Oct 2026, Kali VM, static + emulation only)
 
