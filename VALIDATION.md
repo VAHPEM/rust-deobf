@@ -1005,3 +1005,53 @@ not a fit to §16. Precision held: on the 28 MB real unobfuscated binary (`rg`) 
 **no** GUID/token-tagged strings (zero new false positives from these rules), and the full test
 suite is unchanged (46 passed). The 2-character `no` from §16 is still dropped by design — below any
 useful length and indistinguishable from noise — which is the right precision call.
+
+## 18. Gallery expansion, SOC triage, live dynamic re-validation (Oct 2026)
+
+Run on the Kali analysis VM (static + emulation, never executed unless stated). This round added
+three real families to `gallery/results.jsonl` (now nine) and a first-pass triage tool.
+
+**Real-malware wins (by hash; samples never committed).**
+- **AmnesiaStealer** (macOS, Mach-O x86-64) — the headline alongside EDDIESTEALER. Emulation
+  recovered the full capability picture end-to-end: the C2 exfil URL
+  `https://debug.allllowef.space/send/`, the crypto-clipper config
+  (`CLIPPER_ATOM/DOGE/TRC20/ENABLED`, wallet-address swapping), the fake macOS password prompt,
+  Safari cookie theft, `/tmp` staging paths that expose TCC-database tampering
+  (`.tcc_mod.db`/`.snap_tcc`, a privacy bypass) and `safari_cookies_via_sudo`, and AppleScript for
+  Telegram/Notes exfiltration. Honest: ~16 of 28 emulation outputs are garbled std-internal
+  fragments (precision edge on a large Mach-O); the ~12 genuine strings are the signal.
+- **SPICA** (ColdRiver/Star Blizzard backdoor, PE x86-64, 18,598 fns) — recovered its registry
+  persistence key `Software\Classes\spica`. One genuine indicator of four outputs.
+- **RustyAttr** (Lazarus, macOS, Mach-O universal) — delivered **triple-packed** (zip -> gz ->
+  cpio -> `VooV.app`); the payload is `VooV.app/Contents/MacOS/AwesomeTemplate`. Confirmed
+  `rust=True` (59 crates) but **no** obfuscated strings — correct, because RustyAttr hides a shell
+  script in a file's extended attributes rather than encrypting Mach-O strings. The value is the
+  delivery-chain unpack; it drove the nested `.gz/.xz/.bz2/.tar` unpack step in
+  `scripts/gallery_fetch_scan.sh`.
+
+`scripts/gallery_fetch_scan.sh` fetches one sample by hash, verifies it is a real (not error-JSON)
+zip, decrypts `infected`, unpacks nested archives, and triages every surfaced binary -- never
+executing it. Luca Stealer and RustBucket were no longer on MalwareBazaar; Myth Stealer is not
+string-obfuscated.
+
+**SOC triage.** `scripts/soc_triage.py` turns one binary into a one-screen analyst card:
+format/arch, Rust toolchain + panic sites, a crate capability fingerprint, indicators grouped by
+tag (benign Rust std/compiler paths filtered out), a decoded sample, and a calibrated
+LOW/MEDIUM/HIGH signal with evidence (an aid, not a verdict). On AmnesiaStealer it rates **HIGH**
+and surfaces the C2 URL, the networking/crypto/rusqlite crate profile, and the full `/tmp` staging
+set. `--fast` is sub-second (metadata + literals); `--json` feeds a SIEM.
+
+**Dynamic recovery, re-validated live.** `scripts/recover_dynamic.py` (Frida) was run on the
+benign `muddy` canary (ChaCha20-Poly1305 AEAD) on the VM and recovered **5/5** canaries from
+runtime memory. This is the AEAD case the static path is meant to miss -- though the emulation
+engine now also decrypts muddy (it simply runs the decrypt), so static+emulation gets 5/5 too.
+Dynamic detonation of **real** malware was deliberately **not** auto-run here: this Kali VM is on a
+shared (vmnet) network, and a live stealer/loader would beacon and exfiltrate for real; that step
+needs a host-only/isolated network and a revertible snapshot, run deliberately, per
+`recover_dynamic.py`'s own safety note.
+
+**Deflattening / real OLLVM.** The deflattener (§17) is validated on goldberg (a real Rust CFF
+obfuscator) and on a faithful clang-compiled OLLVM-`-fla`-shaped synthetic (direct-assignment
+transitions). Validating against a binary from a genuine Obfuscator-LLVM/Pluto build remains open:
+the available ports (Pluto, ollvm17/18) are full LLVM/clang forks (multi-hour builds, version-
+pinned), and the VM has no passwordless `apt`, so it needs a dedicated toolchain setup.

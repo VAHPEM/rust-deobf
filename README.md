@@ -331,17 +331,22 @@ This is research code, not a finished product (details in `VALIDATION.md`):
   recovery with that environment.
 - **Precision is good, not perfect**: 29 false positives on a 21-binary C/C++, Go and Rust
   corpus (see Results) — run-time assembled text the filters do not model.
-- **Overlap rules are heuristics**: which of several overlapping views of a buffer is the string
-  is decided from text, write ages and which function produced it, not from buffer addresses;
-  fixing one profile's case has broken another before (VALIDATION.md §11). Recording the buffer
-  each view came from is the planned fix.
-- **Real malware (VALIDATION.md §12):** on four real Rust-malware families (static + emulation,
-  never executed) the pipeline is robust and the metadata tier is strong. On **EDDIESTEALER** it
-  recovered **32 obfuscated strings** including the hidden **C2 domain and URL path** (published
-  IOCs) and the API names the sample hides — end-to-end deobfuscation of real obfuscated Rust
-  malware. Honest caveats from the same run: **KrustyLoader** encrypts its config at run time
-  (cfb-mode), so static string deobf correctly finds nothing (metadata is the win there). Two
-  format gaps surfaced and are partly closed. **32-bit x86 ELF** and **Mach-O** (the macOS format,
+- **Overlap rules**: which of several overlapping views of a buffer is the string is now settled
+  by the **buffer address** each view was materialised at (recorded during emulation), so views of
+  one buffer are told from two buffers that merely share a prefix; the text/write-age heuristics
+  remain only as the fallback where an address is unknown (VALIDATION.md §11).
+- **Real malware (VALIDATION.md §12, §18):** validated on **nine** real Rust-malware families by
+  hash (static + emulation, never executed; samples never committed). Two headline end-to-end wins:
+  **EDDIESTEALER** (PE) — **32 obfuscated strings** including the hidden **C2 domain and URL path**
+  (published IOCs) and the API names it hides; and **AmnesiaStealer** (macOS Mach-O) — the C2 exfil
+  URL, crypto-clipper config, Safari-cookie/TCC-bypass staging paths and AppleScript for
+  Telegram/Notes theft. **SPICA** (ColdRiver) gave its registry persistence key; **RustyAttr**
+  (Lazarus) was unpacked from a triple-packed zip→gz→cpio→app chain (and honestly yielded no
+  obfuscated strings — its evasion is extended-attribute script-hiding, not string encryption).
+  Honest caveats: **KrustyLoader** encrypts its config at run time (cfb-mode), so static string
+  deobf correctly finds nothing (metadata is the win there); on large real binaries a minority of
+  emulation outputs are garbled std-internal fragments. Two format gaps surfaced and are partly
+  closed. **32-bit x86 ELF** and **Mach-O** (the macOS format,
   x86-64 and arm64) are fully emulated: the engine decodes obfuscated strings on them, verified at
   **5/5 on all six canary crates** for `i686-unknown-linux-gnu` (VALIDATION.md §14,
   `tests/test_32bit.py`) and **5/5 on all six built for `aarch64-apple-darwin`** (§15,
