@@ -404,3 +404,10 @@ Defensive RE research only. All inputs are synthetic, benign binaries built from
 `bench_src/` (see `bench_src/manifest.json` for every planted string); the tooling reads and
 decodes binaries and produces no offensive capability. Run dynamic analysis only against
 samples you are authorised to analyse, inside an isolated VM.
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE). A standard, OSI-approved license with no added
+restrictions. The defensive-use guidance in this README (run only in an isolated VM, benign test
+inputs, samples referenced by hash) is project guidance for using the tool responsibly, not a
+license term.
