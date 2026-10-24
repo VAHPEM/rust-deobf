@@ -841,3 +841,35 @@ for that binary (e.g. `LowerHex`/`UpperHex` share a masked prologue), so an iden
 never a guess. Verified into Ghidra headless on the stripped binary: all 277 functions renamed
 `lib_<name>`. The label flattens generic arguments (a monomorphised symbol reads as a long
 concatenated path); the identification — which address is which function — is exact.
+
+## 14. 32-bit x86 (i386) emulation (Oct 2026)
+
+The emulation engine was x86-64 + AArch64 only; a 32-bit sample (FickleStealer, §12) fell through
+to metadata/literals. The engine is now x86-64 + AArch64 + **32-bit x86**. What it took, found by
+building the canary crates for `i686-unknown-linux-gnu` (dynamic glibc PIE — imported libc, the
+realistic case that matches how real 32-bit PE malware reaches its runtime) and following the
+first derail each time:
+
+- **detection + layout**: ELFCLASS32 / PE32 / I386 → `x32`, pointer size 4; Capstone `CS_MODE_32`,
+  Unicorn `UC_MODE_32`; a 32-bit stack address (the 64-bit one does not fit a 4 GB space);
+  32-bit registers (ESP/EIP/EAX), cdecl arguments on the stack, 4-byte return addresses.
+- **i386 REL relocations** (the key fix): i386 uses REL, not RELA, so a `R_386_RELATIVE`'s addend
+  is stored *in place* at the relocated word, which LIEF reports as 0. Taking that 0 left every
+  vtable and closure function-pointer null — the stdout `OnceLock` init called a null closure
+  (`call eax` with `eax = 0`) and the program unwound to exit after the first decode. Reading the
+  in-place addend back fixed it.
+- **PIC get-PC idiom**: PIE i386 computes the GOT base with `call $+5 ; pop ebx`. That `call` is
+  not a real call — the next instruction pops its pushed address — so tracking a frame for it
+  leaked one every time and desynced the frame stack. The call-to-next-instruction case is now
+  recognised and not framed.
+- **frame/SP reconciliation**: std's sync and unwind paths return through several frames at once;
+  frames the live SP has passed are now dropped, so per-`ret` tracking cannot drift.
+- **32-bit TLS** (GS/Linux, FS/Windows) via a GDT descriptor, and **`int 0x80`** syscalls with
+  i386 numbers (write/brk/mmap2/munmap).
+
+**Result:** every canary crate built for i686 returns **5/5** — `xor_custom`, `add_custom`,
+`litcrypt`, `litcrypt2`, `obfstr`, `cryptify`. `tests/test_32bit.py` builds them and asserts it;
+the x86-64 and AArch64 paths are unchanged (benchmark + self-tests still pass). The static
+call-site recoverers, cryptify, stack-strings and libfuncs remain x86-64/AArch64 only, so on a
+32-bit binary strings come from emulation + literal recovery. PE32 (32-bit Windows) uses the same
+engine; it is exercised on real samples rather than the ELF canary suite.

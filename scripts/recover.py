@@ -125,19 +125,24 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
     result = {"file": str(path), "format": fmt, "arch": arch, "imagebase": imagebase,
               "decoded": [], "stack": [], "literals": [], "literals_missed": [],
               "libfuncs": [], "engines": [], "notes": []}
-    # The static call-site and emulation engines are ELF/PE loaders for x86-64 and AArch64.
-    # 32-bit x86 and Mach-O are not emulated yet; still run the arch-agnostic literal recovery,
-    # and point at recover_rust_meta.py (crates/panics, works on both) and dynamic recovery.
-    emu_ok = fmt in ("ELF", "PE") and arch in ("x86_64", "aarch64")
+    # The emulation engine is an ELF/PE loader for x86-64, AArch64 and 32-bit x86. The static
+    # call-site recoverers, cryptify, stack-strings and libfuncs are x86-64/AArch64 only; for
+    # 32-bit x86 only emulation + literals run. Mach-O is detected but not emulated yet.
+    emu_ok = fmt in ("ELF", "PE") and arch in ("x86_64", "aarch64", "x86")
+    static_ok = fmt in ("ELF", "PE") and arch in ("x86_64", "aarch64")
     static_records = []
     if not emu_ok:
         result["notes"].append(
-            f"static call-site + emulation support ELF/PE on x86-64/aarch64 only (this is "
+            f"the emulation/static engines support ELF/PE on x86-64/aarch64/x86 (this is "
             f"{fmt}/{arch}): skipped. Literal recovery still runs; for strings also try "
             f"recover_rust_meta.py (crates, panic sites — works here) and, in a VM, "
             f"recover_dynamic.py.")
+    elif arch == "x86":
+        result["notes"].append(
+            "32-bit x86: static call-site recovery is x86-64/aarch64 only; strings come from "
+            "emulation and literal recovery here.")
 
-    if emu_ok:
+    if static_ok:
         t0 = time.monotonic()
         if arch == "x86_64":
             import recover_callsite as R
@@ -181,7 +186,7 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
         if e.get("ram_note"):
             result["notes"].append(e["ram_note"])
 
-    if stackstrings and emu_ok:
+    if stackstrings and static_ok:
         import recover_stackstrings as S
         t0 = time.monotonic()
         s = S.recover(path, min_len=min_len)
@@ -199,7 +204,7 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
                                   "strings": len(result["literals"]), "unexplained": len(lit["missed"]),
                                   "seconds": round(time.monotonic() - t0, 1)})
 
-    if libfuncs and emu_ok:
+    if libfuncs and static_ok:
         import recover_libfuncs as LF
         t0 = time.monotonic()
         db = LF.load_db()

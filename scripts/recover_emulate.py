@@ -56,8 +56,8 @@ from collections import deque
 from pathlib import Path
 
 import lief
-from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-from unicorn import (Uc, UcError, UC_ERR_ARG, UC_ARCH_X86, UC_ARCH_ARM64, UC_MODE_64, UC_MODE_ARM,
+from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_MODE_32, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+from unicorn import (Uc, UcError, UC_ERR_ARG, UC_ARCH_X86, UC_ARCH_ARM64, UC_MODE_64, UC_MODE_32, UC_MODE_ARM,
                      UC_HOOK_BLOCK, UC_HOOK_MEM_WRITE, UC_HOOK_INSN, UC_HOOK_INTR,
                      UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
                      UC_HOOK_MEM_FETCH_UNMAPPED)
@@ -73,6 +73,7 @@ PRINT = set(bytes(string.printable, "ascii")) - set(b"\x0b\x0c")
 
 BASE = 0x0                # map image at native VAs (PIE-safe: obfstr's xref pointer math matches)
 STACK = 0x7f0000000000
+STACK32 = 0xc0000000      # 32-bit stack: the 64-bit STACK does not fit a 4 GB address space
 STACK_SIZE = 0x200000
 SCRATCH = 0x10000000      # fake pointer arguments point here
 SCRATCH_SIZE = 0x1000000
@@ -127,7 +128,12 @@ class Image:
         self.fmt = b.format.name
         self.pe = self.fmt == "PE"
         self.arm = any(t in _machine(b) for t in ("AARCH64", "ARM64"))
-        self.md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN) if self.arm else Cs(CS_ARCH_X86, CS_MODE_64)
+        self.x32 = (not self.arm) and _is_32bit(b)      # 32-bit x86 (i386)
+        self.ptr = 4 if self.x32 else 8
+        if self.arm:
+            self.md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+        else:
+            self.md = Cs(CS_ARCH_X86, CS_MODE_32 if self.x32 else CS_MODE_64)
         self.file_bytes = _static_bytes(path)
         self.data = []      # (va, bytes) of non-executable sections, for the ciphertext feature
         for s in b.sections:
@@ -222,7 +228,15 @@ class Image:
             for r in b.relocations:
                 t = str(r.type)
                 if t.endswith("_RELATIVE"):
-                    self.patches[r.address] = r.addend
+                    ad = r.addend
+                    if not ad and self.x32:
+                        # i386 uses REL (no explicit addend): the addend is stored in place at
+                        # the relocated word. Without reading it back, every RELATIVE pointer
+                        # (vtables, closure fn-pointers, GOT) stays 0 and indirect calls fault.
+                        raw = self.read_any(r.address, 4)
+                        if len(raw) == 4:
+                            ad = struct.unpack("<I", raw)[0]
+                    self.patches[r.address] = ad
                 elif t.endswith(("_GLOB_DAT", "_JUMP_SLOT", "_X86_64_64", "_ABS64")) and r.has_symbol:
                     sym = r.symbol
                     if sym.value:
@@ -494,6 +508,26 @@ def _machine(binary):
                 else str(binary.header.machine)).upper()
     except Exception:
         return ""
+
+
+def _is_32bit(binary):
+    """True for a 32-bit x86 image: ELFCLASS32, PE32 (not PE32+), or an I386/80386 machine."""
+    m = _machine(binary)
+    if "I386" in m or "80386" in m or ("X86" in m and "64" not in m):
+        return True
+    try:
+        ic = str(getattr(binary.header, "identity_class", "")).upper()
+        if "ELF32" in ic or "CLASS32" in ic:
+            return True
+    except Exception:
+        pass
+    try:
+        import lief
+        if binary.format.name == "PE":
+            return binary.optional_header.magic == lief.PE.PE_TYPE.PE32
+    except Exception:
+        pass
+    return False
 
 
 def _static_bytes(path):
@@ -845,16 +879,25 @@ class Emulator:
     def __init__(self, img: Image):
         self.img = img
         self.arm = img.arm
+        self.x32 = img.x32
+        self.ptr = img.ptr
+        self.pfmt = "<I" if self.x32 else "<Q"       # pointer pack/unpack format
+        self.pmask = (1 << (8 * self.ptr)) - 1
+        self.STACK = STACK32 if self.x32 else STACK
         self.uc = None
         self._blk = {}
         self._thunks = {}
         self._allocs = {}
-        self._md_lite = Cs(CS_ARCH_X86, CS_MODE_64)
+        self._md_lite = Cs(CS_ARCH_X86, CS_MODE_32 if self.x32 else CS_MODE_64)
         if self.arm:
             self.SP, self.PC, self.RET = A.UC_ARM64_REG_SP, A.UC_ARM64_REG_PC, A.UC_ARM64_REG_X0
             self.ARGS = [getattr(A, f"UC_ARM64_REG_X{i}") for i in range(8)]
             self.SAVED = [getattr(A, f"UC_ARM64_REG_X{i}") for i in range(19, 29)] + \
                 [A.UC_ARM64_REG_X29, A.UC_ARM64_REG_X30]
+        elif self.x32:
+            self.SP, self.PC, self.RET = X.UC_X86_REG_ESP, X.UC_X86_REG_EIP, X.UC_X86_REG_EAX
+            self.ARGS = [X.UC_X86_REG_ECX, X.UC_X86_REG_EDX]
+            self.SAVED = [X.UC_X86_REG_EBX, X.UC_X86_REG_EBP, X.UC_X86_REG_ESI, X.UC_X86_REG_EDI]
         else:
             self.SP, self.PC, self.RET = X.UC_X86_REG_RSP, X.UC_X86_REG_RIP, X.UC_X86_REG_RAX
             self.ARGS = ([X.UC_X86_REG_RCX, X.UC_X86_REG_RDX, X.UC_X86_REG_R8, X.UC_X86_REG_R9]
@@ -873,7 +916,10 @@ class Emulator:
         if self.uc is not None:
             self.uc = None
             gc.collect()
-        uc = self.uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM) if self.arm else Uc(UC_ARCH_X86, UC_MODE_64)
+        if self.arm:
+            uc = self.uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+        else:
+            uc = self.uc = Uc(UC_ARCH_X86, UC_MODE_32 if self.x32 else UC_MODE_64)
         if self.arm:
             try:   # LSE atomics (casa, ldadd, swp: Rust's outlined atomics use them) need ARMv8.1+
                 uc.ctl_set_cpu_model(A.UC_CPU_ARM64_MAX)
@@ -886,7 +932,7 @@ class Emulator:
         uc.mem_write(TRAMP, (ret + b"\x00" * (16 - len(ret))) * min(len(self.img.tramp) + 1, TRAMP_SIZE // 16))
         for va, v in self.img.patches.items():
             try:
-                uc.mem_write(BASE + va, struct.pack("<Q", v & 0xffffffffffffffff))
+                uc.mem_write(BASE + va, struct.pack(self.pfmt, v & self.pmask))
             except UcError:
                 pass
         # the loaded image, page by page, to undo whatever a run writes into it
@@ -903,7 +949,7 @@ class Emulator:
                     except UcError:
                         pass
         self.touched = set()
-        uc.mem_map(STACK, STACK_SIZE)
+        uc.mem_map(self.STACK, STACK_SIZE)
         uc.mem_map(SCRATCH, SCRATCH_SIZE)
         uc.mem_map(HEAP, HEAP_SIZE)
         uc.mem_map(TLS, TLS_SIZE)
@@ -912,12 +958,36 @@ class Emulator:
         uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
         uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
                     self._on_unmapped)
-        if self.arm:
-            uc.hook_add(UC_HOOK_INTR, self._on_intr)
+        if self.arm or self.x32:
+            uc.hook_add(UC_HOOK_INTR, self._on_intr)        # i386 syscalls / svc are int/svc
         else:
             uc.hook_add(UC_HOOK_INSN, self._on_syscall, None, 1, 0, X.UC_X86_INS_SYSCALL)
         self.runs_on_this_uc = 0
         self.auto_pages = []
+
+    _GDT = 0xd0000000
+
+    def _setup_seg32(self, uc, tp):
+        """32-bit TLS: Unicorn can't set a segment base by reg_write, so install a GDT with a
+        flat data descriptor based at `tp` and load it into GS (Linux) or FS (Windows)."""
+        try:
+            uc.mem_map(self._GDT, 0x1000)
+        except UcError:
+            pass
+        base, limit = tp & 0xffffffff, 0xfffff
+        entry = ((limit & 0xffff) | ((base & 0xffffff) << 16) | (0xF2 << 40)
+                 | (((limit >> 16) & 0xf) << 48) | (0xC << 52) | (((base >> 24) & 0xff) << 56))
+        uc.mem_write(self._GDT + 8, struct.pack("<Q", entry))     # descriptor index 1
+        try:
+            from unicorn.x86_const import UC_X86_REG_GDTR
+            uc.reg_write(UC_X86_REG_GDTR, (0, self._GDT, 0xfff, 0))
+            sel = (1 << 3) | 3                                     # index 1, RPL 3
+            uc.reg_write(X.UC_X86_REG_FS if self.img.pe else X.UC_X86_REG_GS, sel)
+            uc.mem_write(tp, struct.pack("<I", tp & 0xffffffff))
+            if self.img.pe:
+                uc.mem_write(tp + 0x18, struct.pack("<I", tp & 0xffffffff))
+        except Exception:
+            pass          # this Unicorn build cannot set a 32-bit segment base; TLS runs fault, handled
 
     def _reset(self):
         """Fresh registers, stack, heap and data for the next run (code is never written)."""
@@ -950,7 +1020,7 @@ class Emulator:
                 uc.mem_write(va, blob)
             except UcError:
                 pass
-        for region, size in ((STACK, STACK_SIZE), (SCRATCH, 0x20000)):
+        for region, size in ((self.STACK, STACK_SIZE), (SCRATCH, 0x20000)):
             uc.mem_write(region, b"\x00" * size)
         if getattr(self, "heap_top", HEAP) > HEAP:
             uc.mem_write(HEAP, b"\x00" * (min(self.heap_top, HEAP + HEAP_SIZE) - HEAP))
@@ -964,6 +1034,12 @@ class Emulator:
         uc.mem_write(TLS, b"\x00" * TLS_SIZE)
         if self.arm:
             uc.reg_write(A.UC_ARM64_REG_TPIDR_EL0, tp)
+        elif self.x32:
+            # 32-bit TLS via GS (Linux) / FS (Windows); set up the segment base + TCB self-pointer
+            self._setup_seg32(uc, tp)
+            uc.mem_write(tp, struct.pack("<I", tp & 0xffffffff))
+            if self.img.pe:
+                uc.mem_write(tp + 0x18, struct.pack("<I", tp & 0xffffffff))
         elif self.img.pe:
             # TEB: [0x30] self pointer, [0x58] thread-local storage array -> zeroed blocks
             uc.reg_write(X.UC_X86_REG_GS_BASE, tp)
@@ -974,10 +1050,15 @@ class Emulator:
             # x86-64 SysV: fs:0 holds the thread pointer itself; variables sit below it
             uc.reg_write(X.UC_X86_REG_FS_BASE, tp)
             uc.mem_write(tp, struct.pack("<Q", tp))
-        top = STACK + STACK_SIZE // 2
+        top = self.STACK + STACK_SIZE // 2
         if self.arm:
             for i in range(31):
                 uc.reg_write(getattr(A, f"UC_ARM64_REG_X{i}"), 0)
+        elif self.x32:
+            for r in (X.UC_X86_REG_EAX, X.UC_X86_REG_EBX, X.UC_X86_REG_ECX, X.UC_X86_REG_EDX,
+                      X.UC_X86_REG_ESI, X.UC_X86_REG_EDI):
+                uc.reg_write(r, 0)
+            uc.reg_write(X.UC_X86_REG_EBP, top)
         else:
             for r in (X.UC_X86_REG_RAX, X.UC_X86_REG_RBX, X.UC_X86_REG_R10, X.UC_X86_REG_R11,
                       X.UC_X86_REG_R12, X.UC_X86_REG_R13, X.UC_X86_REG_R14, X.UC_X86_REG_R15,
@@ -989,7 +1070,11 @@ class Emulator:
         # out-pointer and slice arguments point at zeroed scratch memory
         for r in self.ARGS:
             uc.reg_write(r, SCRATCH + 0x8000)
-        if not self.arm:
+        if self.x32:
+            uc.mem_write(top, struct.pack("<I", 0))
+            for i in range(8):
+                uc.mem_write(top + 4 + 4 * i, struct.pack("<I", (SCRATCH + 0x8000) & 0xffffffff))
+        elif not self.arm:
             # a return address the run stops at, so `ret` from the top frame is well defined
             uc.mem_write(top, struct.pack("<Q", 0))
 
@@ -1034,6 +1119,12 @@ class Emulator:
         self.touched.update(range(addr >> 12, ((addr + n + 0xfff) >> 12)))
 
     def _arg(self, i):
+        if self.x32:
+            sp = self.uc.reg_read(self.SP)
+            try:
+                return struct.unpack("<I", self.uc.mem_read(sp + 4 + 4 * i, 4))[0]
+            except UcError:
+                return 0
         if i < len(self.ARGS):
             return self.uc.reg_read(self.ARGS[i])
         # Win64: 5th+ argument on the stack above the 32-byte shadow space
@@ -1128,6 +1219,16 @@ class Emulator:
 
     def _on_intr(self, uc, intno, _):
         self._capture()
+        if self.x32:
+            if intno == 0x80:                               # i386 Linux syscall
+                nr = uc.reg_read(X.UC_X86_REG_EAX)
+                r = self._syscall(nr, uc.reg_read(X.UC_X86_REG_EBX), uc.reg_read(X.UC_X86_REG_ECX),
+                                  uc.reg_read(X.UC_X86_REG_EDX), x86=True)
+                uc.reg_write(X.UC_X86_REG_EAX, r & 0xffffffff)
+                return
+            self.fault = True
+            uc.emu_stop()
+            return
         if intno != 2:
             # not `svc`: an undefined instruction, `brk`, an exclusive-monitor exception. Inside a
             # callee, give up on that callee; in the emulated function itself, stop
@@ -1142,7 +1243,14 @@ class Emulator:
                                                       uc.reg_read(A.UC_ARM64_REG_X2), x86=False))
 
     def _syscall(self, nr, a0, a1, a2, x86):
-        WRITE, BRK_, MMAP, MUNMAP = (1, 12, 9, 11) if x86 else (64, 214, 222, 215)
+        if self.x32:
+            WRITE, BRK_, MMAP, MUNMAP = 4, 45, 192, 91     # i386: write, brk, mmap2, munmap
+            if nr == 90:
+                MMAP = 90                                   # old mmap (struct arg)
+        elif x86:
+            WRITE, BRK_, MMAP, MUNMAP = 1, 12, 9, 11
+        else:
+            WRITE, BRK_, MMAP, MUNMAP = 64, 214, 222, 215
         if nr == WRITE:
             return a2
         if nr == BRK_:
@@ -1200,7 +1308,7 @@ class Emulator:
         self.writes.capture(self.uc, self.strings)
 
     def _plausible(self, p):
-        return (STACK <= p < STACK + STACK_SIZE or HEAP <= p < HEAP + HEAP_SIZE
+        return (self.STACK <= p < self.STACK + STACK_SIZE or HEAP <= p < HEAP + HEAP_SIZE
                 or SCRATCH <= p < SCRATCH + SCRATCH_SIZE or TLS <= p < TLS + TLS_SIZE
                 or BRK <= p < BRK + 0x1000000)
 
@@ -1298,6 +1406,11 @@ class Emulator:
         call = self.call
         self.call = None
         img = self.img
+        if self.x32 and address == call["ret"]:
+            # 32-bit PIC get-PC idiom: `call $+5 ; pop ebx` pushes the return address only so the
+            # next instruction can pop it into a register (the GOT base). It is not a real call --
+            # tracking a frame for it would leak one every time and desync the frame stack.
+            return False
         if TRAMP <= address < TRAMP + TRAMP_SIZE:
             self.frames.append(call)            # popped by the trampoline's `ret`
             return False
@@ -1421,7 +1534,8 @@ class Emulator:
                     self._capture()            # buffers handed to a callee are complete now
                     self._capture_args()
                 sp = uc.reg_read(self.SP)
-                self.call = {"ret": pa + pn, "start": self.count, "sp": sp if self.arm else sp + 8,
+                self.call = {"ret": pa + pn, "start": self.count,
+                             "sp": sp if self.arm else sp + self.ptr,
                              "regs": list(uc.reg_read_batch(self.SAVED))}
                 if self._enter_or_skip(address):
                     return
@@ -1449,6 +1563,14 @@ class Emulator:
                             return
                     else:
                         self.covered.add((pa, address == tgt))
+        if self.x32 and self.frames:
+            # Self-heal frame/stack desync (32-bit std sync & unwind paths return through several
+            # frames at once in ways per-`ret` tracking misses): drop frames the real stack has
+            # already unwound above. A frame's "sp" is the SP its callee returns to; once the live
+            # SP is past it, that frame is done.
+            sp_now = uc.reg_read(self.SP)
+            while self.frames and sp_now > self.frames[-1]["sp"]:
+                self.frames.pop()
         if self.frames:
             if self.count - self.frames[0]["start"] > FRAME_BUDGET:
                 f0 = self.frames[0]
@@ -1484,8 +1606,8 @@ class Emulator:
                 uc.reg_write(self.PC, uc.reg_read(A.UC_ARM64_REG_X30))
             else:
                 sp = uc.reg_read(self.SP)
-                uc.reg_write(self.PC, struct.unpack("<Q", uc.mem_read(sp, 8))[0])
-                uc.reg_write(self.SP, sp + 8)
+                uc.reg_write(self.PC, struct.unpack(self.pfmt, uc.mem_read(sp, self.ptr))[0])
+                uc.reg_write(self.SP, sp + self.ptr)
             self._on_return()
             return
         if not (self.img.text_va <= address < self.img.text_end) and not self.img.executable(address):

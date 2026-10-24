@@ -40,12 +40,13 @@ def test_detect_and_route_32bit():
     fmt, arch, _ = recover.detect(b)
     assert (fmt, arch) == ("ELF", "x86"), (fmt, arch)
     res = recover.run(b, emulate="always", stackstrings=True, literals=True, libfuncs=True)
-    # emulation is skipped for 32-bit, with a clear note; literals still recovered
-    assert not res["decoded"], "32-bit should not run the x86-64/aarch64 emulation engine"
+    # 32-bit x86 is now emulated (the engine entry is present); literals still run; the static
+    # call-site engine stays x86-64/aarch64 only, noted. (End-to-end 5/5 is in test_32bit.py on
+    # the dynamic-glibc build; this static-musl build only needs the routing to be correct.)
+    assert any("emulation" in e["engine"] for e in res["engines"]), res["engines"]
+    assert not any("recover_callsite" in e["engine"] for e in res["engines"]), res["engines"]
     assert res["literals"], "literal recovery should still run on 32-bit"
-    assert any("x86-64/aarch64 only" in n for n in res["notes"]), res["notes"]
-    # no engine entry should claim to have emulated this binary
-    assert not any("emulation" in e["engine"] for e in res["engines"]), res["engines"]
+    assert any("32-bit x86" in n for n in res["notes"]), res["notes"]
 
 
 def test_detect_64bit_still_emulates():
