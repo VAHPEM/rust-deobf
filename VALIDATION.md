@@ -900,3 +900,9 @@ on a Linux CI runner). The ELF/PE x86-64, AArch64 and 32-bit x86 paths are uncha
 call-site recoverers remain ELF/PE x86-64/AArch64, so on Mach-O strings come from emulation (+
 literal recovery). The arm64 std path emulated cleanly here — unlike the statically-linked musl
 std in §14 — so no further sync/TLS work was needed beyond the loader.
+
+**On a real sample.** The Mach-O x86-64 path was then run on **RustDoor** (§12), a real macOS Rust
+backdoor (universal Mach-O, ~2 MB x86-64 slice): it ran clean — 4808/4808 functions in ~16 s, no
+crash — and the emulator **recovered an obfuscated C2 URL, `https://juchesoviet48.com/`**, even
+though the sample is stripped of Rust metadata (`recover_rust_meta` reported non-Rust). The §12
+format gap for Mach-O is closed; `gallery/results.jsonl` records the result by hash.
