@@ -1959,3 +1959,33 @@ new: 0) and classifier unit tests (`top == 5` is not a VM; the benign-name filte
 fixtures are unaffected (same counts before and after). Separately confirmed the stray leading `"` in
 some litcrypt strings is **not** a rust-deobf defect: litcrypt mishandles Rust raw strings, so the
 sample really contains that quote (and `manifest.json` records it) -- the recovery is faithful.
+
+## 46. Emulation speedup (and a relooper layout that didn't pay off) (Oct 2026)
+
+The nested-loop input vectors (§41) roughly doubled the emulation test time -- enough to push the full
+suite past the harness's time budget. Two changes cut it back ~3x (8 fixture functions: ~53s -> ~19s)
+with *no* loss of fidelity:
+
+- **Lower trace budget.** A run that hits the per-trace instruction cap did not return and is
+  discarded by `_attempt` (only cleanly-returning runs are used), so the cap only has to fit the
+  *terminating* runs. Loops are driven by small-count vectors and terminate quickly (longest observed
+  ~17k VM-instructions; recovery holds well below 50k native), so the budget dropped 400k -> 120k.
+  A big-argument vector that turns an argument into a huge loop count now caps 3x sooner and is thrown
+  away just the same.
+- **Per-group lazy tracing.** `recover` traces the scalar (value) vectors first and returns the moment
+  they verify, so a scalar function never pays for the pointer-vector traces. The laziness is per
+  *group*, not per vector -- every value vector is still traced -- so coverage of a data-dependent
+  path (find_mix's `break`) is unaffected. (An earlier attempt that withheld the tiny-count vectors as
+  a sub-fallback did lose that break's fidelity and was abandoned.)
+
+**A relooper layout that didn't pay off (recorded as a negative result).** To fold find_mix's outer
+loop -- whose latch is a two-predecessor merge -- the block layout was reworked to reverse-postorder
+of the reduced graph (inner loops collapsed), which places a merge after all its predecessors. On a
+*lower-fidelity* recovery of find_mix (where the `break` had collapsed to a cmov) it folded both loops
+cleanly, which looked like a win. But on the *full-fidelity* recovery it did not help -- find_mix's
+inner loop genuinely exits to two different targets (the normal exit and the `break`), which C cannot
+express without `goto` (no labelled break) -- and it *regressed* crc_ish / sum_mix / roll (more
+`goto`, because RPO trades away the fall-through adjacency the peephole exploits). So the RPO layout
+was dropped and the simpler DFS layout kept. The honest limit stands: a loop with exits to two
+different targets stays `goto`; folding it would need a label-variable dispatch, which is less
+readable than the `goto`, not more.

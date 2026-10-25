@@ -71,9 +71,11 @@ _VALUE_VECTORS = [
     [0x51, 0x3a, 0x6c, 0x27, 0x4e, 0x19],
     [0x7, 0xd, 0xb, 0x13, 0x25, 0x11],
     # tiny-count vectors: *every* lane is small, so a loop *nest* (whose trip count is the product of
-    # its bounds) still terminates within the execution budget. Without these, a doubly-nested loop
-    # driven by the vectors above blows past the budget on all but the smallest vector and leaves too
-    # few cleanly-returning runs to reconstruct from. Distinct small values keep the ops separable.
+    # its bounds) still terminates within the execution budget, and a data-dependent exit (an inner
+    # `break`) is more likely to be exercised -- both give the reconstruction fuller coverage. They
+    # are cheap now that the trace budget is modest (a non-terminating run caps quickly), so they are
+    # traced for every function rather than held back; dropping them cost find_mix's break-path
+    # fidelity. Distinct small values keep the ops separable.
     [2, 3, 4, 5, 2, 3],
     [4, 2, 5, 3, 4, 2],
     [3, 5, 2, 4, 3, 5],
@@ -111,11 +113,22 @@ def _entropy(n, seed=0x2545F4914F6CDD1D):
     return buf
 
 
-def _trace(img, fva, size, args, cap=400_000):
+_TRACE_CAP = 120_000                                         # native-instruction budget per trace
+
+
+def _trace(img, fva, size, args, cap=_TRACE_CAP):
     """Run one input vector under Unicorn and return the executed VM-instruction trace. Each entry:
     {off, next, dst, srcs, result, pool, loads, stores, regvals}. Register indices are relative to
     the reg-file base; loads/stores are (addr, size, value) outside the reg file; `next` is the
-    bytecode offset of the following fetch (for control-flow recovery)."""
+    bytecode offset of the following fetch (for control-flow recovery).
+
+    `cap` bounds a single run's native instructions. A run that hits it did not return and is
+    discarded by `_attempt` (only cleanly-returning runs are used), so the budget only has to be large
+    enough for the *terminating* runs -- and since loops are driven by small-count input vectors they
+    terminate quickly (the longest across the fixtures is ~17k VM-instructions, and recovery holds
+    well below 50k native). A big-argument vector that turns an argument into a huge loop count simply
+    caps and is thrown away, so keeping the budget modest cuts that wasted work several-fold with a
+    wide safety margin rather than spending 400k instructions to produce nothing."""
     uc = Uc(UC_ARCH_X86, UC_MODE_64)
     _fast_access(uc)
     map_image(uc, img.binary)
@@ -285,22 +298,28 @@ def recover(path: Path, fva: int, size: int | None = None) -> dict | None:
     if size is None:
         size = next((s for f, s in img.functions() if f == fva), 0x400)
 
-    groups = [("value", _VALUE_VECTORS), ("ptr", [_ptr_args(pv) for pv in _PTR_VECTORS])]
-    raw = {"value": [], "ptr": []}                           # group -> [(args, instrs, retval, rb)]
-    blob_lo = None
-    for gname, vecs in groups:
+    def trace_group(vecs):                                   # -> ([(args, instrs, ret, rb)], blob_lo)
+        out, blob = [], None
         for args in vecs:
             bl, rb, instrs, ret = _trace(img, fva, size, args)
             if instrs:
-                blob_lo = bl
-                raw[gname].append((args, instrs, ret, rb))
-    if blob_lo is None:
-        return None
+                blob = bl
+                out.append((args, instrs, ret, rb))
+        return out, blob
 
     # Reconstruct per argument-type group (a scalar function run with pointer args, or vice versa,
-    # takes a different/garbage path -- never mix the two). Return the first group that verifies.
-    for gname in ("value", "ptr"):
-        result = _attempt(raw[gname], blob_lo, img)
+    # takes a different/garbage path -- never mix the two). Trace and attempt the scalar group first
+    # and return as soon as it verifies, so a scalar function never pays for the pointer-vector traces
+    # (the common case). Both groups keep all their vectors -- the laziness is per *group*, not per
+    # vector, so coverage (e.g. find_mix's data-dependent break) is unaffected.
+    vraw, vblob = trace_group(_VALUE_VECTORS)
+    if vblob is not None:
+        result = _attempt(vraw, vblob, img)
+        if result is not None:
+            return result
+    praw, pblob = trace_group([_ptr_args(pv) for pv in _PTR_VECTORS])
+    if pblob is not None:
+        result = _attempt(praw, pblob, img)
         if result is not None:
             return result
     return None
