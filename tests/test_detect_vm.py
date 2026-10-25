@@ -19,6 +19,7 @@ import detect_vm
 
 VMFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm.x64"
 PLAIN = ROOT / "tests" / "fixtures" / "vm" / "plain.x64"
+BENIGN = ROOT / "tests" / "fixtures" / "vm" / "benign_rust_std.x64"
 _X64 = platform.machine() in ("x86_64", "AMD64")
 
 pytestmark = pytest.mark.skipif(not _X64, reason="x86-64 fixtures")
@@ -43,9 +44,23 @@ def test_classifier_requires_threaded_dispatch():
     # a lone jump table + some byte loads (ordinary switch in a parse loop) is NOT enough
     assert _is_vm(0, 1, 50) is False      # no threaded dispatch -> not flagged
     assert _is_vm(2, 0, 40) is False      # weak dispatch, no table -> not flagged
-    # threaded dispatch + fetches -> flagged
+    # a genuine RustCloak VM re-dispatches from every handler: observed top >= 8 -> flagged
     assert _is_vm(8, 0, 40) is True
-    assert _is_vm(4, 0, 10) is True
+    assert _is_vm(6, 0, 10) is True       # medium band
+    # the discriminator band that caused false positives: gimli's DWARF reader dispatches ~5 times.
+    # top 4-5 is no longer enough on its own (the threshold was raised to 6 to exclude it).
+    assert _is_vm(5, 0, 41) is False      # gimli's observed shape -> NOT flagged
+    assert _is_vm(4, 0, 10) is False
+
+
+@pytest.mark.skipif(not BENIGN.is_file(), reason="benign fixture missing")
+def test_benign_std_interpreter_not_flagged():
+    # a benign Rust binary (the obfstr benchmark) statically links std's gimli DWARF reader, an
+    # interpreter-shaped function that the old classifier flagged as a VM -- pushing the triage card to
+    # HIGH on clean code. It must now come back with zero VM hits (symbol filter + raised threshold).
+    assert detect_vm.detect(BENIGN)["count"] == 0
+    assert detect_vm._is_benign_interp("_RNvMsc_NtNtCs_5gimli4read8rnglists11RngListIter")
+    assert not detect_vm._is_benign_interp("_RNvCsabc_7mycrate4main")
 
 
 def _is_vm(top, jmptab, byteload):

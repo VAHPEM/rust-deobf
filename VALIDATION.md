@@ -1928,3 +1928,34 @@ toolkit promises (x86-64 / ARM64 / x86-32, ELF / PE / Mach-O), the honest result
 Discipline note (measure, don't assume): the above states exactly what was tested on which target and
 what was not. The ARM64 decline is measured and pinned; PE and the rest are called out as untested
 in-cloud rather than presumed to work.
+
+## 45. False positive fixed — gimli (std's DWARF reader) is not a VM (Oct 2026)
+
+Running the demo surfaced a real false positive: on the benign `obfstr` and `litcrypt` benchmark
+binaries, `detect_vm` flagged functions as "VM-protected", pushing the SOC triage card to HIGH on
+clean code. The tell (noted from the demo) was that the flagged functions were *identical* across two
+unrelated binaries -- the signature of a statically-linked std function, not application code.
+
+Confirmed: the flagged function demangles to `gimli::read::rnglists::RngListIter` -- **gimli**, the
+DWARF parser behind Rust's backtraces/unwinder. A DWARF range-list reader is a byte-fetching dispatch
+over DWARF opcodes, so it genuinely has the interpreter shape the detector keys on (threaded dispatch
++ dense byte-fetches). It *is* an interpreter -- just not code virtualization.
+
+Measurement separated the two: a RustCloak-virtualized function re-dispatches from every opcode
+handler (observed `top` indirect-branches-to-one-register of **8, 10, 12** across the fixtures), while
+gimli's reader dispatches only ~**5** times. Two guards, so both symbolized and stripped binaries are
+covered:
+
+- **Symbol filter.** `detect()` skips functions whose symbol names a known benign interpreter --
+  gimli, the unwinder (`_Unwind`), `backtrace`, `addr2line`, `object` -- the std/runtime machinery
+  that walks DWARF/EH formats in every Rust binary. Reliable whenever symbols survive.
+- **Raised threshold.** The medium rule moved from `top >= 4` to `top >= 6` (high to `top >= 8`), so
+  gimli's `top == 5` no longer matches even with no symbols. Every real VM fixture (top 8-12) still
+  flags HIGH; `obfstr`/`litcrypt` (strip and nostrip) now report **0** VM functions and the triage
+  card drops from HIGH to LOW/MEDIUM on them.
+
+Pinned by `tests/fixtures/vm/benign_rust_std.x64` (the obfstr strip binary -- old rule: 1 VM hit;
+new: 0) and classifier unit tests (`top == 5` is not a VM; the benign-name filter works). The real VM
+fixtures are unaffected (same counts before and after). Separately confirmed the stray leading `"` in
+some litcrypt strings is **not** a rust-deobf defect: litcrypt mishandles Rust raw strings, so the
+sample really contains that quote (and `manifest.json` records it) -- the recovery is faithful.

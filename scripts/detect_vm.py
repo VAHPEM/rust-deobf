@@ -75,22 +75,63 @@ def _classify(top, jmptab, byteload):
     The discriminator is THREADED DISPATCH -- many indirect branches through the *same* register,
     each opcode handler re-dispatching. A single jump table (one `jmp [tab+idx*8]`) is an ordinary
     `switch` and is NOT enough; dense byte-fetches alone (byte-processing loops in benign code) are
-    NOT enough. Both together, with repeated same-register dispatch, is the interpreter signature."""
-    if top >= 6 and byteload >= 8:
+    NOT enough. Both together, with repeated same-register dispatch, is the interpreter signature.
+
+    The `top` thresholds are set from measurement: a RustCloak-virtualized function re-dispatches from
+    every opcode handler (observed top >= 8 across the fixtures), whereas a benign interpreter-shaped
+    std function -- the one that caused false positives -- is gimli's DWARF range-list reader, whose
+    switch dispatches through one register only ~5 times. Requiring top >= 6 keeps every real VM and
+    drops that DWARF reader, with the symbol filter in `detect()` as the primary guard when names
+    survive (this threshold is the fallback for stripped binaries)."""
+    if top >= 8 and byteload >= 8:
         return True, "high", f"threaded dispatch ({top} indirect branches to one register) + {byteload} bytecode fetches"
-    if top >= 4 and byteload >= 8:
+    if top >= 6 and byteload >= 8:
         return True, "medium", f"threaded dispatch ({top} indirect branches to one register) + {byteload} bytecode fetches"
-    if jmptab >= 2 and top >= 2 and byteload >= 12:
+    if jmptab >= 2 and top >= 4 and byteload >= 12:
         return True, "medium", f"jump-table dispatch ({jmptab}) + {byteload} bytecode fetches"
     return False, "", ""
+
+
+# Benign, interpreter-shaped functions pulled in by the Rust/C++ runtime: gimli (the DWARF parser
+# behind std backtraces), the language unwinder, backtrace/addr2line symbolization, and the `object`
+# file reader. Each walks a bytecode-like format (DWARF CFI, EH tables) with a dispatch + byte-fetch
+# shape that matches the VM signature -- correctly, they ARE interpreters, just not code
+# virtualization. We skip them when a symbol names them (they are the same std code in every binary,
+# which is exactly how they showed up as identical false positives across unrelated samples).
+_BENIGN_INTERP = ("gimli", "_Unwind", "unwind", "backtrace", "addr2line", "rustc_demangle",
+                  "5gimli", "6object", "panic_unwind", "eh_frame", "dwarf")
+
+
+def _is_benign_interp(name):
+    return bool(name) and any(tok in name for tok in _BENIGN_INTERP)
+
+
+def _symbol_names(img):
+    """va -> symbol name, for skipping benign interpreter-shaped std functions by name."""
+    names = {}
+    try:
+        base = img.binary.imagebase if img.pe else 0
+        for s in img.binary.symbols:
+            try:
+                v = int(s.value)
+                if v:
+                    names.setdefault(base + v, s.name)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return names
 
 
 def detect(path: Path) -> dict:
     from recover_emulate import Image
     img = Image(str(path))
     arch = "arm64" if img.arm else ("x86" if img.x32 else "x86-64")
+    names = _symbol_names(img)
     hits = []
     for fva, size in img.functions():
+        if _is_benign_interp(names.get(fva)):               # gimli/unwinder/etc. -- an interpreter,
+            continue                                         # but not code virtualization
         top, jmptab, byteload = _scan_function(img, fva, size)
         is_vm, conf, reason = _classify(top, jmptab, byteload)
         if is_vm:
