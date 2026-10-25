@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT / "premium"))
 CALLFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_call.x64"
 OBFFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_obf.x64"
 NESTFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_nested.x64"
+ARM64FIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_arm64.so"
 
 
 def _syms(fix):
@@ -189,6 +190,28 @@ def test_emulation_recovers_nested_loops_and_structures_the_inner_while():
     # remaining limit and stays goto.
     fm = "\n".join(devirt_emulate.recover(NESTFIX, s["find_mix"])["pseudocode"])
     assert fm.count("while (1)") >= 1, "find_mix's inner multi-exit loop should fold to a while-loop"
+
+
+@pytest.mark.skipif(not ARM64FIX.is_file(), reason="fixture missing")
+def test_vm_devirt_declines_non_x86_64_gracefully():
+    """Arch/format matrix. The VM devirtualizer -- static lifter and emulation alike -- is x86-64
+    only: its Unicorn trace and its dispatch patterns are x86-specific. On a non-x86-64 image it must
+    *decline cleanly* (recover -> None, lift -> nothing), never crash or emit a wrong result. This
+    pins that on a real AArch64 ELF carrying RustCloak-virtualized functions (mix/fold64/crc_ish):
+    lief loads it, Image flags it AArch64, and every recovery path returns empty -- fast, no Unicorn
+    run. (A PE / Windows target needs a realistic fixture built on the Windows VM; a freestanding
+    cloud-built DLL has no .pdata, so the loader finds no functions to even attempt.)"""
+    import devirt_emulate
+    import lift_vm
+    from recover_emulate import Image
+    img = Image(str(ARM64FIX))
+    assert img.arm and not img.x32 and img.fmt == "ELF"
+    syms = _syms(ARM64FIX)
+    for fn in ("mix", "fold64", "crc_ish"):
+        if fn in syms:
+            assert devirt_emulate.recover(ARM64FIX, syms[fn]) is None, f"{fn} must be declined on arm64"
+    assert lift_vm.lift(ARM64FIX)["lifted"] == []
+    assert devirt_emulate.recover_all(ARM64FIX)["count"] == 0
 
 
 @pytest.mark.skipif(not CALLFIX.is_file(), reason="fixture missing")

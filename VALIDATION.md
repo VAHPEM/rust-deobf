@@ -1899,3 +1899,32 @@ merely multi-block. The real gap is **multi-exit** and **multi-latch** *reducibl
 and a multi-latch loop stay as `goto`; both need a merge-aware layout that does not sacrifice loop
 contiguity. Genuine irreducibility (absent here) needs node-splitting or a dispatch block. These are
 the next steps for a full Relooper.
+
+## 44. Arch / format matrix for the VM-devirtualization capabilities (Oct 2026)
+
+The session's new capabilities (emulation-based devirtualization, the branchless-select detector, the
+argument-width map, the relooper) were exercised only on x86-64 ELF. Extending the matrix the
+toolkit promises (x86-64 / ARM64 / x86-32, ELF / PE / Mach-O), the honest result:
+
+- **x86-64 ELF** -- fully supported (every fixture: the call, obfuscated-interpreter, and nested-loop
+  builds). This is the validated path.
+- **AArch64 (ARM64) ELF** -- the VM devirtualizer is x86-64 only *by design*: `devirt_emulate.recover`
+  and `lift_vm.lift` both guard on `img.arm` / `img.x32` and bail. Confirmed on a real AArch64 ELF
+  carrying RustCloak-virtualized functions (`tests/fixtures/vm/rustcloak_vm_arm64.so`, cross-built
+  with `clang -target aarch64-linux-gnu` + the VM pass): `lief` loads it, `Image` flags it AArch64,
+  and every recovery path returns empty in ~3 ms with no Unicorn run -- a clean decline, never a crash
+  or a wrong result. Pinned by a test. (Note: the relooper itself is arch-agnostic -- it structures
+  whatever program the recovery produces -- but no ARM64 *recovery* feeds it today.)
+- **x86-64 PE** -- `Image` (lief) loads a PE32+ DLL and reads its exports, but a PE that can be built
+  **in the cloud** is degenerate: freestanding, no `.pdata`, no CRT (there is no Windows SDK /
+  mingw here, only `lld-link`). The emulation loader finds *no* functions in such a DLL (function
+  starts come from `.pdata` / symbols) and even an explicit export VA traces nothing, so the
+  emulation path could not be fairly exercised on PE in-cloud. A realistic PE fixture (with `.pdata`
+  and a CRT) must be built on the **Windows VM** per the project's test-matrix rule; that is the
+  remaining matrix gap, not a confirmed limitation of the analysis itself.
+- **x86-32 ELF/PE, Mach-O** -- not exercised this session; x86-32 is declined by the same guard as
+  ARM64, and Mach-O loads via `lief` but the VM devirt path is still x86-64-gated.
+
+Discipline note (measure, don't assume): the above states exactly what was tested on which target and
+what was not. The ARM64 decline is measured and pinned; PE and the rest are called out as untested
+in-cloud rather than presumed to work.
