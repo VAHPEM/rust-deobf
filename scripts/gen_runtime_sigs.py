@@ -93,6 +93,23 @@ def matches(pattern: str, data: bytes) -> bool:
     return True
 
 
+def sym_va(binary, sym):
+    """A symbol's address in the binary's own terms -- the space .text VAs are measured in.
+    ELF/Mach-O symbol values are already VAs/RVAs. A PE COFF symbol value is an offset from the
+    START OF ITS SECTION, so it must be added to that section's RVA (section_idx is 1-based into
+    the section table); used as an RVA directly it is low by the section's RVA (0x1000 for .text),
+    which shifted every PE function start and broke library-function identification on PE."""
+    if binary.format.name == "PE":
+        if getattr(sym, "is_absolute", False) or getattr(sym, "is_undefined", False):
+            return None
+        idx = getattr(sym, "section_idx", 0)
+        secs = binary.sections
+        if not (1 <= idx <= len(secs)):
+            return None
+        return secs[idx - 1].virtual_address + sym.value
+    return sym.value
+
+
 def function_starts(binary):
     import recover_emulate as E
     starts = set(E._eh_frame_starts(binary))
@@ -105,7 +122,18 @@ def function_starts(binary):
             lo, hi = text.virtual_address, text.virtual_address + text.size
             starts.update(s.value for s in binary.symbols if lo <= s.value < hi)
     else:
-        starts.update(s.value for s in binary.symbols if s.value and getattr(s, "is_function", False))
+        if binary.format.name == "PE":
+            # a STRIPPED PE has no COFF symbols and no .eh_frame; its .pdata lists every non-leaf
+            # function (RUNTIME_FUNCTION), which is how function starts are found there at all
+            text = next((x for x in binary.sections if x.name == ".text"), None)
+            if text is not None:
+                code = bytes(text.content)
+                starts.update(begin for begin, _sz in E.pdata_ranges(binary, code, text.virtual_address))
+        for s in binary.symbols:                   # unstripped: COFF (PE) / ELF symbols too
+            if getattr(s, "is_function", False):
+                va = sym_va(binary, s)
+                if va:
+                    starts.add(va)
     return starts
 
 
@@ -120,19 +148,20 @@ def generate(paths):
         code, base = bytes(text.content), text.virtual_address
         starts = function_starts(b)
         for sym in b.symbols:
-            if sym.name not in TARGETS or not sym.value or not base <= sym.value < base + len(code):
+            va = sym_va(b, sym)
+            if sym.name not in TARGETS or not va or not base <= va < base + len(code):
                 continue
             size = sym.size or SIG_LEN
             if size < 16:
                 continue                      # a 4-byte `b impl` alias: sign the implementation
             n = min(SIG_LEN, size)
-            off = sym.value - base
-            pat = mask(code[off:off + n], sym.value, arch)
+            off = va - base
+            pat = mask(code[off:off + n], va, arch)
             if pat.count("..") > len(pat) // 4:
                 continue
             hits = [a for a in starts if base <= a < base + len(code)
                     and matches(pat, code[a - base:a - base + n])]
-            if hits != [sym.value]:
+            if hits != [va]:
                 continue                      # not unique in this build
             key = (arch, TARGETS[sym.name], pat)
             seen.setdefault(key, set()).add(str(p))

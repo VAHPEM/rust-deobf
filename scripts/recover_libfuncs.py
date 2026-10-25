@@ -210,7 +210,8 @@ def generate(paths):
         per_group.setdefault((tool, arch), 0)
         per_group[(tool, arch)] += 1
         for sym in b.symbols:
-            if not sym.value or not (base <= sym.value < base + len(code)):
+            va = G.sym_va(b, sym)             # PE COFF values are section-relative; sym_va -> RVA
+            if not va or not (base <= va < base + len(code)):
                 continue
             if not macho and not getattr(sym, "is_function", False):
                 continue
@@ -221,14 +222,14 @@ def generate(paths):
             if size < MIN_SIZE:
                 continue
             n = min(SIG_LEN, size)
-            off = sym.value - base
-            pat = G.mask(code[off:off + n], sym.value, arch)
+            off = va - base
+            pat = G.mask(code[off:off + n], va, arch)
             if pat.count("..") > len(pat) * MAX_WILDCARD:
                 continue
             # unique function start in this build
             hits = [a for a in starts if base <= a < base + len(code)
                     and G.matches(pat, code[a - base:a - base + n])]
-            if hits != [sym.value]:
+            if hits != [va]:
                 continue
             name = readable(nm)
             key = (tool, arch, name, pat)
