@@ -62,6 +62,12 @@ _VALUE_VECTORS = [
     [0x1122334455667788, 0x00000000000000aa, 0x0f0f0f0f0f0f0f0f, 3, 5, 7],
     [0xdeadbeefcafef00d, 0x0123456789abcdef, 0xfedcba9876543210, 9, 11, 13],
     [0x8000000000000001, 0x7fffffffffffffff, 0x5555555555555555, 2, 4, 6],
+    # small-magnitude vectors: whichever argument is a loop count stays small so the function
+    # terminates, giving every instruction -- including run-once preamble ops -- several samples to
+    # disambiguate its operation. Overlapping low bits keep OR/ADD/XOR distinguishable.
+    [0x3b, 0x17, 0x2d, 0x1f, 0x29, 0x35],
+    [0x51, 0x3a, 0x6c, 0x27, 0x4e, 0x19],
+    [0x7, 0xd, 0xb, 0x13, 0x25, 0x11],
 ]
 _SCRATCH = 0x20000000
 _SCRATCH_SIZE = 0x400000
@@ -113,9 +119,11 @@ def _trace(img, fva, size, args, cap=400_000):
 
     stk_lo, stk_hi = STACK, STACK + STACK_SIZE
     events = []
+    returned = [False]
 
     def on_code(uc, address, sz, _):
         if address == _RETADDR:
+            returned[0] = True
             uc.emu_stop()
             return
         events.append(("c", address, sz, 0))
@@ -136,7 +144,11 @@ def _trace(img, fva, size, args, cap=400_000):
     retval = None
     try:
         uc.emu_start(fva, _RETADDR, count=cap)
-        retval = uc.reg_read(X.UC_X86_REG_RAX) & _M64
+        # a clean return reaches the sentinel address (emu_start's `until`); a budget-capped run
+        # stops elsewhere mid-execution. Only trust RAX when we actually returned.
+        if uc.reg_read(X.UC_X86_REG_RIP) == _RETADDR:
+            returned[0] = True
+            retval = uc.reg_read(X.UC_X86_REG_RAX) & _M64
     except UcError:
         pass
 
@@ -181,7 +193,7 @@ def _trace(img, fva, size, args, cap=400_000):
             cur["loads"].append((addr, sz, v))               # a dereference: LOAD
         elif k == "w" and not (stk_lo <= addr < stk_hi):
             cur["stores"].append((addr, sz, v))              # a dereference: STORE
-    return blob_lo, reg_base, instrs, retval
+    return blob_lo, reg_base, instrs, (retval if returned[0] else None)
 
 
 def _rodata(img, va):
@@ -258,68 +270,226 @@ def recover(path: Path, fva: int, size: int | None = None) -> dict | None:
     if size is None:
         size = next((s for f, s in img.functions() if f == fva), 0x400)
 
-    runs = []                                                # (args, instrs, retval)
+    groups = [("value", _VALUE_VECTORS), ("ptr", [_ptr_args(pv) for pv in _PTR_VECTORS])]
+    raw = []                                                 # (group, args, instrs, retval, reg_base)
     blob_lo = None
-    for args in _VALUE_VECTORS + [_ptr_args(pv) for pv in _PTR_VECTORS]:
-        bl, rb, instrs, ret = _trace(img, fva, size, args)
-        if instrs:
-            blob_lo = bl
-            runs.append((args, instrs, ret))
-    if not runs:
+    for gname, vecs in groups:
+        for args in vecs:
+            bl, rb, instrs, ret = _trace(img, fva, size, args)
+            if instrs:
+                blob_lo = bl
+                raw.append((gname, args, instrs, ret, rb))
+    if not raw:
         return None
 
-    nreg = max((ins["dst"] for _, r, _ in runs for ins in r if ins["dst"] is not None), default=0) + 1
+    # The reg file sits at fixed absolute addresses (RSP is set identically each run), but each run's
+    # reg_base was taken as its own lowest *written* slot, which varies by path. Normalize every run's
+    # register indices to one global base so the same instruction has the same indices across runs.
+    gbase = min(rb for *_, rb in raw)
+    norm = {"value": [], "ptr": []}
+    for gname, args, instrs, ret, rb in raw:
+        sh = (rb - gbase) // 8
+        if sh:
+            for ins in instrs:
+                if ins["dst"] is not None:
+                    ins["dst"] += sh
+                ins["srcs"] = [(i + sh, v) for i, v in ins["srcs"]]
+                ins["regvals"] = {i + sh: v for i, v in ins["regvals"].items()}
+        norm[gname].append((args, instrs, ret))
 
-    def regs(srcs):
-        return {si: v for si, v in srcs if 0 <= si < nreg}
+    # Reconstruct per argument-type group (a scalar function run with pointer args, or a pointer
+    # function run with scalar args, executes a different/garbage path -- never mix the two). Within a
+    # group only cleanly-returning runs are trustworthy (a budget-capped run stopped mid-loop). Return
+    # the first group whose reconstruction verifies.
+    for gname in ("value", "ptr"):
+        clean = [(a, ins, r) for a, ins, r in norm[gname] if r is not None]
+        if not clean:
+            continue
+        result = _attempt(clean, blob_lo, img)
+        if result is not None:
+            return result
+    return None
 
+
+def _attempt(clean, blob_lo, img):
+    """Reconstruct from one group of cleanly-returning runs and verify. Returns a lift_region dict or
+    None. Reconstruction reads each instruction's op/width/operands off the observations (no global
+    operand key); the verifier re-executes the program and must reproduce every run's return value and
+    memory writes, so nothing unverified is emitted."""
+    nreg = max((ins["dst"] for _, r, _ in clean for ins in r if ins["dst"] is not None), default=0) + 1
     by_off = {}
-    for _, instrs, _ in runs:
+    for _, instrs, _ in clean:
         for ins in instrs:
             by_off.setdefault(ins["off"], []).append(ins)
-    blob = lift_vm._read_va(img, blob_lo, max(by_off) + 8)
-
-    kd = _solve_kd(blob, by_off, nreg)
-    ka, kb = _solve_kab(blob, by_off, regs)
-    if kd is None or ka is None:
+    recon = _reconstruct(clean, by_off, nreg)
+    if recon is None:
         return None
-    key = (kd, ka, kb)
-
-    bytemap, idxpool = {}, {}
-    for off, occ in sorted(by_off.items()):
-        base, poolval = _classify_offset(occ, blob, off, key, nreg)
-        if base is None:
-            continue
-        bytemap[blob[off]] = base
-        if base == 1 and poolval is not None:
-            idxpool[(blob[off + 2] ^ ka) | ((blob[off + 3] ^ kb) << 8)] = poolval & _M64
-    pool = [idxpool.get(i, 0) for i in range(max(idxpool) + 1)] if idxpool else None
-
-    prog = lift_vm._decode_map(blob, bytemap, key, None)
-    if not prog:
-        return None
-    # correctness gate: re-execute the recovered program in the Python VM for every input vector that
-    # cleanly returned under emulation, and require it to reproduce the observed return value AND the
-    # observed memory writes. Refuse (None) on any mismatch or unmodelled op, so we never emit wrong C.
+    prog, bytemap, pool = recon
     idx_of = {p[0]: i for i, p in enumerate(prog)}
     checked = 0
-    for args, instrs, ret in runs:
-        if instrs[-1]["next"] is not None:                   # run hit the instruction budget, not a RET
-            continue
-        observed_stores = [s for ins in instrs for s in ins["stores"]]
-        res = _vm_exec(prog, bytemap, key, pool, idx_of, args)
+    for args, instrs, ret in clean:
+        res = _vm_exec(prog, bytemap, None, pool, idx_of, args)
         if res is None:
             return None
         rv, mem = res
         if ret is not None and rv is not None and (rv & _M64) != (ret & _M64) \
                 and (rv & 0xffffffff) != (ret & 0xffffffff):
             return None
-        if not _mem_agrees(mem, observed_stores):
+        if not _mem_agrees(mem, [s for ins in instrs for s in ins["stores"]]):
             return None
         checked += 1
     if not checked:
         return None
     return lift_vm.lift_region(blob_lo, prog, bytemap, pool, None)
+
+
+_WC = {8: 0, 16: 1, 32: 2, 64: 3}
+
+
+def _reconstruct(runs, by_off, nreg):
+    """Build (prog, bytemap, pool) from the observed execution alone. Each bytecode offset becomes
+    one instruction whose operands are the observed reg-file indices; operand bytes are synthesized
+    (op byte = width<<6 | logical) so lift_region renders without any key."""
+    def regs(srcs):
+        return [(i, v) for i, v in srcs if 0 <= i < nreg]
+
+    entries, pool, poolidx = {}, [], {}
+    for off, occ in sorted(by_off.items()):
+        s0 = occ[0]
+        nexts = [o["next"] for o in occ if o["next"] is not None]
+        seq = off + 4
+        jumped = [n for n in nexts if n != seq]
+
+        if any(o["stores"] for o in occ):
+            r = _mem_op(occ, regs, store=True)
+            if r is None:
+                return None
+            a, b, w = r
+            entries[off] = (33, w, 0, a, b)
+        elif any(o["loads"] for o in occ) and s0["dst"] is not None:
+            r = _mem_op(occ, regs, store=False)
+            if r is None:
+                return None
+            a, w, dst = r
+            entries[off] = (32, w, dst, a, 0)
+        elif s0["dst"] is None:
+            if jumped:
+                tgt = jumped[0]
+                if seq in nexts:                             # conditional branch
+                    jb = _branch_kind(occ, regs, seq)
+                    if jb is None:
+                        return None
+                    base, cond = jb
+                    entries[off] = (base, 64, cond, tgt & 0xff, (tgt >> 8) & 0xff)
+                else:                                        # unconditional jump
+                    entries[off] = (28, 64, 0, tgt & 0xff, (tgt >> 8) & 0xff)
+            else:
+                entries[off] = (0, 64, 0, _ret_reg(occ, runs, off, regs), 0)   # RET
+        else:
+            rd = regs(s0["srcs"])
+            if not rd:                                       # wrote a reg, read none -> CONST
+                val = s0["result"]
+                if val is None:
+                    return None
+                if val not in poolidx:
+                    poolidx[val] = len(pool)
+                    pool.append(val & _M64)
+                idx = poolidx[val]
+                entries[off] = (1, 64, s0["dst"], idx & 0xff, (idx >> 8) & 0xff)
+            else:
+                r = _arith(occ, regs)
+                if r is not None:
+                    op, w, a, b = r
+                    entries[off] = (op, w, s0["dst"], a, b)
+                elif len({i for i, _ in rd}) == 1:           # single source -> MOV
+                    entries[off] = (26, 64, s0["dst"], rd[0][0], 0)
+                else:
+                    return None
+
+    prog, bytemap = [], {}
+    for off in sorted(entries):
+        logical, w, dst, a, b = entries[off]
+        ob = (_WC.get(w, 3) << 6) | logical
+        bytemap[ob] = logical
+        prog.append((off, ob, dst, a, b))
+    return prog, bytemap, (pool or None)
+
+
+def _arith(occ, regs):
+    """Infer (op, width, a_idx, b_idx) for an arithmetic instruction from the observed source values
+    and result across occurrences: the ordered operand pair and width whose value relation holds."""
+    data = [(dict(regs(o["srcs"])), o["result"]) for o in occ if o["result"] is not None]
+    data = [(rd, res) for rd, res in data if rd]
+    if not data:
+        return None
+    slots = sorted({i for rd, _ in data for i in rd})
+    # widest first: a genuine 32-bit op rejects width 64 (its zero-extended result loses the carry a
+    # 64-bit relation would keep), while a 64-bit op would spuriously match at 32 on its low half.
+    for w in (64, 32, 16, 8):
+        m = (1 << w) - 1
+        for a in slots:
+            for b in slots:
+                sub = [(rd, res) for rd, res in data if a in rd and b in rd]
+                if len(sub) < max(2, len(data) // 2):        # enough evidence, not a stray pair
+                    continue
+                for op in _BINOPS + (_DIVOPS if len(sub) >= 3 else []):
+                    if all((_rel(op, rd[a] & m, rd[b] & m, m)) ==
+                           (res if op in _CMPOPS else res & m) for rd, res in sub):
+                        return op, w, a, b
+    return None
+
+
+def _mem_op(occ, regs, store):
+    """A LOAD/STORE: match the dereferenced address (and stored value) to the register holding it."""
+    for o in occ:
+        rd = dict(regs(o["srcs"]))
+        acc = o["stores"] if store else o["loads"]
+        if not acc:
+            continue
+        addr, sz, val = acc[0]
+        a = next((i for i, v in rd.items() if v == addr), None)
+        if a is None:
+            continue
+        if store:
+            m = (1 << (8 * sz)) - 1
+            b = next((i for i, v in rd.items() if (v & m) == (val & m)), None)
+            return a, (b if b is not None else 0), sz * 8
+        if o["dst"] is not None:
+            return a, sz * 8, o["dst"]
+    return None
+
+
+def _branch_kind(occ, regs, seq):
+    """Decide JZ vs JNZ and the condition register from whether the branch was taken when the
+    observed condition register was zero."""
+    votes = {29: 0, 30: 0}
+    cond_idx = None
+    for o in occ:
+        if o["next"] is None:
+            continue
+        rd = dict(regs(o["srcs"]))
+        if not rd:
+            continue
+        ci = next(iter(rd))
+        cond_idx = ci
+        took = o["next"] != seq
+        votes[29 if (took == (rd[ci] == 0)) else 30] += 1
+    if cond_idx is None:
+        return None
+    return (29 if votes[29] >= votes[30] else 30), cond_idx
+
+
+def _ret_reg(occ, runs, off, regs):
+    """The register a RET returns: the source whose value equals the function's observed return."""
+    for args, instrs, ret in runs:
+        if ret is None or instrs[-1]["off"] != off:
+            continue
+        rd = dict(regs(instrs[-1]["srcs"]))
+        a = next((i for i, v in rd.items() if (v & 0xffffffff) == (ret & 0xffffffff) or v == ret), None)
+        if a is not None:
+            return a
+    rd = dict(regs(occ[0]["srcs"]))
+    return next(iter(rd), 0) if rd else 0
 
 
 def _classify_offset(occ, blob, off, key, nreg):

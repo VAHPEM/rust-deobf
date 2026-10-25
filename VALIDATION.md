@@ -1592,3 +1592,36 @@ needs per-instruction operand recovery (resolve each instruction's operands from
 rather than a global key), which is the next step -- and it is the same precision the
 interpreter-obfuscated round-13 target needs. Until then the module stays strictly safe: it lifts
 what it can verify and refuses the rest.
+
+## 34. Emulation: key-free observation-based reconstruction (premium) (Oct 2026)
+
+Replaces the emulation devirtualizer's opcode-map/key recovery with a cleaner model that reads each
+instruction's logical op, width and operand register *indices* straight off the observed execution:
+
+- register indices are normalized to one global reg-file base across runs (the base is fixed by a
+  deterministic stack, but each run's lowest *written* slot varies);
+- each instruction's op/width/operand order is inferred from the observed source values and result
+  (widest width first, so a 64-bit op is not mistaken for a 32-bit one on its low half);
+- control-flow ops come from the observed next-fetch offset, memory ops from dereferences, CONST from
+  a reg written with no reg reads (value observed directly);
+- reconstruction runs per argument-type group (value vs pointer vectors) using only cleanly-returning
+  runs, so a scalar function fed pointer args -- or a capped run that never returned -- cannot
+  pollute it;
+- operand *bytes* are synthesized so the core `lift_region` renders directly, with no global
+  operand-encryption key to get wrong (a read-modify-write op no longer breaks a function).
+
+This removes the single-global-key fragility of section 33 and now devirtualizes `mix` through
+emulation as well as `fold64`, both self-verified.
+
+**Validated.** fold64 and mix devirtualize and verify through emulation; combined `recover_all`
+covers mix/check/wrap (static) plus fold64 (emulation). Full suite green.
+
+**Honest limits — still not full coverage.** The loop/memory functions (`crc_ish`, `sum_mix`, `roll`,
+`decode`) are still *refused*, not lifted. Reconstruction now classifies all their opcodes, but
+control-flow reconstruction from a dynamic trace is not yet correct for them -- branch instructions
+are sometimes mis-identified as returns, and some operands in branchy code are mis-recovered, so the
+Python-VM verifier (which re-executes the recovered program and compares return value and memory
+writes) rejects the result. This keeps the module strictly safe (it emits only what it can verify)
+but means branchy loop functions remain the open item: the control-flow recovery needs the branch /
+return / back-edge distinction made robust before these verify. That precision is the same thing the
+round-13 obfuscated-interpreter target will need.
