@@ -295,7 +295,7 @@ the function's exact source. Control-flow bodies are raised from `if/goto` towar
 `do/while` + `if` where the flow is reducible (an `-O2`-unrolled loop nest is left as `if/goto`).
 x86-64; recovery is demonstrated end-to-end on a function, with full per-binary coverage ongoing.
 
-`premium/llm_triage.py <binary>` (premium — AGPL/commercial) adds an **AI-assisted** read on top: it hands *only* the
+`scripts/llm_triage.py <binary>` adds an **AI-assisted** read on top: it hands *only* the
 deterministically recovered facts (the triage card above — never the raw binary) to an LLM and asks
 for a grounded verdict, likely capabilities tied to the evidence, candidate ATT&CK techniques, what
 is uncertain, and next steps. The deterministic facts stay ground truth; the LLM note is a clearly

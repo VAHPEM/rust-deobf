@@ -1716,3 +1716,26 @@ the dynamic, observe-what-it-computes approach wins over static pattern-matching
 both builds; a relooper for unrolled/irreducible control flow is the remaining item. `decode` is not
 virtualized in either build (auto-vectorized), so it is correctly declined. `check`/`wrap` are
 recovered by the static lifter on the clean build and are not emulation targets.
+
+## 38. Premium audit — `llm_triage` returns to the (Apache-2.0) core (Oct 2026)
+
+An honest pass over what sits in `premium/` and why. The dual-licensed tier should hold the deep,
+differentiated capabilities; anything that is a thin wrapper belongs in the core, where it doubles as
+a *produit d'appel* (an adoption draw) for a repo that is still building its audience.
+
+- **`devirt_emulate.py`** — strongest premium: §37 just showed it recovers where static analysis is
+  defeated outright. Core asset.
+- **`lift_vm.py`** — premium: reconstructing a randomized opcode map + operand-key + control flow is
+  genuinely hard and differentiated.
+- **`deobf_deflatten.py` / `deobf_cff.py`** — premium: OLLVM de-flattening and compare-tree recovery
+  are real advanced capabilities.
+- **`deobf_expr.py`** — kept premium, but on the strength of the VM/MBA story (§37), not as a
+  standalone Z3 wrapper.
+- **`llm_triage.py`** — **moved back to core.** It is a thin layer that hands the *already recovered*
+  deterministic facts to an LLM; it is not a deep capability, and `LICENSING.md` already describes the
+  triage pipeline as part of the free core. Keeping it premium read as padding. Its SPDX header is now
+  `Apache-2.0`; `scripts/llm_triage.py`. No code depended on its being premium (it imports only the
+  standard library, never a premium module), so the core's "never import premium" rule is preserved.
+
+Net: five modules remain premium (`lift_vm`, `devirt_emulate`, `deobf_deflatten`, `deobf_cff`,
+`deobf_expr` — the control-flow and VM analyses), and the triage layer is free.

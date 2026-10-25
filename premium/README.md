@@ -22,7 +22,6 @@ string/metadata recovery and triage that make the free tool useful; the deeper a
   compare-tree recovery) for OLLVM-style flattened functions, x86-64 and AArch64.
 - **`deobf_expr.py`** — simplifies Mixed Boolean-Arithmetic (MBA) and opaque predicates with the Z3
   SMT solver.
-- **`llm_triage.py`** — LLM-assisted triage layer over the recovered artifacts.
 
 All depend only on the Apache-2.0 core, never the reverse.
 
