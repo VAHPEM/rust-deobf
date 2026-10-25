@@ -25,6 +25,7 @@ unicorn = pytest.importorskip("unicorn")
 sys.path.insert(0, str(ROOT / "premium"))
 
 CALLFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_call.x64"
+OBFFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_obf.x64"
 
 
 def _syms(fix):
@@ -85,3 +86,28 @@ def test_combined_recover_all_adds_emulation_to_static():
     assert len(r["static"]) >= 3                         # mix, check, wrap via the static lifter
     assert len(r["emulated"]) >= 3                        # emulation adds fold64 + sum_mix + roll
     assert r["count"] >= 6                                # every virtualized function but crc_ish
+
+
+@pytest.mark.skipif(not OBFFIX.is_file(), reason="fixture missing")
+def test_emulation_sees_through_an_obfuscated_interpreter():
+    """Round 13: the VM's *interpreter* is itself obfuscated (the full RustCloak pipeline -- operand
+    decrypt turned to MBA, dispatch flattened, bogus flow). The static lifter pattern-matches the
+    dispatch's native code, so obfuscating that code defeats it entirely. Emulation instead *runs*
+    the interpreter and observes what it computes, so the same obfuscation is transparent to it.
+
+    Pins both halves: the static lifter recovers nothing on this build, and emulation still recovers
+    the virtualized functions -- each one self-verified by re-execution, so this is recovery, not a
+    plausible guess. The incoming arguments land in build-specific VM registers here (arg0 is not r0),
+    which is exactly what the observed argument-register map handles."""
+    import devirt_emulate
+    import lift_vm
+    assert len(lift_vm.lift(OBFFIX)["lifted"]) == 0, "static lifter should be defeated by obfuscation"
+    r = devirt_emulate.recover_all(OBFFIX)
+    assert len(r["static"]) == 0                          # confirm nothing came from the static path
+    assert len(r["emulated"]) >= 4                        # mix, fold64, sum_mix, roll via emulation
+    # mix is a pure 32-bit mixing function; its recovered body must reproduce the xor/multiply chain.
+    syms = _syms(OBFFIX)
+    mix = devirt_emulate.recover(OBFFIX, syms["mix"])
+    assert mix is not None, "emulation failed to recover mix through the obfuscated interpreter"
+    pc = "\n".join(mix["pseudocode"])
+    assert "^" in pc and "*" in pc                        # the mix's xor + multiply chain survived

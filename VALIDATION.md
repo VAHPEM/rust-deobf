@@ -1676,3 +1676,43 @@ dispatch), so the emulator correctly declines it -- there is nothing to devirtua
 opaque `r<=r` predicates); its reconstruction still does not verify and it is refused. A relooper for
 unrolled/irreducible control flow is the remaining item, pursued with the round-13
 obfuscated-interpreter target.
+
+## 37. Round 13 — devirtualizing through an *obfuscated interpreter* (Oct 2026)
+
+The hardest VM target: the interpreter is itself put through the full RustCloak pipeline
+(`RUSTCLOAK_VM=1` with no `RUSTCLOAK_OFF`, so `virt → subst → bogus → flatten + strenc` all run).
+The operand-decrypt becomes Mixed Boolean-Arithmetic (MBA, *arithmétique booléenne mixte*), the
+dispatch is flattened, and bogus control flow is sprinkled through every handler. Fixture:
+`tests/fixtures/vm/rustcloak_vm_obf.x64` (same eight functions as the clean VM fixture).
+
+**Static lifter: defeated, as expected.** `lift_vm.lift` pattern-matches the dispatch's *native*
+code — the opcode table, the operand-key XORs, the switch lowering. Obfuscating that native code is
+exactly what breaks the patterns: on this build the static lifter recovers **0** functions.
+
+**Emulation: sees straight through it.** `devirt_emulate` never looks at the handler's native code;
+it *runs* the interpreter under Unicorn and observes what each handler *computes* — the value
+relation (`result == a ^ b`, `a * b`, …), the reg-file slots read and written, the successor fetch
+offset. MBA and bogus flow change the native code, not the computed values, so they are transparent
+to this recovery. On the obfuscated build emulation recovers **mix, fold64, sum_mix and roll** (4),
+each self-verified by re-execution — recovery, not a plausible guess. `recover_all`: `static 0,
+emulated 4, count 4`, against `static 3, emulated 3, count 6` on the clean build (no regression).
+
+**The one bug this surfaced — the argument-register map.** The verifier re-executes the recovered
+program over the same inputs and checks the result. It had assumed VM register *i* holds function
+argument *i* (`reg[i] = args[i]`). That held on the clean build by luck of register allocation; the
+obfuscated build lays the arguments into *different* VM registers (here arg0 → r10, arg1 → r11, each
+narrowed to the parameter's 32-bit width), so the recovered program ran with its real inputs as
+zero and computed a consistent wrong value — the ops and operands were all correct, only the inputs
+were misplaced. Fix: `_arg_map` recovers the mapping by observation — a VM register read before it is
+ever written is an input, and its first observed value equals one argument (under some integer width)
+across *every* run; requiring the same argument index across all runs rules out a constant that
+coincidentally matches one run. `_vm_exec` then seeds the arguments into the right VM registers.
+
+This is the thesis of the emulation path made concrete: **obfuscating the interpreter buys nothing
+against an analyst who executes it** — the harder the native code is made to read, the more decisively
+the dynamic, observe-what-it-computes approach wins over static pattern-matching.
+
+**Honest limits — unchanged.** `crc_ish` (an `-O2`-unrolled irreducible loop) is still refused on
+both builds; a relooper for unrolled/irreducible control flow is the remaining item. `decode` is not
+virtualized in either build (auto-vectorized), so it is correctly declined. `check`/`wrap` are
+recovered by the static lifter on the clean build and are not emulation targets.

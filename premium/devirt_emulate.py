@@ -299,6 +299,40 @@ def recover(path: Path, fva: int, size: int | None = None) -> dict | None:
     return None
 
 
+def _arg_map(clean):
+    """Recover which VM register holds each incoming argument: {vm_reg -> arg_index}.
+
+    The interpreter copies the function's arguments into its register file by its own (build-specific)
+    convention -- arg0 need not land in r0. We find it by observation: a register that is read before
+    it is ever written is an input, and its first observed value equals one argument across every run.
+    Arguments are often narrowed to the parameter's C width (a uint32 arg appears as arg & 0xffffffff),
+    so we accept a match under any integer width. Requiring the SAME argument index across all runs
+    rules out a constant that coincidentally equals one run's argument."""
+    first = {}                                               # vm_reg -> [(value, args) per run]
+    for args, instrs, _ in clean:
+        seen = {}
+        for ins in instrs:
+            for i, v in ins["srcs"]:
+                seen.setdefault(i, v)                        # value at its first use (pre-overwrite)
+        for r, v in seen.items():
+            first.setdefault(r, []).append((v, args))
+    amap = {}
+    for r, rows in first.items():
+        if len(rows) < len(clean):                           # not read in every run -> not a clean input
+            continue
+        hit = None
+        for k in range(6):
+            if any(k >= len(a) for _, a in rows):
+                continue
+            # one width must explain the match in *every* run (a uint32 arg is always & 0xffffffff)
+            if any(all((v & m) == (a[k] & m) for v, a in rows)
+                   for m in (0xff, 0xffff, 0xffffffff, _M64)):
+                hit = k if hit is None else "amb"
+        if isinstance(hit, int):
+            amap[r] = hit
+    return amap
+
+
 def _attempt(group_raw, blob_lo, img):
     """Reconstruct from one argument-type group and verify. group_raw is [(args, instrs, ret, rb)].
     Normalizes register indices within the group (the reg file is at fixed addresses, but each run's
@@ -332,9 +366,10 @@ def _attempt(group_raw, blob_lo, img):
         return None
     prog, bytemap, pool = recon
     idx_of = {p[0]: i for i, p in enumerate(prog)}
+    argmap = _arg_map(clean)
     checked = 0
     for args, instrs, ret in clean:
-        res = _vm_exec(prog, bytemap, None, pool, idx_of, args)
+        res = _vm_exec(prog, bytemap, None, pool, idx_of, args, argmap=argmap)
         if res is None:
             return None
         rv, mem = res
@@ -387,17 +422,16 @@ def _reconstruct(runs, by_off, nreg):
         elif others and seq not in nn:                       # unconditional jump
             tgt = others[0]
             entries[off] = (28, 64, 0, tgt & 0xff, (tgt >> 8) & 0xff)
-        elif any(o["stores"] for o in occ):
-            r = _mem_op(occ, regs, store=True)
-            if r is None:
-                return None
-            a, b, w = r
+        # A genuine VM memory op dereferences a pointer *register* (its address equals a reg value).
+        # An obfuscated interpreter also touches memory incidentally (bogus flow, MBA constants); those
+        # addresses match no reg, so _mem_op returns None and we fall through to dataflow classification
+        # rather than mis-reading the instruction as a load/store.
+        elif any(o["stores"] for o in occ) and _mem_op(occ, regs, store=True) is not None:
+            a, b, w = _mem_op(occ, regs, store=True)
             entries[off] = (33, w, 0, a, b)
-        elif any(o["loads"] for o in occ) and s0["dst"] is not None:
-            r = _mem_op(occ, regs, store=False)
-            if r is None:
-                return None
-            a, w, dst = r
+        elif (s0["dst"] is not None and any(o["loads"] for o in occ)
+              and _mem_op(occ, regs, store=False) is not None):
+            a, w, dst = _mem_op(occ, regs, store=False)
             entries[off] = (32, w, dst, a, 0)
         elif s0["dst"] is None:
             continue                                         # sequential, no result: a no-op here
@@ -588,11 +622,22 @@ class _ScratchMem:
             self.ov[addr + i] = (val >> (8 * i)) & 0xff
 
 
-def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000):
+def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000, argmap=None):
     """Interpret the recovered program (register machine + control flow + memory) over args. Returns
-    (return_value_or_None, memory) or None if it hits an op it does not model (call/select/sext...)."""
+    (return_value_or_None, memory) or None if it hits an op it does not model (call/select/sext...).
+
+    `argmap` is {vm_reg -> argument_index}: which VM register holds each incoming argument, recovered
+    by observation. The interpreter lays its arguments into VM registers by its own convention (an
+    obfuscated build may put arg0 in r10, not r0), so seeding reg[i]=args[i] blindly feeds the program
+    zeros for its real inputs. When no map is supplied we fall back to that positional assumption."""
     import bisect
-    reg = {i: (args[i] & _M64 if i < len(args) else 0) for i in range(64)}
+    if argmap:
+        reg = {i: 0 for i in range(64)}
+        for vr, k in argmap.items():
+            if k < len(args):
+                reg[vr] = args[k] & _M64
+    else:
+        reg = {i: (args[i] & _M64 if i < len(args) else 0) for i in range(64)}
     mem = _ScratchMem()
     offs = [p[0] for p in prog]
 
