@@ -79,6 +79,12 @@ _PTR_VECTORS = [
     {"ptr": _SCRATCH + 0x1000, "counts": {1: 9, 2: 7, 3: 5}},
     {"ptr": _SCRATCH + 0x2000, "counts": {1: 6, 3: 4, 4: 8}},
     {"ptr": _SCRATCH + 0x3000, "counts": {2: 11, 3: 10}},
+    # single small lane so the other arguments stay valid pointers -- covers functions whose only
+    # scalar is the length (e.g. decode(out, ct, len, key): only arg 2 is the count, the rest point
+    # into buffers that get dereferenced).
+    {"ptr": _SCRATCH + 0x4000, "counts": {2: 7}},
+    {"ptr": _SCRATCH + 0x5000, "counts": {1: 6}},
+    {"ptr": _SCRATCH + 0x6000, "counts": {3: 9}},
 ]
 
 
@@ -273,23 +279,39 @@ def recover(path: Path, fva: int, size: int | None = None) -> dict | None:
         size = next((s for f, s in img.functions() if f == fva), 0x400)
 
     groups = [("value", _VALUE_VECTORS), ("ptr", [_ptr_args(pv) for pv in _PTR_VECTORS])]
-    raw = []                                                 # (group, args, instrs, retval, reg_base)
+    raw = {"value": [], "ptr": []}                           # group -> [(args, instrs, retval, rb)]
     blob_lo = None
     for gname, vecs in groups:
         for args in vecs:
             bl, rb, instrs, ret = _trace(img, fva, size, args)
             if instrs:
                 blob_lo = bl
-                raw.append((gname, args, instrs, ret, rb))
-    if not raw:
+                raw[gname].append((args, instrs, ret, rb))
+    if blob_lo is None:
         return None
 
-    # The reg file sits at fixed absolute addresses (RSP is set identically each run), but each run's
-    # reg_base was taken as its own lowest *written* slot, which varies by path. Normalize every run's
-    # register indices to one global base so the same instruction has the same indices across runs.
-    gbase = min(rb for *_, rb in raw)
-    norm = {"value": [], "ptr": []}
-    for gname, args, instrs, ret, rb in raw:
+    # Reconstruct per argument-type group (a scalar function run with pointer args, or vice versa,
+    # takes a different/garbage path -- never mix the two). Return the first group that verifies.
+    for gname in ("value", "ptr"):
+        result = _attempt(raw[gname], blob_lo, img)
+        if result is not None:
+            return result
+    return None
+
+
+def _attempt(group_raw, blob_lo, img):
+    """Reconstruct from one argument-type group and verify. group_raw is [(args, instrs, ret, rb)].
+    Normalizes register indices within the group (the reg file is at fixed addresses, but each run's
+    lowest written slot varies), keeps only cleanly-returning runs, reconstructs op/width/operands
+    from the observations (no global operand key), and re-executes to confirm every run's return
+    value and memory writes. Returns a lift_region dict or None -- nothing unverified is emitted."""
+    if not group_raw:
+        return None
+    gbase = min(rb for *_, rb in group_raw)                  # one base for this group's runs
+    clean = []
+    for args, instrs, ret, rb in group_raw:
+        if ret is None:                                      # did not cleanly return -> untrustworthy
+            continue
         sh = (rb - gbase) // 8
         if sh:
             for ins in instrs:
@@ -297,27 +319,9 @@ def recover(path: Path, fva: int, size: int | None = None) -> dict | None:
                     ins["dst"] += sh
                 ins["srcs"] = [(i + sh, v) for i, v in ins["srcs"]]
                 ins["regvals"] = {i + sh: v for i, v in ins["regvals"].items()}
-        norm[gname].append((args, instrs, ret))
-
-    # Reconstruct per argument-type group (a scalar function run with pointer args, or a pointer
-    # function run with scalar args, executes a different/garbage path -- never mix the two). Within a
-    # group only cleanly-returning runs are trustworthy (a budget-capped run stopped mid-loop). Return
-    # the first group whose reconstruction verifies.
-    for gname in ("value", "ptr"):
-        clean = [(a, ins, r) for a, ins, r in norm[gname] if r is not None]
-        if not clean:
-            continue
-        result = _attempt(clean, blob_lo, img)
-        if result is not None:
-            return result
-    return None
-
-
-def _attempt(clean, blob_lo, img):
-    """Reconstruct from one group of cleanly-returning runs and verify. Returns a lift_region dict or
-    None. Reconstruction reads each instruction's op/width/operands off the observations (no global
-    operand key); the verifier re-executes the program and must reproduce every run's return value and
-    memory writes, so nothing unverified is emitted."""
+        clean.append((args, instrs, ret))
+    if not clean:
+        return None
     nreg = max((ins["dst"] for _, r, _ in clean for ins in r if ins["dst"] is not None), default=0) + 1
     by_off = {}
     for _, instrs, _ in clean:
@@ -334,10 +338,14 @@ def _attempt(clean, blob_lo, img):
         if res is None:
             return None
         rv, mem = res
-        if ret is not None and rv is not None and (rv & _M64) != (ret & _M64) \
-                and (rv & 0xffffffff) != (ret & 0xffffffff):
+        stores = [s for ins in instrs for s in ins["stores"]]
+        # A function with memory writes is side-effecting: its output is those writes, and the value
+        # left in the return register may be void/garbage -- verify by memory then. A pure function
+        # (no writes) is verified by its return value.
+        if not _mem_agrees(mem, stores):
             return None
-        if not _mem_agrees(mem, [s for ins in instrs for s in ins["stores"]]):
+        if not stores and ret is not None and rv is not None \
+                and (rv & _M64) != (ret & _M64) and (rv & 0xffffffff) != (ret & 0xffffffff):
             return None
         checked += 1
     if not checked:
@@ -583,8 +591,19 @@ class _ScratchMem:
 def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000):
     """Interpret the recovered program (register machine + control flow + memory) over args. Returns
     (return_value_or_None, memory) or None if it hits an op it does not model (call/select/sext...)."""
+    import bisect
     reg = {i: (args[i] & _M64 if i < len(args) else 0) for i in range(64)}
     mem = _ScratchMem()
+    offs = [p[0] for p in prog]
+
+    def target(t):
+        # a branch target may be a skipped no-op (a never-taken branch); it falls through, so resolve
+        # to the first real instruction at or after it.
+        if t in idx_of:
+            return idx_of[t]
+        j = bisect.bisect_left(offs, t)
+        return j if j < len(prog) else None
+
     i = steps = 0
     while 0 <= i < len(prog) and steps < maxsteps:
         steps += 1
@@ -605,14 +624,14 @@ def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000):
         elif base == 33:
             mem.write(reg.get(a, 0), w, reg.get(b, 0) & m)
         elif base == 28:
-            i = idx_of.get(a | (b << 8))
+            i = target(a | (b << 8))
             if i is None:
                 return None
             continue
         elif base in (29, 30):
             take = (reg.get(dst, 0) == 0) if base == 29 else (reg.get(dst, 0) != 0)
             if take:
-                i = idx_of.get(a | (b << 8))
+                i = target(a | (b << 8))
                 if i is None:
                     return None
                 continue

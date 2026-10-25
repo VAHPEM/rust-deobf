@@ -83,5 +83,5 @@ def test_combined_recover_all_adds_emulation_to_static():
     import devirt_emulate
     r = devirt_emulate.recover_all(CALLFIX)
     assert len(r["static"]) >= 3                         # mix, check, wrap via the static lifter
-    assert len(r["emulated"]) >= 2                        # emulation adds fold64 + sum_mix
-    assert r["count"] >= 5                                # strictly more than static alone
+    assert len(r["emulated"]) >= 3                        # emulation adds fold64 + sum_mix + roll
+    assert r["count"] >= 6                                # every virtualized function but crc_ish

@@ -1653,3 +1653,26 @@ and sum_mix (emulation): 5 of the demo's functions, every one self-verified.
   observed stores.
 These, and the unrolled/irreducible relooping, are the remaining items -- pursued together with the
 round-13 obfuscated-interpreter target, which needs the same dynamic recovery.
+
+## 36. Emulation: store-loops close; coverage reaches every virtualized function but one (Oct 2026)
+
+Three fixes land the remaining memory loops:
+- a branch whose target is a skipped no-op (a never-taken branch that merely falls through) now
+  resolves to the next real instruction, instead of failing the verifier;
+- a side-effecting function (one with memory writes) is verified by its stores, not by the value
+  left in the return register, which for a `void` function is garbage;
+- per-argument-type normalization and a wider set of pointer input vectors (single-count-lane
+  variants) let a function whose only scalar is a length run with its real pointer arguments.
+
+With these, **roll** (a rolling-XOR that writes a buffer) and **sum_mix** (a buffer reducer) both
+devirtualize and verify, alongside fold64. `recover_all` now covers mix/check/wrap (static) plus
+fold64, sum_mix and roll (emulation) -- **every virtualized function in the demo except crc_ish**,
+each self-verified against its return value and/or its memory writes.
+
+Note: `decode` is *not virtualized* in the build (the compiler auto-vectorized it; it has no VM
+dispatch), so the emulator correctly declines it -- there is nothing to devirtualize.
+
+**Honest limit — one holdout.** `crc_ish` is `-O2`-unrolled into an irreducible CFG (odd/even split,
+opaque `r<=r` predicates); its reconstruction still does not verify and it is refused. A relooper for
+unrolled/irreducible control flow is the remaining item, pursued with the round-13
+obfuscated-interpreter target.
