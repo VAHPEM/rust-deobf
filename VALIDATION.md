@@ -1396,3 +1396,38 @@ wrong -- conservative by design). Hardening the recovery to full coverage, raisi
 VM-assembly to C/pseudocode (re-SSA + expression folding + pool-value resolution), and the AArch64
 dispatch are the open items. On the red side: virtualizing calls and global references, and bytecode
 whose operand encoding (not just the opcodes) is also per-build encrypted.
+
+## 29. Round 10: operand encryption (RustCloak) ↔ operand-key recovery + pseudocode (rust-deobf) (Oct 2026)
+
+**RED -- per-build operand encryption (RustCloak).** Round 4 shuffled the opcode bytes; round 5 also
+XOR-encrypts the three operand bytes (dst, a, b) with a per-build/per-function key, so the whole
+4-byte instruction -- register indices, pool indices and branch targets -- is build-specific. The
+opcode stays permuted (not XORed); the interpreter decrypts each operand right after fetch.
+Encoding-only: byte-identical to native on x86-64 and AArch64 over the 20,000-iteration buffer
+stress fold, across seeds. It defeats the round-9 lifter's operand decoding (the opcode map is still
+recovered, but the register/pool indices come out scrambled).
+
+**BLUE -- operand-key recovery and C/pseudocode (rust-deobf).** Two advances:
+1. *Operand key.* The lifter recovers the XOR key (kd, ka, kb) from the interpreter -- the three
+   `xor reg, IMM` that follow the operand fetches -- and decrypts the operands while decoding, so the
+   register and pool indices come back correct.
+2. *Pseudocode.* It raises the recovered VM-assembly to C: it resolves the constant pool (reading the
+   i64 pool the CONST handler's rip-relative `lea` points at), and for a straight-line function --
+   whose VM registers are each assigned once -- folds every temporary into one nested expression,
+   naming the inputs a0, a1, ... End to end on a build with **randomized opcodes AND encrypted
+   operands**, `check()` comes back as
+   `return (((a0 > 1000) & (((((a0 * 31) + a1) ^ (a0 >> 3)) % 97) == 0)) ? (a1 + a0) : 0xffffffff);`
+   -- its exact source, constants and all. A function with control flow is emitted as flat C
+   statements with labels and `if/goto` (correct, less pretty).
+
+**Validated.** `tests/test_lift_vm.py` (committed operand-encrypted fixture): the opcode map *and*
+the operand key are recovered and `check()`'s operation set reconstructed; and the pseudocode comes
+back as readable C with the real constants (`* 31`, `% 97`, `> 1000`, the `>> 3` shift and the
+select). Full suite green (85 passed). Verified on the x86-64 container and the Kali AArch64 VM.
+
+**Honest limits / next rounds.** Coverage: the opcode-map + operand-key + pool recovery is robust
+enough to lift a function end to end to C, but the per-function dispatch/key parser does not yet
+handle every register-allocation variant the compiler emits, so some functions in a binary are
+skipped rather than lifted wrong (conservative). Hardening that parser to full per-binary coverage,
+structuring control-flow pseudocode into real `if`/`while` (rather than `if/goto`), and the AArch64
+lift are the open BLUE items; virtualizing calls and global references remain the open RED items.

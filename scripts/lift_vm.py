@@ -148,6 +148,35 @@ def _alias32(r):
     return r + "d" if re.match(r"r\d+$", r) else r
 
 
+def _alias64(r):
+    m = {"eax": "rax", "ebx": "rbx", "ecx": "rcx", "edx": "rdx",
+         "esi": "rsi", "edi": "rdi", "ebp": "rbp", "esp": "rsp"}
+    if r in m:
+        return m[r]
+    return r[:-1] if re.match(r"r\d+d$", r) else r
+
+
+def _recover_operand_key(lines):
+    """RustCloak XOR-encrypts the three operand bytes (dst,a,b) with a per-build key; the interpreter
+    decrypts each with `xor reg, IMM` right after fetching it. Recover (kd, ka, kb). The opcode byte
+    (at [ptr-3]) is not encrypted; dst=[ptr-2], a=[ptr-1], b=[ptr-0]."""
+    key = {2: 0, 1: 0, 0: 0}                                  # offset-from-ptr -> key byte
+    for i, ins in enumerate(lines):
+        m = re.match(r"movzx (\w+), byte ptr \[\w+( - ([0-3]))?\]$", ins.mnemonic + " " + ins.op_str)
+        if not m:
+            continue
+        k = int(m.group(3)) if m.group(3) else 0
+        if k not in (0, 1, 2):
+            continue
+        reg = m.group(1)
+        for j in range(i + 1, min(i + 4, len(lines))):
+            x = re.match(r"xor (\w+), (0x[0-9a-fA-F]+)$", lines[j].mnemonic + " " + lines[j].op_str)
+            if x and x.group(1) in (reg, _alias64(reg)):
+                key[k] = int(x.group(2), 16) & 0xff
+                break
+    return (key[2], key[1], key[0])                           # (kd, ka, kb)
+
+
 def _recover_map(img, fva, size, text_lo, text_hi):
     """Recover this function's opcode-byte -> logical-op map by parsing its dispatch jump table
     (`lea base,[rip+T]; add idx,-min; cmp idx,N; movsxd r,[base+idx*4]; add r,base; jmp r`) and
@@ -202,25 +231,35 @@ def _recover_map(img, fva, size, text_lo, text_hi):
     if not cnt:
         return None
     default = cnt.most_common(1)[0][0]
-    bytemap = {}
+    bytemap, pool_va = {}, None
     for byte in range(minv, minv + extent):
         h = resolve(byte)
         if h is None or h == default:
             continue
         base = _classify_handler(img, h, text_lo, text_hi)
-        if base is not None:
-            bytemap[byte] = base
-    return bytemap
+        if base is None:
+            continue
+        bytemap[byte] = base
+        if base == 1 and pool_va is None:                   # CONST handler: its rip-lea is the pool
+            ho = h - img.text_va
+            for ins in img.md.disasm(bytes(img.code[ho:ho + 64]), h):
+                lm = re.match(r"lea \w+, \[rip \+ (0x[0-9a-f]+)\]", ins.mnemonic + " " + ins.op_str)
+                if lm:
+                    pool_va = ins.address + ins.size + int(lm.group(1), 16)
+                    break
+    return bytemap, _recover_operand_key(lines), pool_va
 
 
-def _decode_map(blob, bytemap):
-    """Decode a blob using a recovered byte->base map (same structural checks as _decode)."""
+def _decode_map(blob, bytemap, key=(0, 0, 0)):
+    """Decode a blob using a recovered byte->base map, decrypting the operand bytes with the
+    recovered key (same structural checks as _decode)."""
+    kd, ka, kb = key
     if len(blob) < 4 or blob[0] not in bytemap or bytemap[blob[0]] in (0, 35):
         return None
     prog = []
     off = 0
     while off + 4 <= len(blob) and blob[off] in bytemap:
-        prog.append((off, blob[off], blob[off + 1], blob[off + 2], blob[off + 3]))
+        prog.append((off, blob[off], blob[off + 1] ^ kd, blob[off + 2] ^ ka, blob[off + 3] ^ kb))
         off += 4
     if len(prog) < 6 or bytemap[prog[-1][1]] not in (0, 35):
         return None
@@ -337,7 +376,97 @@ def _decode(blob):
     return prog
 
 
-def lift_region(bc_va, prog, bytemap=None):
+# logical base -> C operator (for pseudocode); unsigned ops are tagged
+_COPS = {2: "+", 3: "-", 4: "*", 5: "&", 6: "|", 7: "^", 8: "<<", 9: ">>u", 10: ">>",
+         11: "/u", 12: "/", 13: "%u", 14: "%",
+         16: "==", 17: "!=", 18: "<u", 19: "<=u", 20: ">u", 21: ">=u",
+         22: "<", 23: "<=", 24: ">", 25: ">="}
+
+
+def _fmt_const(v, width):
+    v &= (1 << width) - 1
+    s = v - (1 << width) if v >> (width - 1) else v          # show small values signed
+    return str(s) if -4096 < s < 65536 else hex(v)
+
+
+def _pseudocode(prog, bof, pool):
+    """Raise the VM-assembly to C-like pseudocode: resolve the constant pool, and -- for a
+    straight-line (branchless) function, whose VM registers are each assigned once -- fold every
+    temporary into one nested expression, naming the inputs a0, a1, ... A function with control
+    flow is emitted as flat statements with labels and if/goto (still correct, less pretty)."""
+    has_cf = any(bof(op) in (28, 29, 30) for _, op, _, _, _ in prog)
+    expr = {}
+
+    def val(r):
+        return expr.get(r, f"a{r}")                          # undefined reg = an input argument
+
+    def cexpr(off, op, dst, a, b):
+        base, w = bof(op), _width(op)
+        if base == 1:
+            return _fmt_const(pool[a | (b << 8)], 64) if pool and (a | (b << 8)) < len(pool) \
+                else f"pool[{a | (b << 8)}]"
+        if base in _COPS:
+            return f"({val(a)} {_COPS[base]} {val(b)})"
+        if base == 26:
+            return val(a)
+        if base == 27:
+            return f"({val(a)} ? {val(b)} : {val(dst)})"     # select: cond ? true : prev(false)
+        if base == 34:
+            return f"sext{w}({val(a)})"
+        if base == 32:
+            return f"*(i{w}*){val(a)}"
+        return None
+
+    if not has_cf:                                           # fold into a single return expression
+        ret = None
+        for off, op, dst, a, b in prog:
+            base = bof(op)
+            if base in (0,):
+                ret = val(a)
+            elif base == 33:                                 # a store in a "branchless" body: keep it
+                pass
+            else:
+                e = cexpr(off, op, dst, a, b)
+                if e is not None:
+                    expr[dst] = e
+        return [f"return {ret};"] if ret is not None else []
+
+    # control flow: flat statements with labels and gotos
+    labels = {a | (b << 8) for _, op, _, a, b in prog if bof(op) in (28, 29, 30)}
+    out = []
+    for off, op, dst, a, b in prog:
+        base, w = bof(op), _width(op)
+        if off in labels:
+            out.append(f"L{off:04x}:")
+        pre = "    "
+        if base == 0:
+            out.append(pre + f"return r{a};")
+        elif base == 35:
+            out.append(pre + "return;")
+        elif base == 1:
+            cv = _fmt_const(pool[a | (b << 8)], 64) if pool and (a | (b << 8)) < len(pool) else f"pool[{a|(b<<8)}]"
+            out.append(pre + f"r{dst} = {cv};")
+        elif base in _COPS:
+            out.append(pre + f"r{dst} = r{a} {_COPS[base]} r{b};")
+        elif base == 26:
+            out.append(pre + f"r{dst} = r{a};")
+        elif base == 27:
+            out.append(pre + f"r{dst} = r{a} ? r{b} : r{dst};")
+        elif base == 34:
+            out.append(pre + f"r{dst} = sext{w}(r{a});")
+        elif base == 32:
+            out.append(pre + f"r{dst} = *(i{w}*)r{a};")
+        elif base == 33:
+            out.append(pre + f"*(i{w}*)r{a} = r{b};")
+        elif base == 28:
+            out.append(pre + f"goto L{(a|(b<<8)):04x};")
+        elif base in (29, 30):
+            cond = f"r{dst} == 0" if base == 29 else f"r{dst} != 0"
+            out.append(pre + f"if ({cond}) goto L{(a|(b<<8)):04x};")
+    return out
+
+
+def lift_region(bc_va, prog, bytemap=None, pool=None):
     # base opcode: from the recovered per-build map when randomized, else the fixed low 6 bits
     bof = (lambda op: bytemap[op]) if bytemap else _base
     nconst = max((a | (b << 8)) + 1 for (_, op, dst, a, b) in prog if bof(op) == 1) if \
@@ -376,7 +505,8 @@ def lift_region(bc_va, prog, bytemap=None):
             lines.append((off, lbl, f"{tag:<9} r{dst}, L{(a | (b << 8)):04x}"))
     return {"bytecode_va": bc_va, "instructions": len(prog), "constants": nconst,
             "has_control_flow": bool(labels), "has_memory": has_mem,
-            "listing": lines, "labels": sorted(labels)}
+            "listing": lines, "labels": sorted(labels),
+            "pseudocode": _pseudocode(prog, bof, pool)}
 
 
 def _rip_targets_fn(img, fva, size):
@@ -406,9 +536,10 @@ def lift(path: Path) -> dict:
     # _recover_map returns None for anything without the VM's jump-table dispatch, so ordinary
     # functions are skipped for free.
     for fva, size in img.functions():
-        bytemap = _recover_map(img, fva, size, text_lo, text_hi)
-        if not bytemap:
+        rec = _recover_map(img, fva, size, text_lo, text_hi)
+        if not rec:
             continue
+        bytemap, key, pool_va = rec
         for t in _rip_targets_fn(img, fva, size):
             # the bytecode cursor is initialised a few bytes into the blob (the fetch reads
             # [cursor-3]), so the true start can be just before the lea target: search both ways
@@ -416,7 +547,7 @@ def lift(path: Path) -> dict:
             for d in range(-4, 5):
                 if (t + d) in seen:
                     continue
-                prog = _decode_map(_read_va(img, t + d, 8192), bytemap)
+                prog = _decode_map(_read_va(img, t + d, 8192), bytemap, key)
                 if not prog or len(prog) < 8:
                     continue
                 bases = [bytemap[op] for _, op, _, _, _ in prog]
@@ -431,7 +562,14 @@ def lift(path: Path) -> dict:
                 if ok and (best is None or score > best[0]):
                     best = (score, t + d, prog)
             if best:
-                out.append(lift_region(best[1], best[2], bytemap))
+                nconst = max((a | (b << 8)) + 1 for _, op, dst, a, b in best[2]
+                             if bytemap[op] == 1) if any(bytemap[op] == 1 for _, op, *_ in best[2]) else 0
+                pool = None
+                if pool_va and nconst:
+                    raw = _read_va(img, pool_va, nconst * 8)
+                    if len(raw) >= nconst * 8:
+                        pool = list(struct.unpack("<%dQ" % nconst, raw[:nconst * 8]))
+                out.append(lift_region(best[1], best[2], bytemap, pool))
                 seen.add(best[1])
                 break
     # also run the fixed-encoding scan (identity-opcode builds); recovery wins on a shared blob
@@ -459,6 +597,10 @@ def print_human(r: dict) -> None:
         print("  " + "-" * 50)
         for off, lbl, text in fn["listing"]:
             print(f"  {lbl} {off:04x}:  {text}")
+        if fn.get("pseudocode"):
+            print("  pseudocode:")
+            for ln in fn["pseudocode"]:
+                print("    " + ln)
 
 
 def main(argv=None):

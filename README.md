@@ -286,9 +286,12 @@ memory routines come back with their widths and accesses (`load.i8 rD, [rA]`, `s
 `add.i32`). And when the VM's opcode bytes are **randomized per build** (RustCloak's hardening), the
 lifter **recovers the opcode map**: it parses the dispatch jump table and classifies each handler by
 its native instruction (an `idiv` with the remainder stored → SREM, a rip-relative pool load →
-CONST, …), rebuilding the opcode→operation map before decoding — reconstructing a function's exact
-logic from a VM whose instruction set is build-specific. Still VM-assembly, not yet C/pseudocode;
-x86-64.
+CONST, …), rebuilding the opcode→operation map before decoding. When the operand bytes are also
+**encrypted per build**, it recovers the XOR key from the interpreter too, and it **raises the result
+to C pseudocode** — resolving the constant pool and folding the temporaries into one expression. From
+a VM with randomized opcodes *and* encrypted operands it reconstructs, e.g.,
+`return (((a0 > 1000) & (((((a0 * 31) + a1) ^ (a0 >> 3)) % 97) == 0)) ? (a1 + a0) : 0xffffffff);` —
+the function's exact source. x86-64.
 
 `scripts/llm_triage.py <binary>` adds an **AI-assisted** read on top: it hands *only* the
 deterministically recovered facts (the triage card above — never the raw binary) to an LLM and asks

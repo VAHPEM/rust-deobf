@@ -87,12 +87,27 @@ def test_randomized_build_opcodes_differ_from_fixed():
 
 @pytest.mark.skipif(not RND.is_file(), reason="randomized fixture missing")
 def test_opcode_map_recovered_and_logic_reconstructed():
-    # the lifter cannot assume opcode numbers; it must recover the map from the dispatch handlers.
-    # Success = it reconstructs a function's exact logic. check() is distinctive: a signed modulo
-    # and a select guarded by two comparisons.
+    # the lifter cannot assume opcode numbers OR operand bytes (both are randomized/encrypted per
+    # build); it must recover the opcode map AND the operand key from the interpreter. Success =
+    # it reconstructs a function's exact logic. check() is distinctive: a signed modulo and a
+    # select guarded by two comparisons.
     r = lift_vm.lift(RND)
     assert r["count"] >= 1, "recovered no function from the randomized build"
     sigs = [set(_mnemonics(fn)) for fn in r["lifted"]]
     want = {"mul", "ashr", "xor", "srem", "eq", "sgt", "and", "cmovnz"}
     assert any(want <= s for s in sigs), \
         f"did not reconstruct check()'s logic from randomized opcodes; got {sigs}"
+
+
+@pytest.mark.skipif(not RND.is_file(), reason="randomized fixture missing")
+def test_pseudocode_reconstructs_c_expression():
+    # the lifter raises the recovered VM-assembly to C: resolve the constant pool, fold the
+    # temporaries into one expression. check()'s body must come back as readable C with its real
+    # constants (31, 97, the >1000 guard), from a VM with randomized opcodes AND encrypted operands.
+    r = lift_vm.lift(RND)
+    pc = next(("\n".join(fn["pseudocode"]) for fn in r["lifted"]
+               if fn["pseudocode"] and not fn["has_control_flow"] and "% 97" in "\n".join(fn["pseudocode"])), None)
+    assert pc is not None, "did not produce check()'s pseudocode"
+    assert "* 31" in pc and "% 97" in pc and "> 1000" in pc   # pool constants resolved
+    assert ">> 3" in pc and "?" in pc                          # the shift and the select
+    assert pc.startswith("return ")
