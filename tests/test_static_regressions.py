@@ -127,3 +127,54 @@ def test_pe_coff_symbol_value_is_section_relative():
     assert text.virtual_address <= va < text.virtual_address + len(bytes(text.content))
     # stripped-or-not, PE function starts come from .pdata + any symbols; must be non-empty here
     assert len(G.function_starts(b)) > 10
+
+
+# --- recover_stackstrings ARM64 (movk packing + stale registers) ----------------------------
+
+def test_arm64_stack_string_uses_movk_and_drops_stale_regs():
+    import recover_stackstrings as SS
+    f = FIX / "a64_stack"
+    if not f.is_file():
+        pytest.skip("fixture missing")
+    got = [x["string"] for x in SS.recover(f).get("records", [])]
+    # "hello world!" is built with mov+movk; ignoring movk lost its high bytes
+    assert any("hello world" in s for s in got), got
+    # a register loaded by ldrb after a mov #imm must not keep the stale immediate (a fake string)
+    assert not any("telemetry-config" in s for s in got), got
+
+
+# --- ioc_tags false positives ---------------------------------------------------------------
+
+def test_ioc_tags_rejects_version_and_crate_at_version():
+    from recover_callsite import ioc_tags
+    assert ioc_tags("serde@1.0.197") == []            # crate@version, not an email
+    assert ioc_tags("1.2.3.4.5") == []                # five dotted numbers, not an IP
+    assert ioc_tags("10.66.12.7:8443") == ["ip"]      # a real IP:port still tags
+    assert "email" in ioc_tags("agent@evil.example")  # a real email still tags
+
+
+# --- recover_apihash (block_api scheme, wide NUL) -------------------------------------------
+
+def test_apihash_block_api_and_wide_nul():
+    import recover_apihash as A
+    # the Metasploit / Cobalt Strike block_api hash (module+function ror13), the single most common
+    # real scheme, must be modelled: kernel32.dll!LoadLibraryA = 0x0726774C
+    assert A.block_api_hash("LoadLibraryA", "kernel32.dll") == 0x0726774C
+    table, _all = A.build_table(A.BUILTIN_EXPORTS)
+    assert table.get(0x0726774C) and table[0x0726774C][2] == "LoadLibraryA"
+    # a wide (UTF-16) name variant must be NUL-terminated with TWO bytes, not one
+    assert any(v.endswith(b"\x00\x00") for v in A.name_variants("LoadLibraryA")
+               if b"\x00" in v[:-2] or len(v) > len("LoadLibraryA") + 1)
+
+
+# --- recover_artifacts indicator extraction -------------------------------------------------
+
+def test_artifacts_extract_real_paths_bare_ip_and_hiveless_registry():
+    import recover_artifacts as A
+    art = A.extract([r"C:\ProgramData\NorthwindSvc\state.db", "10.66.12.7",
+                     "Software\\Northwind\\Agent\\Settings", "evil-c2.example.com"])
+    assert r"C:\ProgramData\NorthwindSvc\state.db" in art["paths"]   # single-backslash path
+    assert "10.66.12.7" in art["endpoints"]                         # bare IP no longer dropped
+    assert "Software\\Northwind\\Agent\\Settings" in art["registry"]  # hive-less registry key
+    assert "state.db" not in art["domains"]                         # a filename is not a domain
+    assert "evil-c2.example.com" in art["domains"]                  # a real domain still tags
