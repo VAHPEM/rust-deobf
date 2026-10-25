@@ -656,6 +656,43 @@ def _structure(stmts):
             stmts = stmts[:i] + [f"if ({_invert(cond)}) {{"] + body + ["}"] + stmts[ti + 1:]
             changed = True
             break
+        if changed:
+            continue
+        # generalized loop fold (multi-exit): a header L with a single unconditional back-edge `goto L;`
+        # whose body leaves the loop to more than one target. The back-edge is dropped (the while
+        # iterates implicitly); C has no labelled break, so each exit stays a `goto` (the idiomatic C
+        # multi-target exit), except a lone exit to the block right after the loop, which becomes a
+        # `break;`. Only the innermost loop folds per step, so the fixpoint nests outward. (A loop with
+        # *several* back-edges to the same header is left alone here -- restructuring it risks a
+        # mis-fold -- so a multi-latch loop stays as correct `goto`.)
+        for lab, i in labels.items():
+            bes = [k for k, s in enumerate(stmts) if k > i and re.match(rf"\s*goto {lab};$", s)]
+            if len(bes) != 1:
+                continue
+            j = bes[0]
+            # the single back-edge must be the only reference to L at or after the header (entry edges
+            # before it keep the header's label); more would be a latch we are not handling here.
+            if any(k != j and re.search(rf"\bgoto {lab};", s) for k, s in enumerate(stmts) if k > i):
+                continue
+            body = stmts[i + 1:j]
+            inner_labels = [s.strip()[:-1] for k, s in enumerate(stmts)
+                            if i < k < j and re.match(r"^L\w+:$", s.strip())]
+            # innermost-first: if a label inside the body is itself a loop header (a `goto` back to it
+            # lives in the body), fold that one first.
+            if any(any(re.match(rf"\s*goto {il};$", s) for s in body) for il in inner_labels):
+                continue
+            # single-entry: a label inside the loop must not be targeted from outside the loop region.
+            if any(k not in range(i, j + 1) and re.search(rf"\bgoto {il};", s)
+                   for il in inner_labels for k, s in enumerate(stmts)):
+                continue
+            exits = {m.group(1) for s in body for m in re.finditer(r"goto (L\w+);", s)
+                     if m.group(1) != lab and m.group(1) not in inner_labels}
+            if len(exits) < 2:                                   # single/zero exit is the clean peephole's job
+                continue
+            new_body = ["    " + s for s in body]               # the >=2 exits stay as goto (C idiom)
+            stmts = stmts[:i + 1] + ["while (1) {"] + new_body + ["}"] + stmts[j + 1:]
+            changed = True
+            break
     # drop labels no longer referenced
     tc = targets(stmts)
     return [s for s in stmts if not (re.match(r"^L\w+:$", s.strip()) and not tc.get(s.strip()[:-1]))]
@@ -799,15 +836,18 @@ def _cfg_layout(prog, bof, pool):
     def succ_pref(ld):                                       # fall-through first, so it stays adjacent
         return [s for s, _ in sorted(bb_succ(ld), key=lambda sf: not sf[1])]
 
-    # lay the blocks out: a loop header expands its whole body contiguously, then its exits.
-    order, placed, expanding = [], set(), set()
+    # lay the blocks out: a loop header expands its whole body contiguously (DFS, fall-through first so
+    # straight-line runs stay adjacent), then its exits. The contiguity is what lets the peephole fold
+    # the loop; a merge point reached from two in-loop arms can still end up split across the body
+    # (the honest limit the generalized loop fold leaves as goto).
+    expanding = set()
 
     def schedule(start, region):
         local = []
         local_seen = set()
 
         def rec(n):
-            if n is None or n not in region or n in local_seen or n in placed:
+            if n is None or n not in region or n in local_seen:
                 return
             if n in loop_body and n not in expanding:        # expand this loop's body as a unit
                 expanding.add(n)
@@ -817,8 +857,7 @@ def _cfg_layout(prog, bof, pool):
                         local_seen.add(x)
                         local.append(x)
                 expanding.discard(n)
-                exits = [t for b in body for t in succ[b] if t is not None and t not in body]
-                for e in exits:
+                for e in (t for b in body for t in succ[b] if t is not None and t not in body):
                     rec(e)
                 return
             local_seen.add(n)

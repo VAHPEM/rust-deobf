@@ -1863,3 +1863,39 @@ green.
 **Remaining limit.** Multi-exit loops (an inner `break`/`continue`) and genuinely irreducible nests
 are still left as `goto`. The natural next step is labelled `break`/`continue` for multi-exit loops
 and node-splitting (or a dispatch block) for irreducible regions -- a full Relooper.
+
+## 43. Completing the relooper — multi-exit loops; and why node-splitting had no target (Oct 2026)
+
+The §42 limit was a loop the peephole could not fold because it was not single-exit. Following the ask
+to "finish the relooper" with labelled break/continue and node-splitting, the discipline here was to
+**measure first**: a reducibility check over every virtualized loop function (crc_ish, sum_mix, roll,
+nested_sum, tri_mix, find_mix) reported **all six reducible**. So there is no irreducible fixture for
+node-splitting to act on -- the earlier "irreducible" label on crc_ish was wrong; it is reducible and
+merely multi-block. The real gap is **multi-exit** and **multi-latch** *reducible* loops.
+
+- **Multi-exit loop fold (shipped).** find_mix's inner loop has one back-edge but exits to two
+  different targets (its normal `j < n` exit and its `break`), so the single-exit `while(1)` peephole
+  bailed. Added a generalized fold: a header with a single unconditional back-edge whose body leaves
+  to two or more targets becomes `while (1) { ... }` with the back-edge dropped; C has no labelled
+  break, so each exit stays a `goto` (the idiomatic C multi-target exit). find_mix's inner loop now
+  folds to a while-loop; nested_sum / tri_mix (fully structured) and crc_ish / sum_mix / roll are
+  unchanged, and nothing dangles.
+
+- **What was tried and backed out, honestly.** (1) A *topological* block layout (hold a block until
+  all its forward predecessors are placed, so a two-predecessor merge lands after both arms) would let
+  find_mix's **outer** loop fold -- but it broke the loop *contiguity* the peephole relies on and
+  regressed the clean nests (nested_sum went from two `while(1)` to nineteen `goto`), so it was
+  reverted. (2) A **multi-latch `continue`** rewrite (a second back-edge to the header) could interact
+  with the do/while peephole and emit a malformed (semantically wrong) nesting on a synthetic case, so
+  the fold is restricted to a **single** back-edge; a multi-latch loop is left as correct `goto`.
+
+- **Node-splitting: not shipped, by measurement.** No fixture is irreducible, so there is nothing real
+  to split or validate against. Rather than add speculative, untested-on-real-data node-splitting to a
+  premium module, it is deferred until a genuinely irreducible target exists (which would need a
+  hand-built or deliberately-constructed fixture). Structuring remains cosmetic over the verified
+  program, so every unfolded loop is valid `goto`, never wrong.
+
+**Remaining limits (honest).** A loop whose latch is a two-predecessor merge (find_mix's outer loop)
+and a multi-latch loop stay as `goto`; both need a merge-aware layout that does not sacrifice loop
+contiguity. Genuine irreducibility (absent here) needs node-splitting or a dispatch block. These are
+the next steps for a full Relooper.

@@ -183,6 +183,13 @@ def test_emulation_recovers_nested_loops_and_structures_the_inner_while():
     assert pc.count("while (1)") == 2 and "break" in pc, "both loops of nested_sum should structure"
     assert "goto L" not in pc, "a clean reducible nest should leave no goto"
 
+    # a multi-exit loop (find_mix's inner loop exits to two different targets) still folds to a
+    # while-loop -- the generalized loop fold drops the back-edge and leaves the two exits as goto
+    # (C has no labelled break). Its outer loop, whose latch is a two-predecessor merge, is the honest
+    # remaining limit and stays goto.
+    fm = "\n".join(devirt_emulate.recover(NESTFIX, s["find_mix"])["pseudocode"])
+    assert fm.count("while (1)") >= 1, "find_mix's inner multi-exit loop should fold to a while-loop"
+
 
 @pytest.mark.skipif(not CALLFIX.is_file(), reason="fixture missing")
 def test_combined_recover_all_adds_emulation_to_static():
