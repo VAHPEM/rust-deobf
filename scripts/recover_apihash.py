@@ -92,25 +92,57 @@ BUILTIN_EXPORTS = [
 
 def name_variants(name: str):
     """A resolver may hash the name as given, uppercased, or as UTF-16LE (wide)."""
-    base = name.encode()
-    out = {base, name.upper().encode(), name.lower().encode(),
-           name.encode("utf-16-le")}
-    # some hash the name WITH a terminating NUL
-    out |= {b + b"\x00" for b in list(out)}
+    narrow = {name.encode(), name.upper().encode(), name.lower().encode()}
+    wide = {name.encode("utf-16-le"), name.upper().encode("utf-16-le"),
+            name.lower().encode("utf-16-le")}
+    out = set(narrow) | set(wide)
+    # some hash the name WITH a terminating NUL -- one byte for a narrow name, TWO for a wide one
+    out |= {b + b"\x00" for b in narrow}
+    out |= {b + b"\x00\x00" for b in wide}
     return out
+
+
+# modules whose exports malware commonly resolves by hash, for the combined module+function scheme
+_COMMON_MODULES = ("kernel32.dll", "ntdll.dll", "kernelbase.dll", "advapi32.dll", "ws2_32.dll",
+                   "wininet.dll", "winhttp.dll", "user32.dll", "urlmon.dll", "shell32.dll",
+                   "crypt32.dll", "bcrypt.dll", "shlwapi.dll")
+
+
+def _ror13(data: bytes) -> int:
+    h = 0
+    for c in data:
+        h = (_ror(h, 13) + c) & M
+    return h
+
+
+def block_api_hash(func: str, module: str) -> int:
+    """The Metasploit / Cobalt Strike block_api hash: ror13 of the UPPERCASE UTF-16LE module name
+    (with its wide NUL) PLUS ror13 of the ASCII function name (with its NUL). e.g. kernel32.dll!
+    LoadLibraryA = 0x0726774C. This single scheme covers most real shellcode API resolution and was
+    not modelled by the per-name algorithms."""
+    mod_hash = _ror13(module.upper().encode("utf-16-le") + b"\x00\x00")
+    func_hash = _ror13(func.encode("ascii", "ignore") + b"\x00")
+    return (mod_hash + func_hash) & M
 
 
 def scan_constants(path: Path):
     """Collect 32-bit immediates compared against in .text (cmp/sub/xor reg,imm32 and
     bare mov reg,imm32) -- the pool the sample matches its running hash against."""
     import lief
-    from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_IMM
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_MODE_32, CS_OP_IMM
     b = lief.parse(str(path))
     base = b.optional_header.imagebase if "PE" in b.format.name else 0
     text = next((s for s in b.sections if s.name == ".text"), None)
     if text is None:
         return set()
-    md = Cs(CS_ARCH_X86, CS_MODE_64); md.detail = True
+    # hash-import resolution is common in 32-bit shellcode/loaders; decode in the binary's bitness
+    # (decoding a PE32 as 64-bit misreads instruction boundaries and loses the compared constants)
+    try:
+        import recover_emulate as E
+        mode = CS_MODE_32 if E._is_32bit(b) else CS_MODE_64
+    except Exception:
+        mode = CS_MODE_64
+    md = Cs(CS_ARCH_X86, mode); md.detail = True
     consts = set()
     for ins in linear(md, bytes(text.content), base + text.virtual_address):
         if ins.mnemonic in ("cmp", "sub", "xor", "mov", "add", "lea"):
@@ -123,8 +155,14 @@ def scan_constants(path: Path):
 
 
 def build_table(names, seeds=(0, 5381, 0x811C9DC5, 0xDEADBEEF, 0x1505)):
-    """hash value -> (algo, seed, name). One name hashes to many values across algos."""
+    """hash value -> (algo, seed, name) for the first name seen, plus a parallel map hash -> set of
+    all (algo, name) that produce it so a collision (one constant, several candidate names) can be
+    reported instead of silently picking one. One name hashes to many values across algos."""
     table = {}
+    allnames = {}
+    def add(h, algo, seed, name):
+        table.setdefault(h, (algo, seed, name))
+        allnames.setdefault(h, set()).add((algo, name))
     for name in names:
         for var in name_variants(name):
             for algo, fn in ALGOS.items():
@@ -133,19 +171,27 @@ def build_table(names, seeds=(0, 5381, 0x811C9DC5, 0xDEADBEEF, 0x1505)):
                         h = fn(var, seed)
                     except TypeError:
                         h = fn(var)
-                    table.setdefault(h, (algo, seed, name))
-    return table
+                    add(h, algo, seed, name)
+        # the combined module+function block_api scheme (module known only by convention here)
+        for mod in _COMMON_MODULES:
+            add(block_api_hash(name, mod), "block_api(%s)" % mod, 0, name)
+    return table, allnames
 
 
 def recover(path: Path, names):
     consts = scan_constants(path)
-    table = build_table(names)
+    table, allnames = build_table(names)
     hits = []
     for c in sorted(consts):
         if c in table:
             algo, seed, name = table[c]
-            hits.append({"const": hex(c), "api": name, "algo": algo,
-                         "seed": hex(seed)})
+            # distinct candidate names for this one constant: report them so a coincidental
+            # collision with a large --names corpus is visible rather than silently resolved
+            cands = sorted({n for _a, n in allnames.get(c, set())})
+            hit = {"const": hex(c), "api": name, "algo": algo, "seed": hex(seed)}
+            if len(cands) > 1:
+                hit["ambiguous"] = cands
+            hits.append(hit)
     return {"constants_scanned": len(consts), "corpus": len(names), "resolved": hits}
 
 
@@ -155,12 +201,16 @@ def _selftest():
     target = ["VirtualAlloc", "LoadLibraryA", "NtWriteVirtualMemory"]
     algo, seed = "ror13_add", 0
     consts = {h_ror13_add(n.encode(), seed) for n in target} | {0x1234, 0xCAFEBABE}
-    table = build_table(BUILTIN_EXPORTS)
+    table, _all = build_table(BUILTIN_EXPORTS)
     got = {table[c][2] for c in consts if c in table}
     assert set(target) <= got, (target, got)
     # fnv1a of a wide (UTF-16) name must also resolve via the variant expansion
-    c = h_fnv1a("GetProcAddress".encode("utf-16-le"))
+    c = h_fnv1a("GetProcAddress".encode("utf-16-le") + b"\x00\x00")
     assert table.get(c) and table[c][2] == "GetProcAddress", table.get(c)
+    # the Metasploit/Cobalt Strike block_api hash of kernel32!LoadLibraryA
+    assert block_api_hash("LoadLibraryA", "kernel32.dll") == 0x0726774C
+    bc = block_api_hash("LoadLibraryA", "kernel32.dll")
+    assert table.get(bc) and table[bc][2] == "LoadLibraryA", table.get(bc)
     print(f"selftest OK: recovered {sorted(set(target) & got)} from a mixed constant pool; "
           "UTF-16 variant resolved")
 
