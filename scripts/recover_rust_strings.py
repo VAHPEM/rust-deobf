@@ -97,13 +97,37 @@ def _string_sections(binary):
     return out, base
 
 
+def _ptr_width(binary):
+    """Pointer size in bytes: 4 for 32-bit (i386 ELF, PE32, 32-bit Mach-O), else 8."""
+    try:
+        import recover_emulate as E
+        return 4 if E._is_32bit(binary) else 8
+    except Exception:
+        return 8
+
+
 def _relative_relocs(binary):
-    """ELF: {slot VA: target} for R_*_RELATIVE, the pointers a PIE fills in at load time."""
+    """{slot VA: target VA} for pointers the loader fills in, so an &str field that is stored as 0
+    (and relocated) or as an encoded fixup is read as the real target:
+      - ELF RELA (x86-64/arm64): R_*_RELATIVE carries the target in the addend; the slot is 0.
+      - ELF REL (i386): the target is stored IN PLACE and the addend is 0 -- left out of the map on
+        purpose so data_pairs reads it from the section bytes (a 0 addend here used to be recorded
+        and then rejected as 'no pointer', dropping every i386 PIE &str).
+      - Mach-O chained fixups: the on-disk pointer is an encoded fixup, not the address; LIEF
+        resolves each to its target. Classic dyld rebases are correct in place (slide 0) -> no entry.
+    """
     out = {}
     try:
-        for r in binary.relocations:
-            if "RELATIVE" in str(r.type) and "IRELATIVE" not in str(r.type):
-                out[r.address] = r.addend
+        if binary.format.name == "MACHO":
+            if getattr(binary, "has_dyld_chained_fixups", False):
+                for r in binary.relocations:
+                    if type(r).__name__ == "RelocationFixup":
+                        out[r.address] = r.target
+        else:
+            for r in binary.relocations:
+                t = str(r.type)
+                if "RELATIVE" in t and "IRELATIVE" not in t and r.addend:
+                    out[r.address] = r.addend
     except Exception:
         pass
     return out
@@ -124,7 +148,10 @@ def data_pairs(binary, strs: _Ranges, base: int):
     """(pointer, length) &str fields in the image's constant data."""
     fmt = binary.format.name
     pe, macho = fmt == "PE", fmt == "MACHO"
-    relocs = {} if (pe or macho) else _relative_relocs(binary)   # Mach-O: in-place ptr (slide 0)
+    # PE has no RELATIVE/chained map here (absolute pointers in place); ELF and Mach-O do
+    relocs = {} if pe else _relative_relocs(binary)
+    pw = _ptr_width(binary)                 # 4 on i386/PE32, so a (ptr,len) &str field is 8 bytes
+    fmtP = "<Q" if pw == 8 else "<I"
     for s in binary.sections:
         name = s.name
         if pe:
@@ -137,14 +164,14 @@ def data_pairs(binary, strs: _Ranges, base: int):
             continue
         data = bytes(s.content)
         va0 = base + s.virtual_address
-        for o in range(0, len(data) - 15, 8):
+        for o in range(0, len(data) - (2 * pw - 1), pw):
             va = va0 + o
             ptr = relocs.get(va)
             if ptr is None:
-                ptr = struct.unpack_from("<Q", data, o)[0]
+                ptr = struct.unpack_from(fmtP, data, o)[0]
             if not ptr or strs.find(ptr) is None:
                 continue
-            n = struct.unpack_from("<Q", data, o + 8)[0]
+            n = struct.unpack_from(fmtP, data, o + pw)[0]
             if 0 < n <= MAX_LEN:
                 yield ptr, n, None
 
