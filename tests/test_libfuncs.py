@@ -13,7 +13,13 @@ from conftest import BUILD
 import recover_libfuncs as L
 
 # (format, extension) pairs; the target is matched stripped, truth read from its nostrip build
-FORMATS = [("elf", ""), ("pe", ".exe"), ("elf-arm64", "")]
+# PE is a KNOWN, OPEN bug (review of Oct 2026): COFF symbol values are section-relative offsets,
+# but gen_runtime_sigs.function_starts / recover_libfuncs use them as RVAs, so every PE function
+# start is shifted by the .text RVA (0x1000) and 0 functions are identified. strict=True: the day
+# that bug is fixed this case XPASSes and fails, so the marker cannot outlive the bug.
+_PE_COFF_BUG = pytest.mark.xfail(strict=True, reason="open bug: PE COFF symbol values used as RVAs "
+                                 "(gen_runtime_sigs.function_starts, recover_libfuncs)")
+FORMATS = [("elf", ""), pytest.param("pe", ".exe", marks=_PE_COFF_BUG), ("elf-arm64", "")]
 # reference program (signatures) -> target program (identification); distinct programs
 PAIRS = [("litcrypt", "xor_custom"), ("obfstr", "add_custom")]
 PROFILE = "release"

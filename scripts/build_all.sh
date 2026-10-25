@@ -11,9 +11,40 @@
 # The canary suite builds all four; the scatter suite builds release + the two LTO profiles.
 # Override with PROFILES="release size-lto" (applies to every project), or ONLY="obfstr litcrypt".
 # SKIP_EXISTING=1 keeps binaries that are already in the build directory.
+#
+# Exit status: 0 only when every requested binary was built (and stripped); otherwise 1, after the
+# whole matrix has been attempted, with each failure listed. A failed `cargo build` never falls back
+# to a binary left in target/ by an earlier build, and its output is kept in
+# $BUILD_DIR/build_logs/<proj>__<fmt>__<profile>.log (the tail is printed on failure).
 set -u
 ROOT="$(cd "$(dirname "$0")/.."; pwd)"
 SRC="$ROOT/bench_src"; OUT="${BUILD_DIR:-$ROOT/build}"; mkdir -p "$OUT"
+LOGS="$OUT/build_logs"; mkdir -p "$LOGS"
+failures=()
+fail() { failures+=( "$1" ); echo "MISS $1" >&2; }
+
+# strip_one FMT FILE: strip with the first tool that exists for that format, showing its errors
+strip_one() {
+  local fmt="$1" f="$2" tool cands
+  case "$fmt" in
+    pe) cands="x86_64-w64-mingw32-strip llvm-strip" ;;
+    elf-arm64*) cands="llvm-strip aarch64-linux-gnu-strip strip" ;;
+    *) cands="strip llvm-strip" ;;
+  esac
+  # macOS's own strip cannot process ELF/PE: use the LLVM / cross binutils ones there
+  if [ "$(uname -s)" = Darwin ]; then
+    case "$fmt" in pe) ;; elf-arm64*) cands="llvm-strip aarch64-linux-gnu-strip" ;; *) cands="llvm-strip x86_64-linux-gnu-strip" ;; esac
+  fi
+  for tool in $cands; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      "$tool" "$f" && return 0
+      echo "strip: $tool failed on $f" >&2
+      return 1
+    fi
+  done
+  echo "strip: none of [$cands] is installed (needed for $fmt)" >&2
+  return 1
+}
 # BUILD_DIR=... builds elsewhere (e.g. with RUSTUP_TOOLCHAIN=1.99.1 next to the default build);
 # the tests read RUST_DEOBF_BUILD
 MANIFEST="$OUT/build_manifest.jsonl"; [ "${SKIP_EXISTING:-0}" = 1 ] || : > "$MANIFEST"
@@ -44,11 +75,13 @@ if [ "${ARM64:-0}" = 1 ]; then
 fi
 projects="${ONLY:-$(ls -d "$SRC"/*/ 2>/dev/null | xargs -n1 basename)}"
 for proj in $projects; do
-  pdir="$SRC/$proj"; [ -d "$pdir" ] || continue
+  pdir="$SRC/$proj"; [ -f "$pdir/Cargo.toml" ] || continue
   # per-project build env (e.g. litcrypt/cryptify fixed key) and suite
+  env_line=""; suite=""
   read -r env_line suite < <(python3 -c "
-import json;v=json.load(open('$SRC/manifest.json'))['variants'].get('$proj',{})
-e=v.get('env');print((f'{e[0]}={e[1]}' if e else '-'), v.get('suite','canary'))")
+import json,sys;v=json.load(open(sys.argv[1]))['variants'].get(sys.argv[2],{})
+e=v.get('env');print((f'{e[0]}={e[1]}' if e else '-'), v.get('suite','canary'))" "$SRC/manifest.json" "$proj")
+  if [ -z "$suite" ]; then fail "$proj (cannot read bench_src/manifest.json)"; continue; fi
   [ "$env_line" = "-" ] && env_line=""
   if [ -n "${PROFILES:-}" ]; then profiles="$PROFILES"
   elif [ "$suite" = scatter ]; then profiles="release size-lto speed-lto"
@@ -63,18 +96,25 @@ e=v.get('env');print((f'{e[0]}={e[1]}' if e else '-'), v.get('suite','canary'))"
       case "$profile" in debug) flags="";; release) flags="--release";; *) flags="--profile $profile";; esac
       # a project without this profile (meta_probe has no LTO profiles): nothing to build
       case "$profile" in debug|release) ;; *) grep -q "^\[profile\.$profile\]" "$pdir/Cargo.toml" || continue;; esac
-      ( cd "$pdir"
-        env ${env_line:+$env_line} cargo build $flags --target "$triple" >/dev/null 2>&1
-      )
       bin="$pdir/target/$triple/$profile/$proj$ext"
-      [ -f "$bin" ] || { echo "MISS $proj $triple $profile"; continue; }
+      log="$LOGS/${proj}__${fmt}__${profile}.log"
+      # a failed build must never ship the binary an earlier build left in target/
+      if ! ( cd "$pdir" && env ${env_line:+"$env_line"} cargo build $flags --target "$triple" ) >"$log" 2>&1; then
+        echo "---- cargo build failed: $proj $triple $profile (last lines of $log) ----" >&2
+        tail -n 25 "$log" >&2
+        # and the copies an earlier run put in the build directory are no longer this source's
+        rm -f "$OUT/${proj}__${fmt}__${profile}__nostrip$ext" "$OUT/${proj}__${fmt}__${profile}__strip$ext"
+        fail "$proj $triple $profile (cargo build failed)"
+        continue
+      fi
+      [ -f "$bin" ] || { fail "$proj $triple $profile (cargo succeeded but $bin is missing)"; continue; }
       for strip in nostrip strip; do
         name="${proj}__${fmt}__${profile}__${strip}$ext"
-        dst="$OUT/$name"; cp "$bin" "$dst"
-        if [ "$strip" = strip ]; then
-          if [ "$fmt" = pe ]; then x86_64-w64-mingw32-strip "$dst" 2>/dev/null
-          elif [ "${fmt#elf-arm64}" != "$fmt" ]; then llvm-strip "$dst" 2>/dev/null || aarch64-linux-gnu-strip "$dst" 2>/dev/null || strip "$dst" 2>/dev/null
-          else strip "$dst" 2>/dev/null; fi
+        dst="$OUT/$name"
+        rm -f "$dst"
+        cp "$bin" "$dst" || { fail "$name (copy failed)"; continue; }
+        if [ "$strip" = strip ] && ! strip_one "$fmt" "$dst"; then
+          rm -f "$dst"; fail "$name (strip failed)"; continue
         fi
         sz=$(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst")
         echo "{\"name\":\"$name\",\"proj\":\"$proj\",\"suite\":\"$suite\",\"fmt\":\"$fmt\",\"profile\":\"$profile\",\"strip\":\"$strip\",\"bytes\":$sz}" >> "$MANIFEST"
@@ -83,4 +123,9 @@ e=v.get('env');print((f'{e[0]}={e[1]}' if e else '-'), v.get('suite','canary'))"
     done
   done
 done
-echo "built: $(wc -l < "$MANIFEST") binaries"
+echo "built: $(wc -l < "$MANIFEST" | tr -d ' ') binaries"
+if [ "${#failures[@]}" -gt 0 ]; then
+  echo "FAILED: ${#failures[@]} build(s) missing:" >&2
+  for f in "${failures[@]}"; do echo "  - $f" >&2; done
+  exit 1
+fi

@@ -12,16 +12,26 @@ permissions:
 
 jobs:
   selftest:
+    # every test that needs no benchmark build: script self-tests, the committed fixtures
+    # (Mach-O, lazy string encryption, VM detection/lifting, anti-emulation, deflattening,
+    # devirtualization, expression simplification) and the unit tests of the front ends (recover,
+    # soc_triage, llm_triage, recover_dynamic, ghidra_annotate, heldout scoring, build scripts).
+    # The benchmark-build tests run in the benchmark job; test_32bit/test_formats build i686
+    # targets themselves and are not part of this quick job.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest
-      - name: Self-tests (no binaries needed)
-        run: python -m pytest tests/test_selftests.py -q
+      - name: Unit + fixture tests (no benchmark build needed)
+        run: >-
+          python -m pytest tests -q -rs
+          --ignore=tests/test_benchmark.py --ignore=tests/test_scatter.py
+          --ignore=tests/test_obf.py --ignore=tests/test_libfuncs.py
+          --ignore=tests/test_32bit.py --ignore=tests/test_formats.py
 
   benchmark:
     # one job per output format: the build matrix (canary + scatter suites, release and the
@@ -32,6 +42,10 @@ jobs:
         format: [elf, pe, elf-arm64, elf-arm64gnu]
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    env:
+      # a binary of this job's format that the tests need but the build did not produce is a
+      # FAILURE, not a skip (otherwise a broken build passes CI with every test skipped)
+      RUST_DEOBF_REQUIRE_BUILD: ${{ matrix.format }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +77,8 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q gcc-aarch64-linux-gnu
           rustup target add aarch64-unknown-linux-gnu
 
+      # build_all.sh / build_obf.sh exit non-zero when any binary is missing (cargo's error tail is
+      # printed and the full log kept in build/build_logs/), so a broken build fails here
       - name: Build the benchmark for ${{ matrix.format }}
         run: |
           if [ "${{ matrix.format }}" = elf-arm64gnu ]; then
@@ -71,16 +87,25 @@ jobs:
             FORMATS=${{ matrix.format }} bash scripts/build_all.sh
           fi
 
-      - name: Recall and precision (canary + scatter suites)
-        run: python -m pytest tests/test_benchmark.py tests/test_scatter.py -q -rs
+      - name: Recall and precision (canary + scatter suites, library functions, routing, triage)
+        run: >-
+          python -m pytest -q -rs
+          tests/test_benchmark.py tests/test_scatter.py tests/test_libfuncs.py
+          tests/test_formats.py::test_detect_64bit_still_emulates tests/test_soc_triage.py
 
       - name: Obfuscation crates (goldberg et al.)
+        if: matrix.format != 'elf-arm64gnu'
         run: |
-          if [ "${{ matrix.format }}" = elf-arm64 ]; then ARM64=1 bash obf_src/build_obf.sh
-          elif [ "${{ matrix.format }}" = elf ] || [ "${{ matrix.format }}" = pe ]; then
-            ARM64=0 bash obf_src/build_obf.sh
-          fi
+          FORMATS=${{ matrix.format }} bash obf_src/build_obf.sh
           python -m pytest tests/test_obf.py -q -rs
+
+      - name: Build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.format }}
+          path: build/build_logs/
+          if-no-files-found: ignore
 
   precision:
     # false positives on real, benign binaries of three languages (C/C++, Go, Rust) found on the
