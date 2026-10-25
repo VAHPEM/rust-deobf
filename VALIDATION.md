@@ -1518,3 +1518,44 @@ detection across every LLVM switch-lowering shape (and, separately, handling the
 interpreter where the VM itself is run through subst/bogus/flatten) are the continuing items.
 Devirtualizing the *interpreter-obfuscated* build is where the MBA simplifier (`deobf_expr`) and the
 deflattener would feed the operand-key recovery — a natural next red/blue round.
+
+## 32. Emulation-based devirtualization (premium) ↔ full-coverage push (Oct 2026)
+
+Pattern-matching the interpreter's native dispatch is codegen-specific: every LLVM switch lowering
+(jump table, threaded, hoisted/accumulator, guarded/unguarded) needs its own patterns, and each new
+function shape risks regressing another (round-12 coverage work drove `check` out when a heuristic
+was retuned for `fold64`). It also cannot survive an *obfuscated* interpreter. So full coverage is
+pursued a different way.
+
+**`premium/devirt_emulate.py` (AGPL-3.0-or-later OR commercial).** Recovers the VM's instruction set
+by *running* the interpreter under Unicorn with several input vectors and observing it interpret its
+own bytecode: the bytecode-blob reads give the instruction stream and the raw `[opcode, dst, a, b]`
+bytes; each handler's VM register-file slot reads/writes give the operand register *indices*
+directly (no operand-key parsing); and the operation is inferred from the observed value relation
+(result == a^b, a*b, a>>b, ...). From those it reconstructs the opcode→logical map, the operand key
+(raw byte XOR observed index), the constant pool (observed CONST values) and the default, then hands
+the exact tuple the core `lift_region` consumes back to the (Apache-2.0) core for folding and
+rendering. Premium depends on core; core never imports premium.
+
+This is codegen-agnostic and obfuscation-resistant (it watches what the interpreter *computes*), and
+it is the foundation for round 13 (an interpreter hardened with MBA/flattening defeats static
+patterns but not execution). The licensing is open-core: this new capability is premium; the
+round-12 static-lifter improvements remain core Apache-2.0.
+
+**Correctness gate.** Every emitted result is re-executed in a small verifier over the recovered
+program and required to reproduce the return value observed for every input vector; a function that
+does not reproduce (or never cleanly returns) comes back as None. So the module never emits
+unverified C.
+
+**Validated.** `fold64` -- whose unguarded dense switch with handlers past the detected function
+boundary defeats the static lifter -- devirtualizes and verifies through emulation. The combined
+`recover_all` (static first, emulation fallback) covers `mix`, `check`, `wrap` (static) plus
+`fold64` (emulation) on the clean build. Pinned in `tests/test_devirt_emulate.py`, including that the
+memory-loop functions are *refused*, not guessed.
+
+**Honest limits.** This branchless core is correct and self-verifying but not yet complete coverage:
+the loop/memory functions (`crc_ish`, `sum_mix`, `roll`, `decode`) use control-flow (JMP/JZ/JNZ) and
+memory (LOAD/STORE) opcodes the emulation recovery does not model yet, so they are refused rather
+than lifted. Extending the emulation model to control flow (reconstructing loops from the trace) and
+memory is the continuing item -- and the same work carries straight into round 13's
+interpreter-obfuscated target.

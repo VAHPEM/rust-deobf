@@ -4,10 +4,21 @@ Everything in this directory is **dual-licensed**: AGPL-3.0-or-later (see [`LICE
 a commercial license from the author. The Apache-2.0 license of the repository core does **not**
 apply here. See [`../LICENSING.md`](../LICENSING.md) for the full model.
 
-This directory is intentionally a thin shell today. The current public capabilities all live in
-the Apache-2.0 core and stay there — code that is already published under a permissive license
-cannot be meaningfully relicensed after the fact. New high-value capabilities are authored here,
-under the dual license, from their first commit.
+New high-value capabilities are authored here, under the dual license, from their first commit.
+Code already published under the Apache-2.0 core stays there — permissive-licensed code cannot be
+meaningfully relicensed after the fact.
+
+## Modules
+
+- **`devirt_emulate.py`** — emulation-based VM devirtualization. Recovers a RustCloak VM's opcode
+  map, operand key and constant pool by *running* the interpreter under Unicorn and observing opcode
+  semantics (register-file dataflow + value relations), rather than pattern-matching the dispatch's
+  native code. This is codegen-agnostic (any switch lowering) and obfuscation-resistant (it observes
+  what the interpreter *computes*, so an interpreter hardened with MBA/flattening does not defeat
+  it), with a correctness gate that re-executes the recovered program and refuses anything it cannot
+  reproduce. It depends on the core lifter (`scripts/lift_vm.py`) for decode and rendering —
+  premium → core, never the reverse. Current scope: branchless functions; control flow, memory and
+  calls are the next extension.
 
 ## Rule that keeps the model sound
 
