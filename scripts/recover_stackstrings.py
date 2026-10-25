@@ -215,7 +215,19 @@ def collect_arm64(code: bytes, text_va: int, min_len: int):
         ops = ins.operands
         if m in ("mov", "movz") and len(ops) == 2 \
            and ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_IMM:
-            regval[_arm_canon(ins.reg_name(ops[0].reg))] = ops[1].imm & 0xFFFFFFFFFFFFFFFF
+            sh = getattr(ops[1], "shift", None)
+            shift = sh.value if sh and getattr(sh, "value", 0) else 0
+            regval[_arm_canon(ins.reg_name(ops[0].reg))] = (ops[1].imm << shift) & 0xFFFFFFFFFFFFFFFF
+        elif m == "movk" and len(ops) == 2 \
+             and ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_IMM:
+            # movk inserts 16 bits at a shift WITHOUT clearing the rest -- the second half of a
+            # `mov w8,#lo; movk w8,#hi,lsl#16` pair that builds a packed stack string. Ignoring it
+            # dropped the high bytes of every such word.
+            d = _arm_canon(ins.reg_name(ops[0].reg))
+            sh = getattr(ops[1], "shift", None)
+            shift = sh.value if sh and getattr(sh, "value", 0) else 0
+            cur = regval.get(d, 0)
+            regval[d] = (cur & ~(0xFFFF << shift) | ((ops[1].imm & 0xFFFF) << shift)) & 0xFFFFFFFFFFFFFFFF
         elif m in ("strb", "strh", "str") and len(ops) == 2 \
              and ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_MEM:
             src_name = ins.reg_name(ops[0].reg)
@@ -229,6 +241,11 @@ def collect_arm64(code: bytes, text_va: int, min_len: int):
             val = regval[src] & ((1 << (size * 8)) - 1)
             for k, b in enumerate(val.to_bytes(size, "little")):
                 frame[(base, ops[1].mem.disp + k)] = (b, ins.address)
+        elif ops and ops[0].type == ARM64_OP_REG:
+            # any other instruction that writes a register (ldr/ldrb, add, orr, ...) makes its
+            # tracked immediate stale; keeping it let a later str emit a byte that was never there
+            # (the x86 path already does this). A store (handled above) does not reach here.
+            regval.pop(_arm_canon(ins.reg_name(ops[0].reg)), None)
     flush()
     collect_arm64.last_sites = sites
     best = {}
