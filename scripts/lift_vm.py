@@ -42,6 +42,7 @@ OPS = {
     26: ("mov", "mov"), 27: ("cmovnz", "cmov"),
     28: ("jmp", "jmp"), 29: ("jz", "jcc"), 30: ("jnz", "jcc"),
     32: ("load", "load"), 33: ("store", "store"), 34: ("sext", "sext"), 35: ("retv", "retv"),
+    36: ("pusharg", "pusharg"), 37: ("call", "call"),
 }
 WIDTH = {0: 8, 1: 16, 2: 32, 3: 64}
 
@@ -63,7 +64,7 @@ _CHAR = {
     "sete": 16, "setne": 17, "setb": 18, "setbe": 19, "seta": 20, "setae": 21,
     "setl": 22, "setle": 23, "setg": 24, "setge": 25,
 }
-_REGS = re.compile(r"\[rsp \+ \w+\*8 - 0x[0-9a-f]+\]")       # the VM register file on the stack
+_REGS = re.compile(r"\[rsp \+ \w+\*8(?: [+-] 0x[0-9a-f]+)?\]")   # the VM register file on the stack
 
 
 def _handler_insns(img, hva, text_lo, text_hi):
@@ -73,12 +74,15 @@ def _handler_insns(img, hva, text_lo, text_hi):
     out = []
     for ins in img.md.disasm(code, hva):
         out.append((ins.mnemonic, ins.op_str))
-        # a handler ends by re-fetching the next opcode (`add rsi, 4` / bumping the bc pointer) or
-        # returning; stop there so we only read this handler's body
+        # a handler ends by returning, by falling through to the opcode re-fetch (`add rsi, 4` /
+        # bumping the bytecode cursor), or by jumping back to the dispatch loop. The back-edge is an
+        # indirect jump in a threaded (computed-goto) build but a *direct* `jmp <dispatch>` in a
+        # switch build; stop on ANY unconditional jmp, or two handlers run together (a PUSHARG whose
+        # jmp-back is direct would otherwise swallow the following CALL handler's `call`).
         if ins.mnemonic == "ret" or (ins.mnemonic == "add" and re.match(r"r\w+, [0-9]", ins.op_str)
                                      and "rsp" not in ins.op_str):
             break
-        if ins.mnemonic in ("jmp",) and not ins.op_str.startswith("0x"):
+        if ins.mnemonic == "jmp":
             break
     return out
 
@@ -89,48 +93,56 @@ _STKPTR = re.compile(r"^(rsp|rbp|rsi|rdi|esp|ebp|esi|edi),")   # stack / bytecod
 def _classify_handler(img, hva, text_lo, text_hi):
     """Map a dispatch handler's native body to a logical VM opcode (an OPS key), or None.
 
-    Keyed on the handler's characteristic native instruction, in a priority that avoids the index
-    arithmetic in a CONST or the pointer math in a load being mistaken for the real operation."""
+    Keyed on the handler's characteristic native instruction. The VM register file is a stack array
+    indexed by reg*8; its frame displacement varies per function (-0x80, 0, +0x..), so the reg-file
+    pattern must not hardcode one. Priority avoids a CONST's index arithmetic or a load's pointer
+    math being mistaken for the real operation."""
     insns = _handler_insns(img, hva, text_lo, text_hi)
     if not insns:
         return None
     mnems = [m for m, _ in insns]
-    regs_store = any(m == "mov" and re.search(r"\[rsp \+ \w+\*8 - 0x[0-9a-f]+\],", o)
+    regs_store = any(m == "mov" and re.search(r"\[rsp \+ \w+\*8(?: [+-] 0x[0-9a-f]+)?\],", o)
                      for m, o in insns)                    # writes the VM register file
     regs_load = any(_REGS.search(o) for _, o in insns)
 
+    if any(m == "call" for m, _ in insns):
+        return 37                                            # CALL (dispatch through the callee table)
     if "ret" in mnems:
-        return 0 if regs_load else 35                       # RET vs RETV
-    # CMOVNZ writes the reg file via a conditional move (select); check before load/arith
+        return 0 if regs_load else 35                        # RET vs RETV
+    # PUSHARG stages one argument and bumps the arg counter: an `inc`/`add reg,1` (no other opcode
+    # increments a lone counter by one) -- check before everything else
+    if any(m == "inc" or (m == "add" and re.match(r"r\w+, 1$", o)) for m, o in insns):
+        return 36
     if any(m.startswith("cmov") for m, _ in insns) and regs_store:
-        return 27
-    # CONST is the only handler that references a global (the pool) via a rip-relative lea
-    if any(m == "lea" and "[rip " in o for m, o in insns) and regs_store:
+        return 27                                            # CMOVNZ (select into the reg file)
+    # CONST loads a pool entry: either via a rip-relative lea, or a two-register indexed load
+    # (poolbase + idx) where the base was set up earlier; either way it writes the reg file
+    if regs_store and (any(m == "lea" and "[rip " in o for m, o in insns) or
+                       any(m == "mov" and re.search(r", (?:\w+ ptr )?\[r\w+ \+ r\w+\]$", o)
+                           and "rsp" not in o for m, o in insns)):
         return 1
-    # division: quotient (eax/rax) vs remainder (edx/rdx -> stored back to the reg file)
-    for m, o in insns:
+    for m, o in insns:                                       # division: quotient vs remainder
         if m in ("div", "idiv"):
-            rem = any(re.search(r"\[rsp \+ \w+\*8 - 0x[0-9a-f]+\], [re]dx$", oo) for _, oo in insns)
+            rem = any(re.search(r"\[rsp \+ \w+\*8(?: [+-] 0x[0-9a-f]+)?\], [re]dx$", oo)
+                      for _, oo in insns)
             return (14 if rem else 12) if m == "idiv" else (13 if rem else 11)
     # store through a register pointer: mov [rX], rY  (rX is a VM pointer, not the rsp reg-file)
     if any(m == "mov" and re.match(r"\[r[a-z0-9]+\], ", o) and "rsp" not in o for m, o in insns):
         return 33
-    # load through a register pointer: mov/movzx rD, [rX]  (rX not rsp reg-file, not rip)
+    # load through a single register pointer: mov/movzx rD, [rX]  (not rsp reg-file, not rip)
     if any(m in ("mov", "movzx") and re.search(r", (?:[a-z]+ ptr )?\[r[a-z0-9]+\]$", o)
            and "rsp" not in o and "rip" not in o for m, o in insns) and regs_store:
         return 32
     if any(m == "movsx" for m, _ in insns) and regs_store:
         return 34                                            # SEXT (sign-extend into the reg file)
-    # arithmetic / comparison on the reg file or on temporaries (skip stack/bc-pointer bumps)
-    for m, o in insns:
+    for m, o in insns:                                       # arithmetic / comparison
         if m in _CHAR and not _STKPTR.match(o):
             if m == "xor":
                 parts = o.split(",")
                 if len(parts) == 2 and parts[0].strip() == parts[1].strip():
-                    continue                                # xor eax,eax zeroing
+                    continue                                 # xor eax,eax zeroing
             return _CHAR[m]
-    # control flow: handlers that do not write the reg file
-    if not regs_store:
+    if not regs_store:                                       # control flow: no reg-file write
         for m, _ in insns:
             if m in ("cmove", "sete"):
                 return 29                                    # JZ
@@ -177,10 +189,37 @@ def _recover_operand_key(lines):
     return (key[2], key[1], key[0])                           # (kd, ka, kb)
 
 
+def _pool_from_handler(img, h, flines):
+    """The pool base address referenced by a CONST handler: either a rip-relative lea inside the
+    handler, or -- when the handler indexes an already-loaded base register (`mov r,[idx+base]`) --
+    the prologue rip-lea that set that base register."""
+    ho = h - img.text_va
+    hins = list(img.md.disasm(bytes(img.code[ho:ho + 64]), h))
+    for ins in hins:
+        lm = re.match(r"lea \w+, \[rip \+ (0x[0-9a-f]+)\]", ins.mnemonic + " " + ins.op_str)
+        if lm:
+            return (ins.address + ins.size + int(lm.group(1), 16)) & 0xffffffffffffffff
+    for ins in hins:                                            # two-register pool load: base is a reg
+        if not ins.mnemonic.startswith("mov"):
+            continue
+        tm = re.search(r"\[(\w+) \+ (\w+)\]", ins.op_str)
+        if not tm or "rsp" in ins.op_str:
+            continue
+        for reg in (tm.group(1), tm.group(2)):                  # find the prologue lea for that base
+            for pl in flines:
+                plm = re.match(r"lea " + reg + r", \[rip \+ (0x[0-9a-f]+)\]",
+                               pl.mnemonic + " " + pl.op_str)
+                if plm:
+                    return (pl.address + pl.size + int(plm.group(1), 16)) & 0xffffffffffffffff
+    return None
+
+
 def _recover_map(img, fva, size, text_lo, text_hi):
     """Recover this function's opcode-byte -> logical-op map by parsing its dispatch jump table
     (`lea base,[rip+T]; add idx,-min; cmp idx,N; movsxd r,[base+idx*4]; add r,base; jmp r`) and
-    classifying each handler. Returns {byte: base} or None if the dispatch can't be parsed."""
+    classifying each handler. LLVM also peels hot/out-of-range opcodes out of the switch as
+    `cmp rawop,IMM; je HANDLER` with a fall-through default; those are parsed too. Returns
+    (bytemap, key, pool_va, default_base) or None if the dispatch can't be parsed."""
     off = fva - img.text_va
     lines = list(img.md.disasm(bytes(img.code[off:off + size]), fva))
     disp_i = base_reg = idx_reg = None
@@ -257,31 +296,62 @@ def _recover_map(img, fva, size, text_lo, text_hi):
         if base is None:
             continue
         bytemap[byte] = base
-        if base == 1 and pool_va is None:                   # CONST handler: its rip-lea is the pool
-            ho = h - img.text_va
-            for ins in img.md.disasm(bytes(img.code[ho:ho + 64]), h):
-                lm = re.match(r"lea \w+, \[rip \+ (0x[0-9a-f]+)\]", ins.mnemonic + " " + ins.op_str)
-                if lm:
-                    pool_va = ins.address + ins.size + int(lm.group(1), 16)
-                    break
-    return bytemap, key, pool_va
+        if base == 1 and pool_va is None:                   # CONST handler -> locate its pool base
+            pool_va = _pool_from_handler(img, h, lines)
+    # peeled cases: `cmp rawop, IMM8; je HANDLER` sit just before the table load, with the opcode
+    # that matched none of them falling through to a default handler. Map both, so small functions
+    # whose ADD/MUL were peeled out of the jump-table cluster don't lose those opcodes.
+    default_base = None
+    win2 = lines[max(0, disp_i - 28):disp_i + 2]
+    for k in range(len(win2) - 1):
+        cm = re.match(r"cmp \w+, (0x[0-9a-fA-F]+)$", win2[k].mnemonic + " " + win2[k].op_str)
+        jm = re.match(r"je (0x[0-9a-fA-F]+)$", win2[k + 1].mnemonic + " " + win2[k + 1].op_str)
+        if not (cm and jm and int(cm.group(1), 16) <= 0xff):
+            continue
+        tgt = int(jm.group(1), 16)
+        if not (text_lo <= tgt < text_hi):
+            continue
+        b = _classify_handler(img, tgt, text_lo, text_hi)
+        if b is not None:
+            bytemap.setdefault(int(cm.group(1), 16), b)
+            if b == 1 and pool_va is None:
+                pool_va = _pool_from_handler(img, tgt, lines)
+        nxt = win2[k + 1].address + win2[k + 1].size          # fall-through = the default handler
+        db = _classify_handler(img, nxt, text_lo, text_hi)
+        if db is not None:
+            default_base = db
+            if db == 1 and pool_va is None:
+                pool_va = _pool_from_handler(img, nxt, lines)
+    return bytemap, key, pool_va, default_base
 
 
-def _decode_map(blob, bytemap, key=(0, 0, 0)):
+def _decode_map(blob, bytemap, key=(0, 0, 0), default_base=None):
     """Decode a blob using a recovered byte->base map, decrypting the operand bytes with the
-    recovered key (same structural checks as _decode)."""
+    recovered key (same structural checks as _decode). A byte absent from the map falls back to
+    default_base (the switch's fall-through handler) when one was recovered; in that mode the
+    program is delimited by its first RET rather than by the first unmapped byte (every byte maps,
+    so there is no unmapped-byte boundary before the next function's blob)."""
     kd, ka, kb = key
-    if len(blob) < 4 or blob[0] not in bytemap or bytemap[blob[0]] in (0, 35):
+
+    def b2base(byte):
+        return bytemap[byte] if byte in bytemap else default_base
+
+    if len(blob) < 4 or b2base(blob[0]) is None or b2base(blob[0]) in (0, 35):
         return None
     prog = []
     off = 0
-    while off + 4 <= len(blob) and blob[off] in bytemap:
+    while off + 4 <= len(blob):
+        base = b2base(blob[off])
+        if base is None:
+            break
         prog.append((off, blob[off], blob[off + 1] ^ kd, blob[off + 2] ^ ka, blob[off + 3] ^ kb))
         off += 4
-    if len(prog) < 6 or bytemap[prog[-1][1]] not in (0, 35):
+        if default_base is not None and base in (0, 35):       # stop at the first RET in default mode
+            break
+    if len(prog) < 6 or b2base(prog[-1][1]) not in (0, 35):
         return None
     for _, op, dst, a, b in prog:
-        base = bytemap[op]
+        base = b2base(op)
         if base in (28, 29, 30) and ((a | (b << 8)) % 4 or (a | (b << 8)) >= len(prog) * 4):
             return None
     return prog
@@ -498,10 +568,15 @@ def _pseudocode(prog, bof, pool):
         return None
 
     if not has_cf:                                           # fold into a single return expression
-        ret = None
+        ret, pending = None, []
         for off, op, dst, a, b in prog:
             base = bof(op)
-            if base in (0,):
+            if base == 36:                                   # PUSHARG: stage an argument
+                pending.append(val(a))
+            elif base == 37:                                 # CALL: fn[idx](staged args)
+                expr[dst] = f"fn{a}(" + ", ".join(pending) + ")"
+                pending = []
+            elif base in (0,):
                 ret = val(a)
             elif base == 33:                                 # a store in a "branchless" body: keep it
                 pass
@@ -513,13 +588,18 @@ def _pseudocode(prog, bof, pool):
 
     # control flow: flat statements with labels and gotos
     labels = {a | (b << 8) for _, op, _, a, b in prog if bof(op) in (28, 29, 30)}
-    out = []
+    out, pending = [], []
     for off, op, dst, a, b in prog:
         base, w = bof(op), _width(op)
         if off in labels:
             out.append(f"L{off:04x}:")
         pre = "    "
-        if base == 0:
+        if base == 36:                                       # PUSHARG: stage one call argument
+            pending.append(f"r{a}")
+        elif base == 37:                                     # CALL: rD = fn[idx](staged args)
+            out.append(pre + f"r{dst} = fn{a}(" + ", ".join(pending) + ");")
+            pending = []
+        elif base == 0:
             out.append(pre + f"return r{a};")
         elif base == 35:
             out.append(pre + "return;")
@@ -546,9 +626,10 @@ def _pseudocode(prog, bof, pool):
     return _structure(out)
 
 
-def lift_region(bc_va, prog, bytemap=None, pool=None):
-    # base opcode: from the recovered per-build map when randomized, else the fixed low 6 bits
-    bof = (lambda op: bytemap[op]) if bytemap else _base
+def lift_region(bc_va, prog, bytemap=None, pool=None, default_base=None):
+    # base opcode: from the recovered per-build map when randomized (unmapped bytes fall back to the
+    # switch's default handler), else the fixed low 6 bits
+    bof = (lambda op: bytemap.get(op, default_base)) if bytemap else _base
     nconst = max((a | (b << 8)) + 1 for (_, op, dst, a, b) in prog if bof(op) == 1) if \
         any(bof(op) == 1 for (_, op, _, _, _) in prog) else 0
     labels = {off for (_, op, _, a, b) in prog if bof(op) in (28, 29, 30)
@@ -558,7 +639,7 @@ def lift_region(bc_va, prog, bytemap=None, pool=None):
     for off, op, dst, a, b in prog:
         mn, kind = OPS[bof(op)]
         w = _width(op)
-        ws = "" if bof(op) in (0, 1, 26, 27, 28, 29, 30, 35) else f".i{w}"
+        ws = "" if bof(op) in (0, 1, 26, 27, 28, 29, 30, 35, 36, 37) else f".i{w}"
         lbl = f"L{off:04x}" if off in labels else "     "
         tag = f"{mn}{ws}"
         if kind == "ret":
@@ -583,6 +664,10 @@ def lift_region(bc_va, prog, bytemap=None, pool=None):
             lines.append((off, lbl, f"jmp      L{(a | (b << 8)):04x}"))
         elif kind == "jcc":
             lines.append((off, lbl, f"{tag:<9} r{dst}, L{(a | (b << 8)):04x}"))
+        elif kind == "pusharg":
+            lines.append((off, lbl, f"pusharg  r{a}"))
+        elif kind == "call":
+            lines.append((off, lbl, f"call     r{dst} = fn[{a}](...)"))
     return {"bytecode_va": bc_va, "instructions": len(prog), "constants": nconst,
             "has_control_flow": bool(labels), "has_memory": has_mem,
             "listing": lines, "labels": sorted(labels),
@@ -619,7 +704,8 @@ def lift(path: Path) -> dict:
         rec = _recover_map(img, fva, size, text_lo, text_hi)
         if not rec:
             continue
-        bytemap, key, pool_va = rec
+        bytemap, key, pool_va, default_base = rec
+        bof = lambda op: bytemap.get(op, default_base)
         for t in _rip_targets_fn(img, fva, size):
             # the bytecode cursor is initialised a few bytes into the blob (the fetch reads
             # [cursor-3]), so the true start can be just before the lea target: search both ways
@@ -627,10 +713,10 @@ def lift(path: Path) -> dict:
             for d in range(-4, 5):
                 if (t + d) in seen:
                     continue
-                prog = _decode_map(_read_va(img, t + d, 8192), bytemap, key)
+                prog = _decode_map(_read_va(img, t + d, 8192), bytemap, key, default_base)
                 if not prog or len(prog) < 8:
                     continue
-                bases = [bytemap[op] for _, op, _, _, _ in prog]
+                bases = [bof(op) for _, op, _, _, _ in prog]
                 starts_const = bases[0] == 1
                 distinct = len(set(bases))
                 # a correct decode begins with the CONST preamble and is not dominated by one op;
@@ -643,13 +729,13 @@ def lift(path: Path) -> dict:
                     best = (score, t + d, prog)
             if best:
                 nconst = max((a | (b << 8)) + 1 for _, op, dst, a, b in best[2]
-                             if bytemap[op] == 1) if any(bytemap[op] == 1 for _, op, *_ in best[2]) else 0
+                             if bof(op) == 1) if any(bof(op) == 1 for _, op, *_ in best[2]) else 0
                 pool = None
                 if pool_va and nconst:
                     raw = _read_va(img, pool_va, nconst * 8)
                     if len(raw) >= nconst * 8:
                         pool = list(struct.unpack("<%dQ" % nconst, raw[:nconst * 8]))
-                out.append(lift_region(best[1], best[2], bytemap, pool))
+                out.append(lift_region(best[1], best[2], bytemap, pool, default_base))
                 seen.add(best[1])
                 break
     # also run the fixed-encoding scan (identity-opcode builds); recovery wins on a shared blob

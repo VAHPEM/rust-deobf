@@ -15,6 +15,7 @@ import lift_vm
 
 VMFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm.x64"
 PLAIN = ROOT / "tests" / "fixtures" / "vm" / "plain.x64"
+CALLFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_call.x64"
 _X64 = platform.machine() in ("x86_64", "AMD64")
 
 pytestmark = pytest.mark.skipif(not _X64, reason="x86-64 fixtures")
@@ -97,6 +98,27 @@ def test_opcode_map_recovered_and_logic_reconstructed():
     want = {"mul", "ashr", "xor", "srem", "eq", "sgt", "and", "cmovnz"}
     assert any(want <= s for s in sigs), \
         f"did not reconstruct check()'s logic from randomized opcodes; got {sigs}"
+
+
+# --- round 12: virtualized CALL / PUSHARG --------------------------------------------------------
+@pytest.mark.skipif(not CALLFIX.is_file(), reason="call fixture missing")
+def test_virtualized_call_is_devirtualized():
+    # RustCloak can virtualize a function's CALLs: arguments are staged via PUSHARG and the call is
+    # dispatched through a per-function callee table (CALL). The lifter must decode both opcodes --
+    # even though PUSHARG's handler jumps *directly* back to the dispatch loop (so a naive handler
+    # reader would run it into the following CALL handler) and ADD/MUL are peeled out of the switch
+    # into a compare-chain with a fall-through default. wrap() = helper(x,y) + helper(y,x)*3 must come
+    # back as a C expression with two calls through the recovered callee index.
+    r = lift_vm.lift(CALLFIX)
+    assert r["count"] >= 1
+    callfn = next((f for f in r["lifted"]
+                   if any("call" == t.split()[0].split(".")[0] for _, _, t in f["listing"])), None)
+    assert callfn is not None, "no function lifted with a CALL opcode"
+    ms = _mnemonics(callfn)
+    assert "call" in ms and "pusharg" in ms, f"CALL/PUSHARG not both present: {set(ms)}"
+    pc = "\n".join(callfn["pseudocode"])
+    assert pc.count("fn0(") == 2, f"expected two calls to the one callee in pseudocode: {pc!r}"
+    assert "* 3" in pc and pc.startswith("return ")           # the *3 and a single return expression
 
 
 def test_structurer_raises_goto_to_while_and_if():

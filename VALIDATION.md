@@ -1462,3 +1462,59 @@ structurer handles reducible control flow; the demo's one loop function is an `-
 (odd/even split, shared joins) that stays `if/goto`. Pushing coverage to every function and every
 compiler-emitted dispatch shape, and structuring irreducible/unrolled loops (a full relooper), are
 the continuing items -- along with the open red-side work (virtualizing calls and global references).
+
+## 31. Round 12: virtualized CALL/PUSHARG (RustCloak) ↔ call devirtualization + switch-lowering coverage (rust-deobf) (Oct 2026)
+
+Red side (RustCloak, committed separately as `38b120e`): the VM can now virtualize a function's
+**calls**. Arguments are staged with a `PUSHARG` opcode into an argument buffer and the call is
+dispatched through a per-function **callee table** with a `CALL` opcode, via a uniform
+`i64(i64×6)` thunk (ABI-safe for ≤6 int/pointer args on SysV and AAPCS). Verified
+behaviour-preserving: the `vm_demo` stress checksum (`stress=5438212857779519003`) matches the
+native build on x86-64 and on AArch64 (Kali).
+
+Blue side (rust-deobf): the lifter decodes the two new opcodes.
+
+**CALL/PUSHARG decode.** `_classify_handler` labels the `CALL` handler (dispatch through the callee
+table → a native `call`) and the `PUSHARG` handler (stage one register into the arg buffer and bump
+the arg counter → an `inc`/`add reg,1`). `lift_region` renders `pusharg rN` / `call rD = fn[i](...)`,
+and the pseudocode folds staged `PUSHARG`s into the argument list of the following `CALL`:
+`wrap() = helper(x,y) + helper(y,x)*3` devirtualizes to the exact C expression
+`return ((fn0(a1, a0) * 3) + fn0(a0, a1));`. Unit-pinned
+(`tests/test_lift_vm.py::test_virtualized_call_is_devirtualized`) against a committed clean VM-only
+fixture (`tests/fixtures/vm/rustcloak_vm_call.x64`).
+
+**Two dispatch-shape fixes this required.** Validating on a freshly built binary surfaced that the
+current builds lower the interpreter's `switch` to a *single* base-relative jump table
+(`lea base,[rip]; add idx,-min; movsxd r,[base+idx*4]; add r,base; jmp r`), not the threaded
+computed-goto of the earlier fixtures — and that LLVM peels hot/out-of-range opcodes (here ADD and
+MUL) out of the switch into a `cmp rawop,IMM8; je handler` compare-chain with a fall-through
+default. Both are now handled:
+- `_handler_insns` stops at **any** unconditional `jmp`, not only an indirect one. In a switch build
+  a handler's back-edge to the dispatch loop is a *direct* `jmp`; without this a `PUSHARG` handler
+  (whose jump-back is direct) ran straight into the following `CALL` handler's code and was
+  misclassified as a call.
+- `_recover_map` now also parses the peeled `cmp;je` cases and the fall-through **default** handler,
+  and `_decode_map` falls back to that default for any opcode byte absent from the jump table
+  (delimiting the program by its first `RET` in that mode). The pool base is resolved from a CONST
+  handler's rip-lea *or*, when the handler indexes an already-loaded base register, from the
+  prologue `lea` that set it.
+
+**Build note (reproducing the clean VM fixture).** The default `-fpass-plugin` pipeline runs
+`virt → subst → bogus → flatten` + `strenc`, so a plain `RUSTCLOAK_VM=1 clang` build further
+obfuscates the interpreter itself (the operand-decrypt `xor` becomes MBA; the dispatch is
+flattened), which is a *different, harder* target. The VM-only fixtures are built by running the
+`virt` pass alone: `clang-18 -O2 -emit-llvm` → `opt-18 -load-pass-plugin=… -passes=virt` → `clang-18 -O2`.
+
+**Validated.** Full suite green; `check()` and `wrap()` both devirtualize to exact C on the clean
+switch-lowered build, on top of the round-11 randomized+operand-encrypted recovery.
+
+**Honest limits.** Round 12's goal — virtualize calls (red) and devirtualize them (blue) — is met and
+pinned. Full *coverage* is still partial and remains the standing frontier: on the switch-lowered
+build, `check()` and `wrap()` devirtualize end-to-end, but the loop/64-bit functions
+(`mix`, `fold64`, `crc_ish`, `sum_mix`, `roll`) have their dispatch and operand key recovered yet do
+not fully decode — their default/peeled opcode sits in a switch arrangement the default-handler
+parser does not yet match, so they are skipped rather than lifted wrong. Generalizing default-handler
+detection across every LLVM switch-lowering shape (and, separately, handling the fully-obfuscated
+interpreter where the VM itself is run through subst/bogus/flatten) are the continuing items.
+Devirtualizing the *interpreter-obfuscated* build is where the MBA simplifier (`deobf_expr`) and the
+deflattener would feed the operand-key recovery — a natural next red/blue round.
