@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: Ve (VAHPEM) <ve0912084386@gmail.com>
+#
+# Dual-licensed: AGPL-3.0-or-later OR a commercial license.
+# Commercial licensing: Ve (VAHPEM) <ve0912084386@gmail.com>
 """lift_vm.py - lift a RustCloak-virtualized function's bytecode back to a readable listing.
 
 detect_vm.py says a function is virtualized; this goes one step further and *devirtualizes* it to
@@ -15,6 +20,14 @@ to run anything. STATIC ONLY.
     python3 scripts/lift_vm.py <binary> [--json]
 """
 from __future__ import annotations
+
+import sys as _sys
+from pathlib import Path as _Path
+# premium module: find both premium/ (sibling premium modules) and the Apache core in scripts/
+for _p in (str(_Path(__file__).resolve().parent), str(_Path(__file__).resolve().parent.parent / 'scripts')):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
 
 import argparse
 import json

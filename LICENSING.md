@@ -9,8 +9,9 @@ Apache License 2.0 (see [`LICENSE`](LICENSE)). This is a permissive, OSI-approve
 you may use it, including in closed-source and commercial products, with attribution and
 subject to Apache 2.0's patent terms. The core is, and will stay, free.
 
-This covers the detection, string/metadata recovery, triage, and the standard
-single-build devirtualization pipeline.
+This covers detection (including VM / anti-emulation detection), string and
+metadata recovery, artifact/IOC extraction, and the SOC triage pipeline — the
+capabilities that make the free tool useful on its own.
 
 ## Premium modules — AGPL-3.0-or-later OR Commercial
 

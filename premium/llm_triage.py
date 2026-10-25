@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: Ve (VAHPEM) <ve0912084386@gmail.com>
+#
+# Dual-licensed: AGPL-3.0-or-later OR a commercial license.
+# Commercial licensing: Ve (VAHPEM) <ve0912084386@gmail.com>
 """llm_triage.py - AI-assisted triage on top of the deterministic recovery.
 
 soc_triage.py recovers hard facts (format/arch, Rust toolchain, crate/capability fingerprint,
@@ -26,6 +31,14 @@ Backends (auto-detected; keeps malware data local when you want it to):
 STATIC + EMULATION ONLY; never executes the sample.
 """
 from __future__ import annotations
+
+import sys as _sys
+from pathlib import Path as _Path
+# premium module: find both premium/ (sibling premium modules) and the Apache core in scripts/
+for _p in (str(_Path(__file__).resolve().parent), str(_Path(__file__).resolve().parent.parent / 'scripts')):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
 
 import argparse
 import json

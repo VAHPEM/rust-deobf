@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: Ve (VAHPEM) <ve0912084386@gmail.com>
+#
+# Dual-licensed: AGPL-3.0-or-later OR a commercial license.
+# Commercial licensing: Ve (VAHPEM) <ve0912084386@gmail.com>
 """deobf_expr.py - Tier 4: provable simplification of obfuscated expressions.
 
 Two building blocks of code deobfuscation, done soundly with an SMT solver (z3) so a
@@ -24,6 +29,14 @@ allowlist -- no eval of arbitrary code.
     python deobf_expr.py --selftest
 """
 from __future__ import annotations
+
+import sys as _sys
+from pathlib import Path as _Path
+# premium module: find both premium/ (sibling premium modules) and the Apache core in scripts/
+for _p in (str(_Path(__file__).resolve().parent), str(_Path(__file__).resolve().parent.parent / 'scripts')):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
 import argparse, ast, sys
 
 try:

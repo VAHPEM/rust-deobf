@@ -38,11 +38,13 @@ import struct
 import sys
 from pathlib import Path
 
-_CORE = Path(__file__).resolve().parent.parent / "scripts"
-if str(_CORE) not in sys.path:
-    sys.path.insert(0, str(_CORE))
+_HERE = Path(__file__).resolve().parent                     # premium/ (sibling premium modules)
+_CORE = _HERE.parent / "scripts"                            # the Apache-2.0 core
+for _p in (str(_HERE), str(_CORE)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-import lift_vm                              # core (Apache-2.0): static decode + lift_region
+import lift_vm                              # premium: static decode + lift_region (devirtualizer)
 from recover_emulate import Image, map_image, _fast_access, STACK, STACK_SIZE  # core emulation infra
 
 from unicorn import (Uc, UcError, UC_ARCH_X86, UC_MODE_64,

@@ -276,7 +276,7 @@ round), and folds into the triage card as a signal. Precise on x86-64 (`ls`/`gre
 clean; it does flag CPython's eval loop — correctly, that genuinely is an interpreter); AArch64
 detection is the next round.
 
-`scripts/lift_vm.py <binary>` goes one step further and **devirtualizes** a detected VM function:
+`premium/lift_vm.py <binary>` (premium — AGPL/commercial) goes one step further and **devirtualizes** a detected VM function:
 it finds the embedded bytecode blob (anchored by its code cross-reference, since the blobs are
 packed in `.rodata`), decodes the register-machine instructions — including the control-flow
 opcodes, so branches and loops come back as labelled `jmp`/`jnz` with the SSA PHI copies visible —
@@ -295,7 +295,7 @@ the function's exact source. Control-flow bodies are raised from `if/goto` towar
 `do/while` + `if` where the flow is reducible (an `-O2`-unrolled loop nest is left as `if/goto`).
 x86-64; recovery is demonstrated end-to-end on a function, with full per-binary coverage ongoing.
 
-`scripts/llm_triage.py <binary>` adds an **AI-assisted** read on top: it hands *only* the
+`premium/llm_triage.py <binary>` (premium — AGPL/commercial) adds an **AI-assisted** read on top: it hands *only* the
 deterministically recovered facts (the triage card above — never the raw binary) to an LLM and asks
 for a grounded verdict, likely capabilities tied to the evidence, candidate ATT&CK techniques, what
 is uncertain, and next steps. The deterministic facts stay ground truth; the LLM note is a clearly
