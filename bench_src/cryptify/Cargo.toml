@@ -1,0 +1,25 @@
+[package]
+name = "cryptify"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cryptify = "3"
+
+[profile.release]
+strip = false
+opt-level = 3
+
+[profile.size-lto]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.speed-lto]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

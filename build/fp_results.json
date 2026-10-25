@@ -1,0 +1,139 @@
+{
+  "summary": {
+    "binaries": 15,
+    "clean_binaries": 14,
+    "decoder_candidates_total": 133,
+    "false_positives_total": 5,
+    "fp_per_binary": 0.33,
+    "fp_per_text_mb": 0.19,
+    "text_mb_total": 26.0
+  },
+  "rows": [
+    {
+      "binary": "/usr/bin/git",
+      "text_bytes": 3151442,
+      "decoder_candidates": 19,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/openssl",
+      "text_bytes": 425237,
+      "decoder_candidates": 0,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/python3.11",
+      "text_bytes": 2736894,
+      "decoder_candidates": 20,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/python3.12",
+      "text_bytes": 3018782,
+      "decoder_candidates": 0,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/python3.13",
+      "text_bytes": 3108530,
+      "decoder_candidates": 0,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/bash",
+      "text_bytes": 968381,
+      "decoder_candidates": 10,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/gpg",
+      "text_bytes": 820322,
+      "decoder_candidates": 1,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/perl",
+      "text_bytes": 1902688,
+      "decoder_candidates": 19,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/vim.basic",
+      "text_bytes": 3184657,
+      "decoder_candidates": 40,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/dpkg",
+      "text_bytes": 184737,
+      "decoder_candidates": 2,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/tar",
+      "text_bytes": 299147,
+      "decoder_candidates": 0,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/gzip",
+      "text_bytes": 58926,
+      "decoder_candidates": 2,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/bin/xz",
+      "text_bytes": 42530,
+      "decoder_candidates": 0,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+      "text_bytes": 3347362,
+      "decoder_candidates": 0,
+      "false_positives": 0,
+      "fp_strings": [],
+      "error": null
+    },
+    {
+      "binary": "/tmp/rg/bin/rg",
+      "text_bytes": 2727971,
+      "decoder_candidates": 20,
+      "false_positives": 5,
+      "fp_strings": [
+        "GateRp",
+        "Intaii[RVnZe",
+        "RelebsAHAb0i!",
+        "marce:]g/rXd",
+        "pregbaI"
+      ],
+      "error": null
+    }
+  ]
+}

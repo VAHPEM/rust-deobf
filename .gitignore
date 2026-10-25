@@ -1,0 +1,19 @@
+build/*.exe
+build/plaintext__* 
+build/xor_custom__* 
+build/obfstr__* 
+build/litcrypt__* 
+build/muddy__* 
+bench_src/*/target/
+bench_src/*/Cargo.lock
+__pycache__/
+*.pyc
+build/*_arm64
+build/litcrypt2_arm64
+# every benchmark binary built by scripts/build_all.sh (all crates, x86-64 and ARM64=1)
+build/*__*
+build/arm64/
+build/build_manifest.jsonl
+obf_src/*/target/
+obf_src/*/Cargo.lock
+obf_src/ollvm_fla/fla

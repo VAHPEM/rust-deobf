@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # weekly: a new stable rustc can change the decoder idioms the recoverers key on
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - name: Self-tests (no binaries needed)
+        run: python -m pytest tests/test_selftests.py -q
+
+  benchmark:
+    # one job per output format: the build matrix (canary + scatter suites, release and the
+    # size/speed fat-LTO profiles) and the emulation-heavy tests are too long for one runner
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [elf, pe, elf-arm64, elf-arm64gnu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Rust toolchain (current stable) + targets
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add x86_64-pc-windows-gnu aarch64-unknown-linux-musl
+          rustc --version
+
+      - name: mingw-w64 (PE target linker)
+        if: matrix.format == 'pe'
+        run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64
+
+      - name: llvm-strip (AArch64)
+        if: matrix.format == 'elf-arm64'
+        run: sudo apt-get update -q && sudo apt-get install -y -q llvm
+
+      - name: AArch64 glibc cross linker
+        if: matrix.format == 'elf-arm64gnu'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+
+      - name: Build the benchmark for ${{ matrix.format }}
+        run: |
+          if [ "${{ matrix.format }}" = elf-arm64gnu ]; then
+            FORMATS=none ARM64_GNU=1 bash scripts/build_all.sh
+          else
+            FORMATS=${{ matrix.format }} bash scripts/build_all.sh
+          fi
+
+      - name: Recall and precision (canary + scatter suites)
+        run: python -m pytest tests/test_benchmark.py tests/test_scatter.py -q -rs
+
+      - name: Obfuscation crates (goldberg et al.)
+        run: |
+          if [ "${{ matrix.format }}" = elf-arm64 ]; then ARM64=1 bash obf_src/build_obf.sh
+          elif [ "${{ matrix.format }}" = elf ] || [ "${{ matrix.format }}" = pe ]; then
+            ARM64=0 bash obf_src/build_obf.sh
+          fi
+          python -m pytest tests/test_obf.py -q -rs
+
+  precision:
+    # false positives on real, benign binaries of three languages (C/C++, Go, Rust) found on the
+    # runner: every decoded string reported there is wrong. The runner image changes under us, so
+    # this job reports (a table on the run page) and is marked failed on any FP, without failing
+    # the workflow.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Real-binary corpus, whole pipeline
+        env:
+          RUST_DEOBF_FP_STRICT: "1"
+        run: python scripts/measure_fp.py --pipeline --corpus --time-budget 60

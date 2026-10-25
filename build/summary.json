@@ -1,0 +1,578 @@
+[
+  {
+    "proj": "add_custom",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "add_custom",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "add_custom",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 5
+  },
+  {
+    "proj": "add_custom",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 5
+  },
+  {
+    "proj": "add_custom",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "add_custom",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "add_custom",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 5
+  },
+  {
+    "proj": "add_custom",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 5
+  },
+  {
+    "proj": "litcrypt",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 5
+  },
+  {
+    "proj": "litcrypt",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 5
+  },
+  {
+    "proj": "litcrypt",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 5
+  },
+  {
+    "proj": "litcrypt",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 5
+  },
+  {
+    "proj": "litcrypt2",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt2",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt2",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt2",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt2",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt2",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt2",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "litcrypt2",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "muddy",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "muddy",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "muddy",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "muddy",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "muddy",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "muddy",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "muddy",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "muddy",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "obfstr",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "obfstr",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "obfstr",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "obfstr",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "obfstr",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "obfstr",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "obfstr",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "obfstr",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "plaintext",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 5,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "plaintext",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 5,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "plaintext",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 5,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "plaintext",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 5,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "plaintext",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 5,
+    "floss": 5,
+    "ours": 0
+  },
+  {
+    "proj": "plaintext",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 5,
+    "floss": 5,
+    "ours": 0
+  },
+  {
+    "proj": "plaintext",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 5,
+    "floss": 5,
+    "ours": 0
+  },
+  {
+    "proj": "plaintext",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 5,
+    "floss": 5,
+    "ours": 0
+  },
+  {
+    "proj": "sub_custom",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "sub_custom",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "sub_custom",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 5
+  },
+  {
+    "proj": "sub_custom",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 5
+  },
+  {
+    "proj": "sub_custom",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "sub_custom",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "sub_custom",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 5
+  },
+  {
+    "proj": "sub_custom",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 5
+  },
+  {
+    "proj": "xor_custom",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "xor_custom",
+    "fmt": "elf",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 0
+  },
+  {
+    "proj": "xor_custom",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 5
+  },
+  {
+    "proj": "xor_custom",
+    "fmt": "elf",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": "N/A",
+    "ours": 5
+  },
+  {
+    "proj": "xor_custom",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "xor_custom",
+    "fmt": "pe",
+    "profile": "debug",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 0
+  },
+  {
+    "proj": "xor_custom",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "nostrip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 5
+  },
+  {
+    "proj": "xor_custom",
+    "fmt": "pe",
+    "profile": "release",
+    "strip": "strip",
+    "strings": 0,
+    "floss": 0,
+    "ours": 5
+  }
+]

@@ -1,0 +1,102 @@
+{
+  "summary": {
+    "binaries": 8,
+    "crates_recovered": 17,
+    "crates_in_lock": 17,
+    "precision": 1.0,
+    "version_pairs": 17,
+    "version_exact": 17,
+    "version_accuracy": 1.0,
+    "panic_sites_total": 2533
+  },
+  "rows": [
+    {
+      "binary": "add_custom",
+      "lock_crates": 0,
+      "recovered_crates": 0,
+      "recovered_in_lock": 0,
+      "version_pairs": 0,
+      "version_exact": 0,
+      "panic_sites": 207,
+      "own_source_files": 12,
+      "false_crates": []
+    },
+    {
+      "binary": "litcrypt",
+      "lock_crates": 15,
+      "recovered_crates": 0,
+      "recovered_in_lock": 0,
+      "version_pairs": 0,
+      "version_exact": 0,
+      "panic_sites": 207,
+      "own_source_files": 12,
+      "false_crates": []
+    },
+    {
+      "binary": "litcrypt2",
+      "lock_crates": 15,
+      "recovered_crates": 0,
+      "recovered_in_lock": 0,
+      "version_pairs": 0,
+      "version_exact": 0,
+      "panic_sites": 207,
+      "own_source_files": 12,
+      "false_crates": []
+    },
+    {
+      "binary": "meta_probe",
+      "lock_crates": 44,
+      "recovered_crates": 13,
+      "recovered_in_lock": 13,
+      "version_pairs": 13,
+      "version_exact": 13,
+      "panic_sites": 1073,
+      "own_source_files": 13,
+      "false_crates": []
+    },
+    {
+      "binary": "muddy",
+      "lock_crates": 43,
+      "recovered_crates": 4,
+      "recovered_in_lock": 4,
+      "version_pairs": 4,
+      "version_exact": 4,
+      "panic_sites": 219,
+      "own_source_files": 12,
+      "false_crates": []
+    },
+    {
+      "binary": "obfstr",
+      "lock_crates": 0,
+      "recovered_crates": 0,
+      "recovered_in_lock": 0,
+      "version_pairs": 0,
+      "version_exact": 0,
+      "panic_sites": 206,
+      "own_source_files": 11,
+      "false_crates": []
+    },
+    {
+      "binary": "sub_custom",
+      "lock_crates": 0,
+      "recovered_crates": 0,
+      "recovered_in_lock": 0,
+      "version_pairs": 0,
+      "version_exact": 0,
+      "panic_sites": 207,
+      "own_source_files": 12,
+      "false_crates": []
+    },
+    {
+      "binary": "xor_custom",
+      "lock_crates": 0,
+      "recovered_crates": 0,
+      "recovered_in_lock": 0,
+      "version_pairs": 0,
+      "version_exact": 0,
+      "panic_sites": 207,
+      "own_source_files": 12,
+      "false_crates": []
+    }
+  ]
+}

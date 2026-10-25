@@ -1,0 +1,17 @@
+[package]
+name = "goldberg_cff"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+goldberg = "0.1"
+
+[profile.release]
+opt-level = 3
+
+[profile.size-lto]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
