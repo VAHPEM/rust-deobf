@@ -42,20 +42,33 @@ from pathlib import Path
 # ---- the memory-scan harness (shared design with recover_dynamic.py) -------------
 SCAN_JS = r"""
 let done = false;
+// String.fromCharCode.apply(null, arr) throws RangeError once arr is long enough to blow the JS
+// argument limit (~64k-128k), so a long printable run would make the whole scan return nothing.
+// Build the string from fixed-size chunks instead.
+function toStr(arr) {
+  let s = "";
+  for (let i = 0; i < arr.length; i += 8192) {
+    s += String.fromCharCode.apply(null, arr.slice(i, i + 8192));
+  }
+  return s;
+}
 function scan() {
   const out = new Set();
+  const WIN = 0x400000;                 // page a large RW range in 4 MB windows, not just its head
   for (const r of Process.enumerateRanges('rw-')) {
-    let buf;
-    try { buf = r.base.readByteArray(Math.min(r.size, 0x400000)); } catch (e) { continue; }
-    if (!buf) continue;
-    const b = new Uint8Array(buf);
-    let cur = [];
-    for (let i = 0; i < b.length; i++) {
-      const c = b[i];
-      if (c >= 0x20 && c < 0x7f) cur.push(c);
-      else { if (cur.length >= MINLEN) out.add(String.fromCharCode.apply(null, cur)); cur = []; }
+    for (let off = 0; off < r.size; off += WIN) {
+      let buf;
+      try { buf = r.base.add(off).readByteArray(Math.min(r.size - off, WIN)); } catch (e) { continue; }
+      if (!buf) continue;
+      const b = new Uint8Array(buf);
+      let cur = [];
+      for (let i = 0; i < b.length; i++) {
+        const c = b[i];
+        if (c >= 0x20 && c < 0x7f) cur.push(c);
+        else { if (cur.length >= MINLEN) out.add(toStr(cur)); cur = []; }
+      }
+      if (cur.length >= MINLEN) out.add(toStr(cur));
     }
-    if (cur.length >= MINLEN) out.add(String.fromCharCode.apply(null, cur));
   }
   for (const s of out) send({ t: 'str', s: s });
   try { for (const m of Process.enumerateModules()) if (m.path) send({ t: 'mod', p: m.path }); } catch (e) {}
@@ -125,8 +138,13 @@ RE_URL   = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s\"'<>\\]{3,}", re.I)
 RE_IPP   = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b")
 RE_IP    = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 RE_DOM   = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b", re.I)
-RE_WINPATH = re.compile(r"\b[A-Za-z]:\\\\(?:[^\\\s\"'<>|]+\\\\?)*[^\\\s\"'<>|]*")
+# a real Windows path in a decoded string has SINGLE backslashes (C:\ProgramData\x\state.db); the
+# old pattern required doubled ones (\\\\ = two literal backslashes) and so matched only escaped
+# JSON, never a genuine path
+RE_WINPATH = re.compile(r"\b[A-Za-z]:\\[^\s\"'<>|?*]+")
 RE_REG   = re.compile(r"\bHK(?:EY_)?(?:LM|CU|CR|U|CC|LOCAL_MACHINE|CURRENT_USER|CLASSES_ROOT|USERS)\\[^\s\"'<>|]+", re.I)
+# a hive-less registry subkey as malware often writes it (the hive is implied): Software\..., SYSTEM\...
+RE_REG_NOHIVE = re.compile(r"\b(?:SOFTWARE|SYSTEM|SAM|SECURITY)(?:\\WOW6432Node)?\\[A-Za-z0-9][^\s\"'<>|]+", re.I)
 RE_UNIXPATH = re.compile(r"(?:/[A-Za-z0-9._\-]+){2,}/?")
 RE_B64   = re.compile(r"\b[A-Za-z0-9+/]{24,}={0,2}\b")
 
@@ -138,12 +156,19 @@ NOISE_PATH = re.compile(r"(?:^|/)(?:lib|lib64|usr|proc|sys|dev|frida|\.cargo|rus
 NOISE_DOM  = re.compile(r"\.(?:so|dylib|rs|rlib|crate)$|^(?:core|alloc|std|frida)\.", re.I)
 
 
-def is_private_or_doc_ip(ip: str) -> bool:
+def _valid_ip(ip: str) -> bool:
+    """A dotted quad with every octet 0-255 (rejects a version like 1.2.3.400 or 1.2.3.4.5)."""
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
     try:
-        o = [int(x) for x in ip.split(".")]
-        return all(0 <= x <= 255 for x in o)
+        return all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
     except Exception:
         return False
+
+
+def is_private_or_doc_ip(ip: str) -> bool:
+    return _valid_ip(ip)
 
 
 def looks_like_json(s: str) -> bool:
@@ -171,6 +196,11 @@ def decodes_base64(s: str) -> str | None:
     return None
 
 
+_FILE_EXT = {"conf", "sock", "debug", "log", "crt", "cache", "rs", "so", "dylib",
+             "json", "txt", "bin", "dll", "exe", "tmp", "lock", "toml", "md", "rlib",
+             "db", "dat", "sqlite", "ini", "cfg", "key", "pem", "bak", "old"}
+
+
 def extract(decoded: list[str]) -> dict:
     out = {"urls": set(), "endpoints": set(), "domains": set(), "paths": set(),
            "registry": set(), "json_blobs": set(), "base64": set(), "other_text": set()}
@@ -180,9 +210,18 @@ def extract(decoded: list[str]) -> dict:
             out["urls"].add(m.group(0)); hit = True
         for m in RE_IPP.finditer(s):
             ip = m.group(0).split(":")[0]
-            if is_private_or_doc_ip(ip):
+            if _valid_ip(ip) and is_private_or_doc_ip(ip):
                 out["endpoints"].add(m.group(0)); hit = True
+        for m in RE_IP.finditer(s):
+            # a bare IP (no port) was dropped entirely: not ip:port, not a domain, and -- having no
+            # letters -- not even other_text. Report a valid, non-version dotted quad as an endpoint.
+            ip = m.group(0)
+            after = s[m.end():m.end() + 1]
+            if _valid_ip(ip) and after != "." and f"{ip}:" not in s:
+                out["endpoints"].add(ip); hit = True
         for m in RE_REG.finditer(s):
+            out["registry"].add(m.group(0)); hit = True
+        for m in RE_REG_NOHIVE.finditer(s):
             out["registry"].add(m.group(0)); hit = True
         for m in RE_WINPATH.finditer(s):
             out["paths"].add(m.group(0)); hit = True
@@ -192,7 +231,9 @@ def extract(decoded: list[str]) -> dict:
                 out["paths"].add(p); hit = True
         for m in RE_DOM.finditer(s):
             d = m.group(0)
-            if not NOISE_DOM.search(d) and not RE_IP.fullmatch(d):
+            # a filename like state.db / config.ini is not a domain; its "TLD" is a file extension
+            if (not NOISE_DOM.search(d) and not RE_IP.fullmatch(d)
+                    and d.rsplit(".", 1)[-1].lower() not in _FILE_EXT):
                 out["domains"].add(d)
         if looks_like_json(s):
             out["json_blobs"].add(s.strip()); hit = True
@@ -265,10 +306,8 @@ def main():
     url_blob = "\n".join(art["urls"])
     art["paths"] = {p for p in art["paths"]
                     if p not in exe and p not in url_blob}
-    FILEEXT = {"conf", "sock", "debug", "log", "crt", "cache", "rs", "so", "dylib",
-               "json", "txt", "bin", "dll", "exe", "tmp", "lock", "toml", "md", "rlib"}
     art["domains"] = {d for d in art["domains"]
-                      if d.rsplit(".", 1)[-1].lower() not in FILEEXT and d not in url_blob}
+                      if d.rsplit(".", 1)[-1].lower() not in _FILE_EXT and d not in url_blob}
 
     if args.json:
         print(json.dumps({k: sorted(v) for k, v in art.items()}, indent=2))
