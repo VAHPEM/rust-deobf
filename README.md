@@ -114,8 +114,9 @@ crypto-clipper config, staging paths. [More below](#-real-malware).
   only in one `match` arm or on a branch that never runs.
 - **One-screen SOC triage** — `soc_triage.py`: format/arch, Rust toolchain, crate capability
   fingerprint (networking / crypto / recon / persistence / staging), indicators grouped by type, and
-  a calibrated LOW / MEDIUM / HIGH signal with its evidence. `--json` for a SIEM. `--fast` is
-  sub-second.
+  a calibrated LOW / MEDIUM / HIGH signal with its evidence. `--json` for a SIEM, `--fail-on HIGH`
+  for scripted gating. `--fast` (metadata + literal indicators, no decoding) scales with binary
+  size: under a second on a small sample, ~20 s on a 20 MB binary.
 - **Multi-arch, multi-format** — x86-64, ARM64 and 32-bit x86 across ELF, PE and Mach-O.
 - **Fits your workflow** — FLOSS-compatible export (`--floss-json`), headless Ghidra annotation
   (plate comments, bookmarks, renames), library-function identification by byte signature
@@ -202,8 +203,16 @@ scripts/ghidra_run.sh path/to/binary
 python3 scripts/llm_triage.py path/to/binary
 
 # runtime-only decoders, inside an isolated analysis VM ONLY (pip install frida frida-tools)
-python3 scripts/recover_dynamic.py path/to/binary [-- arg1 arg2 ...]
+# it EXECUTES the sample, so it refuses to start without the explicit opt-in flag
+python3 scripts/recover_dynamic.py path/to/binary --i-understand-this-executes [--argv arg1 arg2 ...]
 ```
+
+Exit codes (`recover.py`, `soc_triage.py`, `llm_triage.py`): `0` the analysis ran, `2` usage error,
+`3` unsupported or unparseable input (not an ELF/PE/Mach-O LIEF can read — e.g. a text file),
+`4` analysis error (an engine raised; the other engines still ran and their output is printed; in
+directory mode, at least one file failed — the table's error column says which). `soc_triage.py
+--fail-on MEDIUM|HIGH` exits `1` when the signal reaches that level. Directory mode analyses every
+binary single-file mode supports (32-bit x86 included), and counts the files it skipped.
 
 Emulation runs by default and is bounded by `--time-budget` (120 s): functions are tried in
 decoder-score order, and the output says how many were emulated (`functions=412/1671`) and
@@ -507,8 +516,8 @@ flowchart LR
   not artefacts of a forced path or of out-of-order stores.
 
 Every recovered string says where it came from, indicator shapes are tagged, and `--floss-json`
-writes a FLOSS results document so the strings appear in `floss`/`floss --html` next to the static
-ones.
+writes a FLOSS results document so the strings appear in FLOSS next to the static ones: view it with
+`floss -l out.json` (checked against FLOSS 3.2.0).
 
 </details>
 
@@ -519,8 +528,20 @@ ones.
 toolchain + panic-site count, a crate capability fingerprint (networking / crypto / recon /
 persistence / staging), indicators grouped by tag with benign Rust std/compiler paths filtered out,
 a decoded-string sample, and a calibrated LOW/MEDIUM/HIGH triage *signal* with its evidence (an
-analyst aid, not a verdict). `--fast` is metadata+literals only (sub-second); `--json` emits a
-record for a SIEM/case system. Static + emulation only; never executes the sample.
+analyst aid, not a verdict). The signal needs **obfuscation evidence** to rise above LOW: decoded
+strings (one indicator-shaped, or three or more that are not just formatted from the binary's plain
+literals — fewer is within the engines' false-positive floor on big benign binaries), an
+indicator-shaped stack-built string, or virtualized functions in a binary that does not link an
+interpreter crate (regex engines, wasm runtimes, script VMs look exactly like a VM). Indicator-shaped
+*plain literals* (an update URL, an index URL) are listed separately as literal indicators and never
+scored, and the ubiquitous HTTP/TLS/hashing/OS-binding crates (tokio, hyper, rustls, ring, base64,
+windows-sys) are shown in the fingerprint but add nothing — so unobfuscated tools like `rustup`,
+`uv` or `rg` come out LOW. `--fast` skips every decoding pass (static call-site recovery, stack
+strings, emulation, the virtualization scan) and keeps metadata + literal indicators; literal
+splitting scales with size (measured: 0.6 s on a 0.4 MB canary, 6 s on `rg` 5 MB, 19 s on `rustup`
+20 MB, 100 s on `uv` 66 MB), and its signal is always LOW with that caveat.
+`--json` emits a record for a SIEM/case system; `--fail-on MEDIUM|HIGH` exits 1 at that level.
+Static + emulation only; never executes the sample.
 
 **`scripts/llm_triage.py <binary>`** hands *only* the deterministically recovered facts (the triage
 card above — never the raw binary) to an LLM and asks for a grounded verdict, likely capabilities
@@ -528,8 +549,12 @@ tied to the evidence, candidate ATT&CK techniques, what is uncertain, and next s
 deterministic facts stay ground truth; the LLM note is a clearly labelled hypothesis, and the model
 is instructed not to invent indicators. Backends auto-detect: a **local** OpenAI-compatible server
 (`RUST_DEOBF_LLM_BASE=http://localhost:11434/v1` for Ollama/vLLM — so malware data never leaves the
-host), the Anthropic or OpenAI APIs, or, with no key, an **offline** mode that prints the grounded
-prompt to paste into any LLM plus a deterministic rule-based note.
+host; when it is set it wins over any `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` in the environment
+unless `RUST_DEOBF_LLM=anthropic|openai` says otherwise), the Anthropic or OpenAI APIs, or, with no
+key, an **offline** mode that prints the grounded prompt to paste into any LLM plus a deterministic
+rule-based note. Recovered strings are attacker-controlled text, so they are sent inside
+`<untrusted_evidence>` tags, truncated to 200 characters each and capped per list, and the system
+prompt tells the model to treat them as data, never as instructions.
 
 **`scripts/detect_vm.py <binary>`** flags functions hidden behind a **bytecode VM (code
 virtualization)** — the VMProtect/Themida/Tigress technique, and RustCloak's `virt`. It keys on the

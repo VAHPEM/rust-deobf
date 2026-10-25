@@ -1040,6 +1040,9 @@ tag (benign Rust std/compiler paths filtered out), a decoded sample, and a calib
 LOW/MEDIUM/HIGH signal with evidence (an aid, not a verdict). On AmnesiaStealer it rates **HIGH**
 and surfaces the C2 URL, the networking/crypto/rusqlite crate profile, and the full `/tmp` staging
 set. `--fast` is sub-second (metadata + literals); `--json` feeds a SIEM.
+*(Superseded, Oct 2026 review: `--fast` time grows with binary size -- 0.6 s on a canary, 19 s on
+rustup, 100 s on uv -- and the signal was recalibrated to require obfuscation evidence, so the
+AmnesiaStealer rating above predates the new scoring and has not been re-measured; see the README.)*
 
 **Dynamic recovery, re-validated live.** `scripts/recover_dynamic.py` (Frida) was run on the
 benign `muddy` canary (ChaCha20-Poly1305 AEAD) on the VM and recovered **5/5** canaries from
@@ -1275,7 +1278,8 @@ same program it flags nothing. Precision on real binaries: `ls`, `grep`, `openss
 `python3` -> 2 (correctly: CPython's `_PyEval_EvalFrameDefault` genuinely IS a computed-goto
 interpreter). The threaded-dispatch requirement is what rejects ordinary switch/parse loops (a lone
 jump table or dense byte-loads alone do not match). Folded into `soc_triage` as a +2 signal and a
-card line.
+card line. *(Superseded, Oct 2026: virtualized functions now count as obfuscation evidence -- not a flat +2 --
+and not at all when an interpreter crate such as a regex engine is linked; `--fast` skips the scan.)*
 
 **Validated.** `tests/test_detect_vm.py` (3 cases): detects the 3 virtualized functions (threaded
 dispatch, high confidence), stays silent on the plain build, and the classifier unit-test pins that

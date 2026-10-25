@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """floss_export.py - write rust-deobf results as a FLOSS results document.
 
-FLOSS (Mandiant) loads a saved results document as input: `floss results.json` renders it like
-a fresh run, `floss --html results.json` produces a standalone report, and the FLOSS web viewer
-opens it. Writing our findings in that schema lets analysts look at strings rust-deobf recovered
+FLOSS (Mandiant) loads a saved results document as input: `floss -l results.json` (--load)
+renders it like a fresh run (add `-j` to re-emit JSON), and the FLOSS web viewer opens it. Writing our findings in that schema lets analysts look at strings rust-deobf recovered
 from Rust binaries (which FLOSS's own deobfuscation misses) with the tooling they already use,
 next to the static strings of the same file.
 
@@ -20,7 +19,8 @@ Mapping onto FLOSS's string types:
   Rust literals              -> language_strings (+ language_strings_missed), the &str
                                 literals recover_rust_strings split out of .rodata/.rdata
 
-No FLOSS import is needed; the schema is plain JSON. Only `floss` >= 4 reads these documents.
+No FLOSS import is needed; the schema is plain JSON. Checked against FLOSS 3.2.0 (`floss -l`);
+older FLOSS releases may not read every field.
 
     python floss_export.py --selftest
 """
