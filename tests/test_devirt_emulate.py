@@ -97,6 +97,56 @@ def test_emulation_refuses_rather_than_emits_wrong_c():
         assert devirt_emulate.recover(CALLFIX, va) is None, "a non-virtualized function must be declined"
 
 
+def test_select_detector_is_codegen_agnostic_both_polarities():
+    """The select detector and interpreter handle both CMOVNZ and CMOVZ. RustCloak only ever emits
+    CMOVNZ (an LLVM `select` lowers to `mov dst,false; cmovnz dst,cond,true`), so the CMOVZ polarity
+    cannot be produced from a RustCloak binary -- but the emulation recovery is codegen-agnostic and
+    must recognize a select however another obfuscator or compiler expresses it. We exercise both from
+    synthetic observations (detection) and a synthetic program (interpretation + rendering)."""
+    import devirt_emulate as de
+    import lift_vm
+
+    nreg = 8
+
+    def regs(s):
+        return [(i, v) for i, v in s if 0 <= i < nreg]
+
+    # r3 = cond(r1) ? r2 : r3(prev) -- the trace shows only the operand each run actually took.
+    cmovnz = [{"srcs": [(1, 1), (2, 0xaa), (3, 0x11)], "result": 0xaa, "regvals": {}},
+              {"srcs": [(1, 5), (2, 0xbb), (3, 0x22)], "result": 0xbb, "regvals": {}},
+              {"srcs": [(1, 0), (2, 0xcc), (3, 0x33)], "result": 0x33, "regvals": {}},
+              {"srcs": [(1, 0), (2, 0xdd), (3, 0x44)], "result": 0x44, "regvals": {}}]
+    assert de._cmov(cmovnz, regs, 3) == (1, 2, True)
+
+    # r3 = cond(r1) ? r3(prev) : r2 -- the inverted polarity.
+    cmovz = [{"srcs": [(1, 0), (2, 0xaa), (3, 0x11)], "result": 0xaa, "regvals": {}},
+             {"srcs": [(1, 0), (2, 0xbb), (3, 0x22)], "result": 0xbb, "regvals": {}},
+             {"srcs": [(1, 1), (2, 0xcc), (3, 0x33)], "result": 0x33, "regvals": {}},
+             {"srcs": [(1, 5), (2, 0xdd), (3, 0x44)], "result": 0x44, "regvals": {}}]
+    assert de._cmov(cmovz, regs, 3) == (1, 2, False)
+
+    # a genuine binary op (r3 = r1 ^ r2) must NOT be mistaken for a select.
+    xor = [{"srcs": [(1, a), (2, b), (3, 0)], "result": a ^ b, "regvals": {}}
+           for a, b in [(0x10, 0x01), (0x0, 0xff), (0xaa, 0x55), (0xf0, 0x0f)]]
+    assert de._cmov(xor, regs, 3) is None
+
+    # interpret + render both opcodes (27 CMOVNZ, 31 CMOVZ): const r2,r1,r3 then select then ret r3.
+    C, Z, NZ, RET = (3 << 6) | 1, (3 << 6) | 31, (3 << 6) | 27, (3 << 6) | 0
+    bm = {C: 1, Z: 31, NZ: 27, RET: 0}
+    pool = [0x99, 0, 0x11, 5]                                # val, cond=0, prev, cond!=0
+
+    def run(sel, cond_idx):
+        prog = [(0, C, 2, 0, 0), (4, C, 1, cond_idx, 0), (8, C, 3, 2, 0),
+                (0xc, sel, 3, 1, 2), (0x10, RET, 0, 3, 0)]
+        idx = {p[0]: i for i, p in enumerate(prog)}
+        return de._vm_exec(prog, bm, None, pool, idx, [])[0]
+
+    assert run(Z, 1) == 0x99 and run(Z, 3) == 0x11            # CMOVZ: cond==0 takes val, else prev
+    assert run(NZ, 3) == 0x99 and run(NZ, 1) == 0x11          # CMOVNZ: cond!=0 takes val, else prev
+    rendered = lift_vm.lift_region(0x1000, [(0xc, Z, 3, 1, 2)], bm, None, None)
+    assert any("cmovz" in t for _, _, t in rendered["listing"])
+
+
 @pytest.mark.skipif(not CALLFIX.is_file(), reason="fixture missing")
 def test_combined_recover_all_adds_emulation_to_static():
     import devirt_emulate

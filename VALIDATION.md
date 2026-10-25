@@ -1770,3 +1770,30 @@ FNV constants (`0x1000193`, `0x811c9dc5`) intact. Coverage is now **complete**: 
 `static 0 / emulated 5`, the whole set recovered through an obfuscated interpreter by emulation alone.
 `decode` is still (correctly) declined: it is not virtualized (auto-vectorized), so there is nothing
 to devirtualize, and recovery returns None rather than emit anything unverified.
+
+## 40. Generalizing the select detector — both polarities, codegen-agnostic (Oct 2026)
+
+§39 added a CMOVNZ detector keyed to RustCloak's one select form. But emulation recovery is meant to
+be codegen-agnostic -- it observes what the interpreter computes, not how a particular obfuscator
+spelled it -- so the select detector should recognize a select however it is expressed, not only the
+shape this one VM emits.
+
+RustCloak's VM has a single select opcode, `OP_CMOVNZ`, and an LLVM `select` always lowers to
+`mov dst, false; cmovnz dst, cond, true` (confirmed in `src/Virt.cpp`): the false branch is the
+destination's own prior value. So the CMOVZ polarity (`cond ? prev : val`) and a fused two-operand
+select cannot come out of a RustCloak binary at all. They can out of other toolchains, though, so the
+recovery now handles both:
+
+- `_cmov` returns `(cond, val, take_nonzero)` and detects **CMOVNZ** (`cond!=0 ? val : prev`) and
+  **CMOVZ** (`cond==0 ? val : prev`). It also consults the reg-file snapshot, not only the freshly
+  read sources, so a value operand that was live in a CPU register (not re-read from a slot) is still
+  found. The two-sided-evidence requirement is unchanged -- one occurrence that preserves the
+  destination and one that selects a distinct value register, each consistent across its side -- so it
+  still never fires on a genuine binary op (a unit test pins that an `xor` is not seen as a select).
+- `_vm_exec` and `lift_vm` gained opcode **31 (CMOVZ)**, rendered `(cond ? prev : val)`, alongside 27
+  (CMOVNZ). 31 was unused in the VM's opcode space, so the synthesized reconstruction can emit it
+  without colliding with a real opcode.
+
+Because RustCloak cannot produce CMOVZ, the new polarity is exercised by a self-contained unit test
+(synthetic observations for detection; a synthetic program for interpretation and rendering) rather
+than a binary fixture. crc_ish (a real CMOVNZ) and the full coverage of §39 are unchanged.

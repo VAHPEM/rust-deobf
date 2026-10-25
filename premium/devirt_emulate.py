@@ -460,7 +460,8 @@ def _reconstruct(runs, by_off, nreg):
                 cm = _cmov(occ, regs, s0["dst"])
                 r = _arith(occ, regs)
                 if cm is not None:                           # branchless select: cond ? val : prev
-                    entries[off] = (27, 64, s0["dst"], cm[0], cm[1])
+                    cond, val, nz = cm
+                    entries[off] = (27 if nz else 31, 64, s0["dst"], cond, val)
                 elif r is not None:
                     op, w, a, b = r
                     entries[off] = (op, w, s0["dst"], a, b)
@@ -479,38 +480,58 @@ def _reconstruct(runs, by_off, nreg):
 
 
 def _cmov(occ, regs, dst):
-    """Detect a CMOVNZ (branchless select) `r[dst] = r[cond] ? r[val] : r[dst]` and return
-    (cond_idx, val_idx), else None.
+    """Detect a branchless select and return (cond_idx, val_idx, take_nonzero), else None.
 
-    A select reads a condition register and, when it is non-zero, writes a value register; when it is
-    zero it leaves the destination unchanged. Compiled as a conditional move or a tiny branch, the
-    trace shows, per occurrence, the condition plus whichever operand that run actually took -- so the
-    source set *varies* between occurrences, which is why the fixed-operand arithmetic inference misses
-    it (and can even mistake the cond-nonzero majority for `AND(val, val)`). We require two-sided
-    evidence so this never fires on a real binary op: at least one occurrence where the condition is
-    zero and the result equals the destination's own prior value, and at least one where it is non-zero
-    and the result equals a distinct value register, consistently across every occurrence of each."""
+    A select reads a condition register and, on one polarity of the condition, writes a value register;
+    on the other it leaves the destination unchanged. Two shapes occur in practice (and this is
+    codegen-agnostic, so we recognize both whatever the obfuscator):
+        CMOVNZ:  r[dst] = r[cond] ? r[val] : r[dst]      (take_nonzero=True)
+        CMOVZ:   r[dst] = r[cond] ? r[dst] : r[val]      (take_nonzero=False)
+    Compiled as a conditional move or a tiny branch, the trace shows, per occurrence, the condition
+    plus whichever operand *that run* actually took, so the source set varies between occurrences --
+    which is why the fixed-operand arithmetic inference misses it (and can even mistake the selecting
+    majority for `AND(val, val)`). The value may be read from a slot in one run and be live in a CPU
+    register in another, so we consult the reg-file snapshot as well as the freshly-read sources.
+
+    We require two-sided evidence so this never fires on a real binary op: at least one occurrence that
+    preserves the destination (result equals its own prior value) and at least one that selects a
+    distinct value register, each holding across every occurrence on its side of the condition."""
     def eq(x, y):
         return (x & _M64) == (y & _M64) or (x & 0xffffffff) == (y & 0xffffffff)
 
-    data = [(dict(regs(o["srcs"])), o["result"]) for o in occ if o["result"] is not None]
-    data = [(rd, res) for rd, res in data if rd]
-    if len(data) < 2:
+    merged = []
+    for o in occ:
+        if o["result"] is None:
+            continue
+        rd = dict(regs(o["srcs"]))
+        for i, v in regs(list(o.get("regvals", {}).items())):
+            rd.setdefault(i, v)                              # operand live in a register, not re-read
+        if rd:
+            merged.append((rd, o["result"]))
+    if len(merged) < 2:
         return None
-    cond_candidates = set.intersection(*[set(rd) for rd, _ in data])
+
+    def value_reg(rows, c):                                  # a distinct reg whose value == result in all
+        vs = set.intersection(*[{i for i, v in rd.items() if i != c and eq(v, res)} for rd, res in rows])
+        vs.discard(dst)
+        return min(vs) if vs else None
+
+    cond_candidates = set.intersection(*[set(rd) for rd, _ in merged])
     for c in cond_candidates:
-        cz = [(rd, res) for rd, res in data if rd[c] == 0]
-        cnz = [(rd, res) for rd, res in data if rd[c] != 0]
+        cz = [(rd, res) for rd, res in merged if rd[c] == 0]
+        cnz = [(rd, res) for rd, res in merged if rd[c] != 0]
         if not cz or not cnz:
             continue
-        # cond==0 occurrences must preserve the destination (result == r[dst] observed as a source)
-        if not all(dst in rd and eq(rd[dst], res) for rd, res in cz):
-            continue
-        # cond!=0 occurrences must all select the same value register (distinct from the condition)
-        vs = set.intersection(*[{i for i, v in rd.items() if i != c and eq(v, res)} for rd, res in cnz])
-        vs.discard(dst)
-        if vs:
-            return c, min(vs)
+        # CMOVNZ: cond!=0 selects a value; cond==0 preserves the destination.
+        if all(dst in rd and eq(rd[dst], res) for rd, res in cz):
+            v = value_reg(cnz, c)
+            if v is not None:
+                return c, v, True
+        # CMOVZ: cond==0 selects a value; cond!=0 preserves the destination.
+        if all(dst in rd and eq(rd[dst], res) for rd, res in cnz):
+            v = value_reg(cz, c)
+            if v is not None:
+                return c, v, False
     return None
 
 
@@ -717,6 +738,9 @@ def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000, argmap=No
             reg[dst] = reg.get(a, 0)
         elif base == 27:                                     # CMOVNZ: r[dst] = r[a] ? r[b] : r[dst]
             if reg.get(a, 0) != 0:
+                reg[dst] = reg.get(b, 0)
+        elif base == 31:                                     # CMOVZ:  r[dst] = r[a] ? r[dst] : r[b]
+            if reg.get(a, 0) == 0:
                 reg[dst] = reg.get(b, 0)
         elif base == 32:
             reg[dst] = mem.read(reg.get(a, 0), w) & _M64

@@ -52,7 +52,7 @@ OPS = {
     16: ("eq", "bin"), 17: ("ne", "bin"), 18: ("ult", "bin"), 19: ("ule", "bin"),
     20: ("ugt", "bin"), 21: ("uge", "bin"), 22: ("slt", "bin"), 23: ("sle", "bin"),
     24: ("sgt", "bin"), 25: ("sge", "bin"),
-    26: ("mov", "mov"), 27: ("cmovnz", "cmov"),
+    26: ("mov", "mov"), 27: ("cmovnz", "cmov"), 31: ("cmovz", "cmovz"),
     28: ("jmp", "jmp"), 29: ("jz", "jcc"), 30: ("jnz", "jcc"),
     32: ("load", "load"), 33: ("store", "store"), 34: ("sext", "sext"), 35: ("retv", "retv"),
     36: ("pusharg", "pusharg"), 37: ("call", "call"),
@@ -647,6 +647,8 @@ def _pseudocode(prog, bof, pool):
             return val(a)
         if base == 27:
             return f"({val(a)} ? {val(b)} : {val(dst)})"     # select: cond ? true : prev(false)
+        if base == 31:
+            return f"({val(a)} ? {val(dst)} : {val(b)})"      # select (inverted): cond ? prev : true
         if base == 34:
             return f"sext{w}({val(a)})"
         if base == 32:
@@ -698,6 +700,8 @@ def _pseudocode(prog, bof, pool):
             out.append(pre + f"r{dst} = r{a};")
         elif base == 27:
             out.append(pre + f"r{dst} = r{a} ? r{b} : r{dst};")
+        elif base == 31:
+            out.append(pre + f"r{dst} = r{a} ? r{dst} : r{b};")
         elif base == 34:
             out.append(pre + f"r{dst} = sext{w}(r{a});")
         elif base == 32:
@@ -725,7 +729,7 @@ def lift_region(bc_va, prog, bytemap=None, pool=None, default_base=None):
     for off, op, dst, a, b in prog:
         mn, kind = OPS[bof(op)]
         w = _width(op)
-        ws = "" if bof(op) in (0, 1, 26, 27, 28, 29, 30, 35, 36, 37) else f".i{w}"
+        ws = "" if bof(op) in (0, 1, 26, 27, 28, 29, 30, 31, 35, 36, 37) else f".i{w}"
         lbl = f"L{off:04x}" if off in labels else "     "
         tag = f"{mn}{ws}"
         if kind == "ret":
@@ -738,8 +742,8 @@ def lift_region(bc_va, prog, bytemap=None, pool=None, default_base=None):
             lines.append((off, lbl, f"{tag:<9} r{dst}, r{a}, r{b}"))
         elif kind == "mov":
             lines.append((off, lbl, f"mov      r{dst}, r{a}"))
-        elif kind == "cmov":
-            lines.append((off, lbl, f"cmovnz   r{dst}, r{a}, r{b}"))
+        elif kind in ("cmov", "cmovz"):
+            lines.append((off, lbl, f"{mn:<8} r{dst}, r{a}, r{b}"))
         elif kind == "sext":
             lines.append((off, lbl, f"{tag:<9} r{dst}, r{a}"))
         elif kind == "load":
