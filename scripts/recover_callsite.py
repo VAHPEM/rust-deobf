@@ -64,7 +64,9 @@ TEXT_CHARS = set(bytes(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     " ._/:@%+=-", "ascii"))
 
-_IP = r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+# a dotted quad NOT continued by another .octet: `1.2.3.4.5` (a version) is not an IP, and the
+# trailing (?!\.\d) stops the search form from matching `1.2.3.4` inside it
+_IP = r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?!\.?\d)"
 _TLD = r"(?:com|net|org|io|ru|cn|xyz|top|info|biz|onion|dev|app|cc|tk|site|online|club|example|local|lan|corp|internal)"
 _REG = r"(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU)(?:\\[\w .{}$-]+)+"
 _REG_NOHIVE = r"(?:SOFTWARE|Software|SYSTEM|System)\\[\w .{}$-]+(?:\\[\w .{}$-]+)+"
@@ -96,7 +98,8 @@ _IOC_RULES = [
     ("registry", _REG),
     ("registry", _REG_NOHIVE),
     ("mutex", _KOBJ),
-    ("email", r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+    # a real email ends in an alphabetic TLD; this keeps `serde@1.0.197` (a crate@version) out
+    ("email", r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}"),
     ("guid", _GUID),
     ("token", _TOKEN),
 ]
