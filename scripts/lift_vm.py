@@ -90,13 +90,18 @@ def _handler_insns(img, hva, text_lo, text_hi):
 _STKPTR = re.compile(r"^(rsp|rbp|rsi|rdi|esp|ebp|esi|edi),")   # stack / bytecode-pointer dests
 
 
-def _classify_handler(img, hva, text_lo, text_hi):
+def _classify_handler(img, hva, text_lo, text_hi, result_reg=None):
     """Map a dispatch handler's native body to a logical VM opcode (an OPS key), or None.
 
     Keyed on the handler's characteristic native instruction. The VM register file is a stack array
     indexed by reg*8; its frame displacement varies per function (-0x80, 0, +0x..), so the reg-file
     pattern must not hardcode one. Priority avoids a CONST's index arithmetic or a load's pointer
-    math being mistaken for the real operation."""
+    math being mistaken for the real operation.
+
+    Two codegen styles are handled. In the per-handler style each handler writes its result to the
+    reg file directly (`regs_store`). In the hoisted/accumulator style the result-store is lifted to
+    the shared dispatch prologue, so a handler only computes into a result register and never touches
+    the reg file -- `result_reg` names that register and `produces` stands in for `regs_store`."""
     insns = _handler_insns(img, hva, text_lo, text_hi)
     if not insns:
         return None
@@ -104,6 +109,16 @@ def _classify_handler(img, hva, text_lo, text_hi):
     regs_store = any(m == "mov" and re.search(r"\[rsp \+ \w+\*8(?: [+-] 0x[0-9a-f]+)?\],", o)
                      for m, o in insns)                    # writes the VM register file
     regs_load = any(_REGS.search(o) for _, o in insns)
+
+    def writes_result(o):                                    # first operand == the result register
+        if result_reg is None:
+            return False
+        d = o.split(",")[0].strip().strip("{} ")
+        dm = re.match(r"^(\w+)$", d)
+        return bool(dm) and _canon64(dm.group(1)) == result_reg
+
+    produces = regs_store or any(m not in ("cmp", "test", "push", "jmp") and writes_result(o)
+                                 for m, o in insns)         # value lands in reg file or result reg
 
     if any(m == "call" for m, _ in insns):
         return 37                                            # CALL (dispatch through the callee table)
@@ -113,13 +128,13 @@ def _classify_handler(img, hva, text_lo, text_hi):
     # increments a lone counter by one) -- check before everything else
     if any(m == "inc" or (m == "add" and re.match(r"r\w+, 1$", o)) for m, o in insns):
         return 36
-    if any(m.startswith("cmov") for m, _ in insns) and regs_store:
+    if any(m.startswith("cmov") for m, _ in insns) and produces:
         return 27                                            # CMOVNZ (select into the reg file)
     # CONST loads a pool entry: either via a rip-relative lea, or a two-register indexed load
-    # (poolbase + idx) where the base was set up earlier; either way it writes the reg file
-    if regs_store and (any(m == "lea" and "[rip " in o for m, o in insns) or
-                       any(m == "mov" and re.search(r", (?:\w+ ptr )?\[r\w+ \+ r\w+\]$", o)
-                           and "rsp" not in o for m, o in insns)):
+    # (poolbase + idx) where the base was set up earlier; either way it produces a value
+    if produces and (any(m == "lea" and "[rip " in o for m, o in insns) or
+                     any(m == "mov" and re.search(r", (?:\w+ ptr )?\[r\w+ \+ r\w+\]$", o)
+                         and "rsp" not in o for m, o in insns)):
         return 1
     for m, o in insns:                                       # division: quotient vs remainder
         if m in ("div", "idiv"):
@@ -131,9 +146,9 @@ def _classify_handler(img, hva, text_lo, text_hi):
         return 33
     # load through a single register pointer: mov/movzx rD, [rX]  (not rsp reg-file, not rip)
     if any(m in ("mov", "movzx") and re.search(r", (?:[a-z]+ ptr )?\[r[a-z0-9]+\]$", o)
-           and "rsp" not in o and "rip" not in o for m, o in insns) and regs_store:
+           and "rsp" not in o and "rip" not in o for m, o in insns) and produces:
         return 32
-    if any(m == "movsx" for m, _ in insns) and regs_store:
+    if any(m == "movsx" for m, _ in insns) and produces:
         return 34                                            # SEXT (sign-extend into the reg file)
     for m, o in insns:                                       # arithmetic / comparison
         if m in _CHAR and not _STKPTR.match(o):
@@ -142,14 +157,14 @@ def _classify_handler(img, hva, text_lo, text_hi):
                 if len(parts) == 2 and parts[0].strip() == parts[1].strip():
                     continue                                 # xor eax,eax zeroing
             return _CHAR[m]
-    if not regs_store:                                       # control flow: no reg-file write
+    if not produces:                                         # control flow: nothing lands in a value
         for m, _ in insns:
             if m in ("cmove", "sete"):
                 return 29                                    # JZ
             if m in ("cmovne", "setne"):
                 return 30                                    # JNZ
         return 28                                            # JMP
-    return 26                                                # MOV (reg file -> reg file)
+    return 26                                                # MOV (reg/const -> result)
 
 
 def _alias32(r):
@@ -166,6 +181,21 @@ def _alias64(r):
     if r in m:
         return m[r]
     return r[:-1] if re.match(r"r\d+d$", r) else r
+
+
+_CANON = {}
+for _lo, _c in [("a", "rax"), ("b", "rbx"), ("c", "rcx"), ("d", "rdx")]:
+    _CANON.update({_lo + "l": _c, _lo + "x": _c, "e" + _lo + "x": _c, "r" + _lo + "x": _c})
+for _lo, _c in [("si", "rsi"), ("di", "rdi"), ("bp", "rbp"), ("sp", "rsp")]:
+    _CANON.update({_lo + "l": _c, _lo: _c, "e" + _lo: _c, "r" + _lo: _c})
+
+
+def _canon64(r):
+    """Canonical 64-bit name for any width of a register (dil/di/edi/rdi -> rdi, r8b/r8d/r8 -> r8)."""
+    if r in _CANON:
+        return _CANON[r]
+    m = re.match(r"(r\d+)[bwd]?$", r)
+    return m.group(1) if m else r
 
 
 def _recover_operand_key(lines):
@@ -243,11 +273,12 @@ def _recover_map(img, fva, size, text_lo, text_hi):
     idx32 = _alias32(idx_reg)
     idxpat = "(?:" + idx_reg + "|" + idx32 + ")"
     minv, extent = 0, None
-    key_imm = []
-    # the normalization, range check and operand-decrypt all sit in the prologue just before the
-    # table load; restrict to that window so handler code on the same registers isn't mistaken.
-    win = lines[max(0, disp_i - 18):disp_i]
-    for ins in win:
+    # the normalization, range check, operand-decrypt and (hoisted style) the result-store all sit in
+    # the prologue just before the table load; restrict to that window so handler code on the same
+    # registers isn't mistaken.
+    win = lines[max(0, disp_i - 20):disp_i]
+    fetches, xors, result_reg, default_via = [], {}, None, None
+    for wi, ins in enumerate(win):
         t = ins.mnemonic + " " + ins.op_str
         # normalization: either `add idx, -min` or `lea idx, [src - min]`
         m = re.match(r"add " + idxpat + r", (0x[0-9a-fA-F]+)$", t)
@@ -261,10 +292,45 @@ def _recover_map(img, fva, size, text_lo, text_hi):
         c = re.match(r"cmp " + idxpat + r", (0x[0-9a-fA-F]+)$", t)
         if c:
             extent = int(c.group(1), 16) + 1                 # the switch range check bounds the table
-        # the three operand-decrypt keys (dst,a,b order): xor REG, IMM8 on any-width register
-        x = re.match(r"xor \w+, (0x[0-9a-fA-F]+)$", t)
-        if x and int(x.group(1), 16) <= 0xff:
-            key_imm.append(int(x.group(1), 16))
+            jm = re.match(r"j(?:a|ae|g|ge|nbe|nb) (0x[0-9a-fA-F]+)$",       # out-of-range -> default
+                          win[wi + 1].mnemonic + " " + win[wi + 1].op_str) if wi + 1 < len(win) else None
+            if jm:
+                default_via = int(jm.group(1), 16)
+        # the four instruction bytes are fetched from the bytecode cursor (not the rsp reg file);
+        # collect (displacement, reg). Capstone prints small displacements in decimal, large in hex.
+        fm = re.match(r"movzx (\w+), byte ptr \[([^\]]+)\]$", t)
+        if fm and "rsp" not in fm.group(2):
+            dm = re.search(r"([+-]) (0x[0-9a-fA-F]+|\d+)$", fm.group(2))
+            if dm:
+                g = dm.group(2)
+                disp = (int(g, 16) if g.startswith("0x") else int(g)) * (1 if dm.group(1) == "+" else -1)
+            else:
+                disp = 0
+            fetches.append((disp, _canon64(fm.group(1))))
+        # operand-decrypt: xor REG, IMM8 -- record which register got which key byte
+        x = re.match(r"xor (\w+), (0x[0-9a-fA-F]+)$", t)
+        if x and int(x.group(2), 16) <= 0xff:
+            xors[_canon64(x.group(1))] = int(x.group(2), 16)
+        # hoisted/accumulator style: the result of the previous handler is stored to the reg file at
+        # the loop top; its source register is the shared result register.
+        rs = re.match(r"mov (?:\w+ ptr )?\[rsp \+ \w+\*8(?: [+-] (?:0x[0-9a-f]+|\d+))?\], (\w+)$", t)
+        if rs:
+            result_reg = _canon64(rs.group(1))
+    # opcode byte = the fetch with no xor-decrypt; the three decrypted fetches, in address order,
+    # are (dst, a, b) -> (kd, ka, kb). Falls back to any three xor keys if the fetches are unclear.
+    operands = sorted((d, r) for d, r in fetches if r in xors)
+    if len(operands) >= 3:
+        key = tuple(xors[r] for _, r in operands[:3])
+    else:
+        ks = list(xors.values())
+        key = tuple(ks[:3]) if len(ks) >= 3 else (0, 0, 0)
+    # In the hoisted/accumulator style (a reg-file store found in the prologue) the register the
+    # handlers compute into is the opcode-fetch register (the one fetch with no xor) -- which is more
+    # reliable than the store's source operand, since the prologue's first store can be a loop
+    # preheader that seeds an argument rather than the steady-state result.
+    non_xor = [r for d, r in fetches if r not in xors]
+    if result_reg is not None and len(non_xor) == 1:
+        result_reg = non_xor[0]
 
     def resolve(byte):
         idx = byte - minv
@@ -280,28 +346,40 @@ def _recover_map(img, fva, size, text_lo, text_hi):
         extent = 0                                           # until an entry points outside .text
         while extent < 160 and resolve(minv + extent) is not None:
             extent += 1
-    key = tuple(key_imm[:3]) if len(key_imm) >= 3 else (0, 0, 0)
 
     import collections
     cnt = collections.Counter(resolve(b) for b in range(minv, minv + extent) if resolve(b))
     if not cnt:
         return None
     default = cnt.most_common(1)[0][0]
-    bytemap, pool_va = {}, None
+
+    def classify(h):
+        return _classify_handler(img, h, text_lo, text_hi, result_reg)
+
+    bytemap, pool_va, default_base = {}, None, None
     for byte in range(minv, minv + extent):
         h = resolve(byte)
         if h is None or h == default:
             continue
-        base = _classify_handler(img, h, text_lo, text_hi)
+        base = classify(h)
         if base is None:
             continue
         bytemap[byte] = base
         if base == 1 and pool_va is None:                   # CONST handler -> locate its pool base
             pool_va = _pool_from_handler(img, h, lines)
-    # peeled cases: `cmp rawop, IMM8; je HANDLER` sit just before the table load, with the opcode
-    # that matched none of them falling through to a default handler. Map both, so small functions
-    # whose ADD/MUL were peeled out of the jump-table cluster don't lose those opcodes.
-    default_base = None
+    # the opcode that matched no jump-table entry falls through to a default handler, reached either
+    # as the range-check's out-of-range target (`cmp idx,N; ja DEFAULT`) or as the fall-through after
+    # a peeled `cmp rawop,IMM8; je HANDLER` chain. Map both, so opcodes LLVM peeled out of the
+    # jump-table cluster (and the default itself -- often RET) aren't lost.
+    def note_default(h):
+        nonlocal default_base, pool_va
+        b = classify(h)
+        if b is not None:
+            default_base = b
+            if b == 1 and pool_va is None:
+                pool_va = _pool_from_handler(img, h, lines)
+    if default_via is not None and text_lo <= default_via < text_hi:
+        note_default(default_via)
     win2 = lines[max(0, disp_i - 28):disp_i + 2]
     for k in range(len(win2) - 1):
         cm = re.match(r"cmp \w+, (0x[0-9a-fA-F]+)$", win2[k].mnemonic + " " + win2[k].op_str)
@@ -311,17 +389,12 @@ def _recover_map(img, fva, size, text_lo, text_hi):
         tgt = int(jm.group(1), 16)
         if not (text_lo <= tgt < text_hi):
             continue
-        b = _classify_handler(img, tgt, text_lo, text_hi)
+        b = classify(tgt)
         if b is not None:
             bytemap.setdefault(int(cm.group(1), 16), b)
             if b == 1 and pool_va is None:
                 pool_va = _pool_from_handler(img, tgt, lines)
-        nxt = win2[k + 1].address + win2[k + 1].size          # fall-through = the default handler
-        db = _classify_handler(img, nxt, text_lo, text_hi)
-        if db is not None:
-            default_base = db
-            if db == 1 and pool_va is None:
-                pool_va = _pool_from_handler(img, nxt, lines)
+        note_default(win2[k + 1].address + win2[k + 1].size)  # fall-through = the default handler
     return bytemap, key, pool_va, default_base
 
 
