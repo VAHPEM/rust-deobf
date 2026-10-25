@@ -138,6 +138,57 @@ def _variants() -> dict:
     return v
 
 
+# Scoring. Plain substring tests inflate both sides: `secret in decoded` lets the 2-char secret "no"
+# be "recovered" by any decoded string containing n-o ("cannot", "notify"), and the FP test
+# `dstr in e or e in dstr` explains away junk such as "er" or "a:" because it occurs inside some
+# secret. So: short secrets must match exactly; longer ones may sit inside a decoded string only on
+# token boundaries; and a decoded string is "explained" only when it equals a secret, contains one on
+# token boundaries, or is a partial decode at least PARTIAL_MIN_LEN long and covering at least half of
+# the secret it came from.
+EXACT_BELOW = 6          # secrets shorter than this must be decoded exactly
+PARTIAL_MIN_LEN = 6      # a shorter fragment of a secret is junk, not a partial decode
+
+
+def _bounded_in(needle: str, hay: str) -> bool:
+    """needle occurs in hay with a non-alphanumeric character (or the string edge) on both sides."""
+    if not needle:
+        return False
+    start = 0
+    while True:
+        i = hay.find(needle, start)
+        if i < 0:
+            return False
+        before = hay[i - 1] if i > 0 else ""
+        after = hay[i + len(needle)] if i + len(needle) < len(hay) else ""
+        if not before.isalnum() and not after.isalnum():
+            return True
+        start = i + 1
+
+
+def is_hit(secret: str, decoded: list[str]) -> bool:
+    if len(secret) < EXACT_BELOW:
+        return secret in decoded
+    return any(d == secret or _bounded_in(secret, d) for d in decoded)
+
+
+def is_explained(dstr: str, expected: list[str]) -> bool:
+    for e in expected:
+        if dstr == e:
+            return True
+        if len(e) >= EXACT_BELOW and _bounded_in(e, dstr):
+            return True                      # the secret, with framing around it
+        if len(dstr) >= PARTIAL_MIN_LEN and dstr in e and 2 * len(dstr) >= len(e):
+            return True                      # a partial decode of that secret
+    return False
+
+
+def score(expected: list[str], decoded: list[str]) -> tuple[list[str], list[str]]:
+    """(hits, false positives) for one binary."""
+    hits = [s for s in expected if is_hit(s, decoded)]
+    fps = [d for d in dict.fromkeys(decoded) if not is_explained(d, expected)]
+    return hits, fps
+
+
 def _write(name: str, header: str, body: str, deps: list[str], root: Path) -> Path:
     d = root / name
     (d / "src").mkdir(parents=True, exist_ok=True)
@@ -190,10 +241,7 @@ def main(argv=None):
                           literals=False, time_budget=args.time_budget)
         decoded = [x["string"] for x in res["decoded"]]
         expected = [_runtime_value(name, c) for c in SECRETS]
-        hits = [s for s in expected if any(s in dstr for dstr in decoded)]
-        # a decoded string is "explained" if it is contained in some expected secret (full or a
-        # partial decode of one); anything else is a false positive the engine invented.
-        fps = [dstr for dstr in decoded if not any(dstr in e or e in dstr for e in expected)]
+        hits, fps = score(expected, decoded)   # exact / token-bounded (see score())
         total_hits += len(hits)
         total_possible += len(expected)
         all_fps += len(fps)

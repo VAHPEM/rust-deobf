@@ -2,83 +2,135 @@
 """Reproducible end-to-end evaluation: one command, one metrics report.
 
 Produces METRICS.md with:
-  - static recovery recall per obfuscator x build config (the micro-benchmark)
-  - static precision: false decoders/strings on a real unobfuscated binary (if present)
+  - static recovery recall per obfuscator x build config (the canary micro-benchmark), each
+    binary scored by the static recoverer for ITS architecture (recover_callsite for x86-64,
+    recover_arm64 for AArch64); the scatter suite and the non-canary projects are not part of this
+    table (tests/test_scatter.py measures them through the whole pipeline)
+  - static precision: false decoders/strings on a real unobfuscated binary (optional, --ripgrep)
   - a pointer to the dynamic-recovery results (which require execution in a sandbox)
 
-Run:  python scripts/evaluate_all.py [--ripgrep /path/to/rg]
+Hand-written sections survive regeneration: anything in the existing METRICS.md between
+`<!-- keep -->` and `<!-- /keep -->` is carried over, in order, right below the title.
+
+Run:  python scripts/evaluate_all.py [--build DIR] [--ripgrep /path/to/rg]
 """
 from __future__ import annotations
-import argparse, json, sys
+import argparse, json, os, re, sys
 from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
-from recover_callsite import recover  # noqa: E402
 
-CIPHER = {}
+_MAN = {}
 try:
-    CIPHER = {p: v["cipher"] for p, v in json.loads((ROOT / "bench_src" / "manifest.json").read_text())["variants"].items()}
+    _MAN = json.loads((ROOT / "bench_src" / "manifest.json").read_text())
 except Exception:
     pass
+VARIANTS = _MAN.get("variants", {})
+CANARIES = _MAN.get("canaries", [])
+CIPHER = {p: v.get("cipher", "?") for p, v in VARIANTS.items()}
 
 # dynamic results are recorded here (they require a sandbox run; see VALIDATION.md)
 DYNAMIC = {"xor_custom": 5, "add_custom": 5, "sub_custom": 5, "litcrypt": 5,
            "litcrypt2": 5, "obfstr": 5, "muddy": 5, "plaintext": 5}
 
+KEEP_RE = re.compile(r"<!-- keep -->.*?<!-- /keep -->", re.S)
 
-def bench_recall():
+
+def static_recoverer(fmt: str, proj: str = ""):
+    """The static recoverer for a build: cryptify builds -> recover_cryptify (x86-64 and AArch64);
+    otherwise x86-64 ELF/PE -> recover_callsite, AArch64 ELF (musl 'elf-arm64' and glibc
+    'elf-arm64gnu') -> recover_arm64; None for anything else."""
+    if proj.startswith("cryptify") and (fmt in ("elf", "pe") or fmt.startswith("elf-arm64")):
+        import recover_cryptify as R
+        return R
+    if fmt in ("elf", "pe"):
+        import recover_callsite as R
+        return R
+    if fmt.startswith("elf-arm64"):
+        import recover_arm64 as R
+        return R
+    return None
+
+
+def bench_recall(build: Path):
     rows = []
-    for b in sorted((ROOT / "build").glob("*")):
+    for b in sorted(build.glob("*")):
         if not b.is_file() or b.suffix in (".json", ".jsonl") or "manifest" in b.name:
             continue
-        name = b.name.replace(".exe", "")
+        name = b.name[:-4] if b.name.endswith(".exe") else b.name
         parts = name.split("__")
         if len(parts) != 4:
             continue
         proj, fmt, profile, strip = parts
-        if proj == "cryptify":
+        v = VARIANTS.get(proj)
+        # canary suite only (scatter_* have different ground truth); cryptify needs its own key
+        # handling (tests/test_benchmark.py covers it); unknown projects are not benchmark variants
+        if v is None or v.get("suite", "canary") != "canary" or proj == "cryptify":
             continue
-        n_can = 5
-        can = [f"canary::{w}" for w in ("alpha", "bravo", "charlie", "delta", "echo")]
-        r = recover(b, can)
-        rows.append((proj, fmt, profile, strip, r["recall"], n_can))
+        # cryptify keeps its key out of the decoder's call sites: its static recoverer is
+        # recover_cryptify (the default-key build is recovered there, 5/5); the custom-key build
+        # ("cryptify") is runtime-keyed and needs dynamic recovery, so it is not in this table
+        R = static_recoverer(fmt, proj)
+        if R is None:
+            continue
+        try:
+            r = R.recover(b, CANARIES)
+            rec = r.get("recall", 0)
+        except Exception as e:                # one bad binary must not lose the whole report
+            print(f"[evaluate_all] {b.name}: {type(e).__name__}: {e}", file=sys.stderr)
+            rec = None
+        rows.append((proj, fmt, profile, strip, rec, len(CANARIES)))
     return rows
+
+
+def kept_sections(old_text: str) -> list[str]:
+    return KEEP_RE.findall(old_text or "")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ripgrep", default="/tmp/claude-0/realrust/bin/rg",
-                    help="a real unobfuscated Rust binary for the precision test")
+    ap.add_argument("--build", default=os.environ.get("RUST_DEOBF_BUILD", str(ROOT / "build")),
+                    help="the build directory scripts/build_all.sh wrote (default: $RUST_DEOBF_BUILD or build/)")
+    ap.add_argument("--ripgrep", default=None,
+                    help="optional: a real unobfuscated Rust binary for the precision section")
+    ap.add_argument("--out", default=str(ROOT / "METRICS.md"))
     args = ap.parse_args()
 
-    rows = bench_recall()
+    rows = bench_recall(Path(args.build))
 
     # static recall: best per obfuscator over release configs
     best = defaultdict(int)
     for proj, fmt, profile, strip, rec, n in rows:
-        if profile == "release":
+        if profile == "release" and rec is not None:
             best[proj] = max(best[proj], rec)
 
-    out = ["# Metrics (reproducible)", "",
-           "Generated by `python scripts/evaluate_all.py`. Canary recall is out of 5.", "",
-           "## Static recovery — best recall per obfuscator (release builds)", "",
-           "| obfuscator | cipher | static recall | dynamic recall |",
-           "|---|---|---|---|"]
+    out_path = Path(args.out)
+    old = out_path.read_text() if out_path.is_file() else ""
+    out = ["# Metrics (reproducible)", ""]
+    for block in kept_sections(old):
+        out += [block, ""]
+    out += ["Generated by `python scripts/evaluate_all.py`. Canary recall is out of 5. Each binary is "
+            "scored by the static recoverer for its architecture (x86-64: recover_callsite, AArch64: "
+            "recover_arm64).", "",
+            "## Static recovery — best recall per obfuscator (release builds)", "",
+            "| obfuscator | cipher | static recall | dynamic recall |",
+            "|---|---|---|---|"]
     for proj in sorted(best):
         out.append(f"| {proj} | {CIPHER.get(proj,'?')} | {best[proj]}/5 | {DYNAMIC.get(proj,'?')}/5 |")
 
     out += ["", "## Static recall — full build matrix", "",
             "| obfuscator | fmt | profile | strip | recall |",
             "|---|---|---|---|---|"]
-    for proj, fmt, profile, strip, rec, n in sorted(rows):
-        out.append(f"| {proj} | {fmt} | {profile} | {strip} | {rec}/{n} |")
+    for proj, fmt, profile, strip, rec, n in sorted(rows, key=lambda r: r[:4]):
+        out.append(f"| {proj} | {fmt} | {profile} | {strip} | {'error' if rec is None else rec}/{n} |")
 
     # precision on a real unobfuscated binary
-    rg = Path(args.ripgrep)
+    rg = Path(args.ripgrep) if args.ripgrep else None
     out += ["", "## Static precision — real unobfuscated binary"]
-    if rg.exists():
+    if rg is not None and rg.is_file():
+        from recover_callsite import recover
         r = recover(rg, [])
         # count distinct recovered strings (all are false positives: rg has no obfuscation)
         fp = len(set(r["recovered_texts"]))
@@ -88,8 +140,11 @@ def main():
                 f"False recovered strings (all are false positives): **{fp}**.",
                 "A real string decoder here would be 0, so every recovered string is noise;",
                 "the layered filter keeps this small but non-zero. See VALIDATION.md."]
+    elif rg is not None:
+        out += ["", f"(skipped: {rg} not found)"]
     else:
-        out += ["", f"(skipped: {rg} not found; pass --ripgrep PATH)"]
+        out += ["", "(skipped: pass --ripgrep PATH to an unobfuscated x86-64 Rust binary, e.g. "
+                "`--ripgrep \"$(command -v rg)\"`)"]
 
     out += ["", "## Dynamic recovery",
             "",
@@ -98,9 +153,9 @@ def main():
             "families only. See VALIDATION.md for the method, the notecli real-build result",
             "(static 0/3 -> dynamic 3/3), and the precision caveats.", ""]
 
-    (ROOT / "METRICS.md").write_text("\n".join(out) + "\n")
+    out_path.write_text("\n".join(out) + "\n")
     print("\n".join(out[:18]))
-    print(f"\n... full report written to METRICS.md ({len(rows)} configs measured)")
+    print(f"\n... full report written to {out_path} ({len(rows)} configs measured)")
 
 
 if __name__ == "__main__":

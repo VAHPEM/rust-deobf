@@ -16,11 +16,20 @@ binary here contains the benchmark canaries, so the ideal result is 0 FP.
     python scripts/measure_fp.py                     # auto-discover real system binaries
     python scripts/measure_fp.py --bins /usr/bin/git /tmp/rg/bin/rg
     python scripts/measure_fp.py --json              # machine-readable + writes build/fp_results.json
-    python scripts/measure_fp.py --pipeline          # the whole recover.py pipeline (static +
-                                                     # emulation), as a user runs it; writes
+    python scripts/measure_fp.py --pipeline          # the whole recover.py pipeline with its
+                                                     # default settings (static + cryptify +
+                                                     # emulation + stack strings + literals), as a
+                                                     # user runs it; writes
                                                      # build/fp_pipeline_results.json with --json
+    python scripts/measure_fp.py --pipeline --decoders-only   # cheaper: decoders + emulation only
 
-Only x86-64 ELF/PE that LIEF can parse are scanned (the static engine is x86-64). This is
+With --pipeline, a FP is a *decoded* string (static call-site, cryptify or emulation): on a benign
+binary nothing is hidden, so every one is wrong. Stack strings are reported as a separate count
+(benign code builds real strings on the stack too), and literals are plain strings, not decodes.
+A binary whose run raises is recorded with its error and the measurement continues.
+
+Only x86-64 ELF/PE that LIEF can parse are scanned (the static engine is x86-64); with
+--pipeline, any binary recover.py can parse. This is
 a defensive, read-only measurement: it disassembles binaries and prints statistics.
 """
 from __future__ import annotations
@@ -84,6 +93,14 @@ def is_x86_64(path: Path) -> bool:
         return False
 
 
+def _parseable(path: Path) -> bool:
+    try:
+        import recover
+        return recover.detect(path)[0] is not None
+    except Exception:
+        return False
+
+
 def text_size(path: Path) -> int:
     try:
         import lief
@@ -103,31 +120,45 @@ def discover(globs) -> list[Path]:
     return out
 
 
-def measure_pipeline(path: Path, time_budget: float):
-    """Every decoded string the full recover.py pipeline reports is a FP on a benign binary."""
+def measure_pipeline(path: Path, time_budget: float, decoders_only: bool = False):
+    """Every decoded string the full recover.py pipeline reports is a FP on a benign binary. Runs
+    recover.run with recover.py's own defaults unless decoders_only."""
     import time
     import recover
     t0 = time.monotonic()
-    res = recover.run(path, emulate="always", stackstrings=False, literals=False,
-                      time_budget=time_budget)
+    kw = {"stackstrings": False, "literals": False} if decoders_only else {}
+    res = recover.run(path, emulate="always", time_budget=time_budget, **kw)
     by_engine = {}
     for x in res["decoded"]:
         by_engine.setdefault(x.get("method", "?"), []).append(x["string"])
     emu = next((e for e in res["engines"] if e["engine"].startswith("emulation")), {})
     fp = sorted({x["string"] for x in res["decoded"]})
+    errs = res.get("errors") or []
     return {"binary": str(path), "language": language(path), "text_bytes": text_size(path),
             "emulated_functions": emu.get("functions", "-"), "timed_out": emu.get("timed_out", False),
             "seconds": round(time.monotonic() - t0, 1),
             "false_positives": len(fp), "fp_strings": fp[:20],
             "fp_by_method": {k: len(v) for k, v in by_engine.items()},
+            "stack_strings": len(res.get("stack", [])),
             "decoder_candidates": next((e.get("decoders", 0) for e in res["engines"]
                                         if e["engine"].startswith("static")), 0),
-            "error": None}
+            "error": "; ".join(f"{x['engine']}: {x['error']}" for x in errs) or None}
+
+
+def _error_row(path: Path, e: Exception) -> dict:
+    return {"binary": str(path), "language": language(path), "text_bytes": text_size(path),
+            "emulated_functions": "-", "timed_out": False, "seconds": 0.0,
+            "false_positives": 0, "fp_strings": [], "fp_by_method": {}, "stack_strings": 0,
+            "decoder_candidates": 0, "error": f"{type(e).__name__}: {e}"}
 
 
 def measure(path: Path):
     import recover_callsite as R
-    r = R.recover(path, [])            # no canaries -> every recovered text is a FP
+    try:
+        r = R.recover(path, [])        # no canaries -> every recovered text is a FP
+    except Exception as e:             # one crash must not abort the whole measurement
+        return {"binary": str(path), "text_bytes": text_size(path), "decoder_candidates": 0,
+                "false_positives": 0, "fp_strings": [], "error": f"{type(e).__name__}: {e}"}
     fp = sorted(set(s for s in r.get("recovered_texts", []) if len(s) >= 6))
     return {"binary": str(path), "text_bytes": text_size(path),
             "decoder_candidates": r.get("decoders", 0),
@@ -144,7 +175,10 @@ def main():
                     help="the mixed C/C++, Go and Rust corpus (corpus()) instead of DEFAULT_CANDIDATES")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--pipeline", action="store_true",
-                    help="measure the whole recover.py pipeline instead of static recovery alone")
+                    help="measure the whole recover.py pipeline (its default settings) instead of "
+                         "static recovery alone")
+    ap.add_argument("--decoders-only", action="store_true",
+                    help="with --pipeline: skip stack strings and literals (faster; not what a user runs)")
     ap.add_argument("--time-budget", type=float, default=120.0,
                     help="emulation time budget per binary with --pipeline (default 120 s)")
     a = ap.parse_args()
@@ -159,26 +193,37 @@ def main():
             rp = p.resolve()
         except Exception:
             continue
-        if rp in seen or not rp.exists() or not (is_x86_64(rp) or a.pipeline):
+        if rp in seen or not rp.is_file():
+            continue
+        # static mode: x86-64 only (the engine measured); pipeline: anything recover.py can parse
+        if not (_parseable(rp) if a.pipeline else is_x86_64(rp)):
             continue
         seen.add(rp); bins.append(rp)
     if not bins:
-        sys.exit("no x86-64 binaries found to measure (pass --bins or --glob)")
+        sys.exit("no binaries found to measure (static mode: x86-64 only; pass --bins or --glob)")
 
     if a.pipeline:
         rows = []
         for p in bins:
-            r = measure_pipeline(p, a.time_budget)
+            try:
+                r = measure_pipeline(p, a.time_budget, a.decoders_only)
+            except Exception as e:     # one crash must not abort the CI precision job
+                r = _error_row(p, e)
             rows.append(r)
             if not a.json:
                 print(f"{p.name:<26} {r['language']:<6} {r['text_bytes'] // 1024:>7} KB  emulated {r['emulated_functions']:>11}"
                       f"{' (budget)' if r['timed_out'] else ''}  {r['seconds']:>5}s  FP {r['false_positives']}"
-                      f"  {r['fp_by_method'] or ''}", flush=True)
+                      f"  {r['fp_by_method'] or ''}" + (f"  ERROR {r['error']}" if r["error"] else ""),
+                      flush=True)
                 for st in r["fp_strings"]:
                     print(f"      FP: {st!r}")
         tot = sum(r["false_positives"] for r in rows)
-        summary = {"binaries": len(rows), "clean_binaries": sum(1 for r in rows if not r["false_positives"]),
+        n_err = sum(1 for r in rows if r["error"])
+        summary = {"binaries": len(rows),
+                   "clean_binaries": sum(1 for r in rows if not r["false_positives"] and not r["error"]),
+                   "errored_binaries": n_err,
                    "false_positives_total": tot, "time_budget_s": a.time_budget,
+                   "settings": "decoders only" if a.decoders_only else "recover.py defaults",
                    "by_language": {lang: sum(r["false_positives"] for r in rows if r["language"] == lang)
                                    for lang in sorted({r["language"] for r in rows})}}
         if a.json:
@@ -188,16 +233,18 @@ def main():
             print(out)
         else:
             print(f"{summary['clean_binaries']}/{len(rows)} binaries with zero FP, {tot} FP total "
-                  f"(by language: {summary['by_language']})")
+                  f"(by language: {summary['by_language']}), {n_err} binaries errored")
         md = os.environ.get("GITHUB_STEP_SUMMARY")
         if md:                         # a table on the CI run page
             with open(md, "a") as f:
-                f.write("| binary | language | .text KB | functions emulated | FP |\n|---|---|--:|--:|--:|\n")
+                f.write("| binary | language | .text KB | functions emulated | FP | error |\n"
+                        "|---|---|--:|--:|--:|---|\n")
                 for r in rows:
+                    err = (r["error"] or "").replace("|", "/")[:120]
                     f.write(f"| {Path(r['binary']).name} | {r['language']} | {r['text_bytes'] // 1024} | "
                             f"{r['emulated_functions']}{' (budget)' if r['timed_out'] else ''} | "
-                            f"{r['false_positives']} |\n")
-        if os.environ.get("RUST_DEOBF_FP_STRICT") and tot:
+                            f"{r['false_positives']} | {err} |\n")
+        if os.environ.get("RUST_DEOBF_FP_STRICT") and (tot or n_err):
             sys.exit(1)
         return
 
