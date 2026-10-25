@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import ROOT
+from conftest import BUILD, NOT_BUILT, ROOT
 
 import recover
 
@@ -69,9 +69,10 @@ def test_detect_and_route_32bit_pe():
 
 
 def test_detect_64bit_still_emulates():
-    b = ROOT / "bench_src" / "litcrypt" / "target" / "release" / "litcrypt"
+    # build_all.sh builds with --target, so the binary is in the build dir, not target/release
+    b = BUILD / "litcrypt__elf__release__nostrip"
     if not b.is_file():
-        pytest.skip("x86-64 litcrypt not built")
+        pytest.skip(NOT_BUILT + b.name)
     fmt, arch, _ = recover.detect(b)
     assert (fmt, arch) == ("ELF", "x86_64")
     res = recover.run(b, emulate="never", stackstrings=False, literals=False)
