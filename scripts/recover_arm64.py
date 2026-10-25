@@ -252,7 +252,12 @@ def recover(path, canaries):
     found = set(); texts = []; records = []
     for (kva, kl), (xaddr, opn) in seen.items():
         key = read_va(binary, kva, kl)
-        if not key:
+        # a short read near a section end would make key[k % kl] raise; require the whole key
+        if len(key) < kl:
+            continue
+        # a mostly-zero key is not a decoder: it leaves plaintext (and a few flipped bytes) in place,
+        # so the loop would report ordinary .rodata text as "decoded" (the x86 path drops these too)
+        if 2 * key.count(0) >= len(key):
             continue
         entry = func_entry(xaddr)
         if entry is None:

@@ -494,7 +494,10 @@ def recover(path, canaries):
     found = set(); texts = []; records = []
     for (kva, kl), (xaddr, opn) in seen.items():
         key = read_va(binary, kva, kl)
-        if not key: continue
+        # read_va clamps to the section end, so a key within kl bytes of it comes back short; the
+        # decode loop indexes key[k % kl], so a short key would raise IndexError and (since recover.py
+        # calls this before emulation) take down the whole run. Require the full key.
+        if len(key) < kl: continue
         # a "key" that is mostly zero bytes leaves the data as it was: the loop is not a decoder,
         # and what it "decodes" is ordinary text with a few bytes flipped (ripgrep's
         # `caused by:` came out as `z4Yaused8by:`)
@@ -551,6 +554,10 @@ def recover(path, canaries):
                                     ptr_src = pj.reg_name(pj.operands[1].reg)
                                 elif mo.disp == slice_off + 8 and len_src is None:
                                     len_src = pj.reg_name(pj.operands[1].reg)
+                            # the length may be stored straight as an immediate: mov [rsp+k+8], imm
+                            elif pj.reg_name(mo.base) == "rsp" and mo.disp == slice_off + 8 \
+                                    and length is None and pj.operands[1].type == CS_OP_IMM:
+                                length = pj.operands[1].imm
                     # resolve ptr_src -> lea rip; len_src -> mov imm (search a wider window)
                     for j in range(i-1, max(0, i-80), -1):
                         pj = insns[j]
@@ -559,7 +566,8 @@ def recover(path, canaries):
                             t = rip_target(pj)
                             if t is not None: blob_va = t
                         if length is None and len_src and pj.mnemonic == "mov" and pj.operands \
-                           and pj.reg_name(pj.operands[0].reg) in (len_src, len_src.replace("r","e",1) if len_src.startswith("r") else len_src):
+                           and pj.operands[0].type == CS_OP_REG \
+                           and _canon_reg(pj.reg_name(pj.operands[0].reg)) == _canon_reg(len_src):
                             imm = next((op.imm for op in pj.operands if op.type == CS_OP_IMM), None)
                             if imm is not None: length = imm
                         if blob_va is not None and length is not None: break
