@@ -1625,3 +1625,31 @@ writes) rejects the result. This keeps the module strictly safe (it emits only w
 but means branchy loop functions remain the open item: the control-flow recovery needs the branch /
 return / back-edge distinction made robust before these verify. That precision is the same thing the
 round-13 obfuscated-interpreter target will need.
+
+## 35. Emulation: robust dynamic CFG recovery (premium) (Oct 2026)
+
+Makes control-flow recovery decide branch / return / back-edge from the observed *successor* offset
+of each instruction, not from whether it wrote a register. In the hoisted dispatch even a branch gets
+a (garbage) result store, so "has a dst" cannot separate a branch from an arithmetic op -- only the
+next fetched offset can:
+
+- a terminal instruction (execution returned right after it) is RET;
+- two distinct successors (one the fall-through) is a conditional branch (JZ/JNZ, direction from the
+  condition register when it was zero);
+- a single non-sequential successor is an unconditional JMP;
+- a dst-less op that only ever fell through is a branch never taken on these inputs -- a no-op for the
+  exercised paths, skipped rather than mis-read as a return.
+
+This fixes the spurious mid-function returns that corrupted the earlier reconstruction. With it,
+**sum_mix -- a loop over a memory buffer (load + loop + FNV mixing) -- devirtualizes and verifies
+through emulation**, control flow and all, confirmed by the Python-VM gate against both its return
+value and its observed loads. Combined `recover_all` now covers mix/check/wrap (static) plus fold64
+and sum_mix (emulation): 5 of the demo's functions, every one self-verified.
+
+**Honest limits.** Two function shapes remain refused (never mis-lifted):
+- `crc_ish` is `-O2`-unrolled into an irreducible CFG (odd/even split, opaque `r<=r` predicates); its
+  reconstruction is not yet correct and the verifier rejects it.
+- `roll` / `decode` are store-heavy buffer loops; their reconstruction does not yet verify against the
+  observed stores.
+These, and the unrolled/irreducible relooping, are the remaining items -- pursued together with the
+round-13 obfuscated-interpreter target, which needs the same dynamic recovery.

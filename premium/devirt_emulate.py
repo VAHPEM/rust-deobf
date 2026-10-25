@@ -356,11 +356,28 @@ def _reconstruct(runs, by_off, nreg):
     entries, pool, poolidx = {}, [], {}
     for off, occ in sorted(by_off.items()):
         s0 = occ[0]
-        nexts = [o["next"] for o in occ if o["next"] is not None]
         seq = off + 4
-        jumped = [n for n in nexts if n != seq]
+        terminal = any(o["next"] is None for o in occ)       # execution returned right after this
+        nn = sorted({o["next"] for o in occ if o["next"] is not None})
+        others = [n for n in nn if n != seq]                 # non-sequential successors (branch tgts)
 
-        if any(o["stores"] for o in occ):
+        # Control flow is decided by the observed successor offsets, before anything reg-based: in the
+        # hoisted dispatch even a branch gets a (garbage) result store, so "has a dst" cannot tell a
+        # branch from an arithmetic op -- only the successor can. RET is only a terminal instruction;
+        # a dst-less op that merely fell through (a branch never taken on these inputs) is a no-op.
+        if terminal:
+            entries[off] = (0, 64, 0, _ret_reg(occ, runs, off, regs), 0)   # RET r[a]
+        elif others and seq in nn:                           # conditional branch (taken both ways seen)
+            jb = _branch_kind(occ, regs, seq)
+            if jb is None:
+                return None
+            base, cond = jb
+            tgt = others[0]
+            entries[off] = (base, 64, cond, tgt & 0xff, (tgt >> 8) & 0xff)
+        elif others and seq not in nn:                       # unconditional jump
+            tgt = others[0]
+            entries[off] = (28, 64, 0, tgt & 0xff, (tgt >> 8) & 0xff)
+        elif any(o["stores"] for o in occ):
             r = _mem_op(occ, regs, store=True)
             if r is None:
                 return None
@@ -373,18 +390,7 @@ def _reconstruct(runs, by_off, nreg):
             a, w, dst = r
             entries[off] = (32, w, dst, a, 0)
         elif s0["dst"] is None:
-            if jumped:
-                tgt = jumped[0]
-                if seq in nexts:                             # conditional branch
-                    jb = _branch_kind(occ, regs, seq)
-                    if jb is None:
-                        return None
-                    base, cond = jb
-                    entries[off] = (base, 64, cond, tgt & 0xff, (tgt >> 8) & 0xff)
-                else:                                        # unconditional jump
-                    entries[off] = (28, 64, 0, tgt & 0xff, (tgt >> 8) & 0xff)
-            else:
-                entries[off] = (0, 64, 0, _ret_reg(occ, runs, off, regs), 0)   # RET
+            continue                                         # sequential, no result: a no-op here
         else:
             rd = regs(s0["srcs"])
             if not rd:                                       # wrote a reg, read none -> CONST
