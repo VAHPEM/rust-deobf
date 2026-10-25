@@ -13,25 +13,26 @@ from conftest import BUILD
 import recover_libfuncs as L
 
 # (format, extension) pairs; the target is matched stripped, truth read from its nostrip build
-# PE is a KNOWN, OPEN bug (review of Oct 2026): COFF symbol values are section-relative offsets,
-# but gen_runtime_sigs.function_starts / recover_libfuncs use them as RVAs, so every PE function
-# start is shifted by the .text RVA (0x1000) and 0 functions are identified. strict=True: the day
-# that bug is fixed this case XPASSes and fails, so the marker cannot outlive the bug.
-_PE_COFF_BUG = pytest.mark.xfail(strict=True, reason="open bug: PE COFF symbol values used as RVAs "
-                                 "(gen_runtime_sigs.function_starts, recover_libfuncs)")
-FORMATS = [("elf", ""), pytest.param("pe", ".exe", marks=_PE_COFF_BUG), ("elf-arm64", "")]
+FORMATS = [("elf", ""), ("pe", ".exe"), ("elf-arm64", "")]
 # reference program (signatures) -> target program (identification); distinct programs
 PAIRS = [("litcrypt", "xor_custom"), ("obfstr", "add_custom")]
 PROFILE = "release"
 
 
 def _truth(nostrip: Path):
+    import gen_runtime_sigs as G
     b = lief.parse(str(nostrip))
     text = next((s for s in b.sections if s.name == ".text"), None)
     assert text is not None
     base, clen = text.virtual_address, len(bytes(text.content))
-    return {s.value: L.readable(s.name) for s in b.symbols
-            if getattr(s, "is_function", False) and s.value and base <= s.value < base + clen}
+    truth = {}
+    for s in b.symbols:
+        if not getattr(s, "is_function", False):
+            continue
+        va = G.sym_va(b, s)                    # PE COFF values are section-relative; sym_va -> RVA
+        if va and base <= va < base + clen:
+            truth[va] = L.readable(s.name)
+    return truth
 
 
 @pytest.mark.parametrize("fmt,ext", FORMATS)
