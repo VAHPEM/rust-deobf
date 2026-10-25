@@ -455,7 +455,10 @@ samples you are authorised to analyse, inside an isolated VM.
 
 ## License
 
-Apache License 2.0 — see [`LICENSE`](LICENSE). A standard, OSI-approved license with no added
-restrictions. The defensive-use guidance in this README (run only in an isolated VM, benign test
-inputs, samples referenced by hash) is project guidance for using the tool responsibly, not a
-license term.
+**Open-core.** The core — everything outside `premium/` — is under the Apache License 2.0 (see
+[`LICENSE`](LICENSE)): a standard, OSI-approved permissive license, free for any use including
+commercial. Modules under `premium/` are dual-licensed **AGPL-3.0-or-later OR Commercial**. See
+[`LICENSING.md`](LICENSING.md) for the model and [`CLA.md`](CLA.md) for contributing.
+
+The defensive-use guidance in this README (run only in an isolated VM, benign test inputs, samples
+referenced by hash) is project guidance for using the tool responsibly, not a license term.
