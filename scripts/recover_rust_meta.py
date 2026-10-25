@@ -188,15 +188,21 @@ def read_sections(path: Path):
                 syms.append(s.name)
     except Exception:
         pass
-    # Relocations carrying an addend (ELF RELA): in a PIE build the Location filename
-    # pointers are stored as 0 and resolved at load, so the addend is the real string VA.
-    # PE base relocations carry no addend and are skipped (PE uses absolute pointers).
+    # Pointers the loader fills in, as (slot VA, target VA): in a PIE build a Location filename
+    # pointer is stored as 0 (ELF RELA, target in the addend) or as an encoded fixup (Mach-O
+    # chained fixups, LIEF resolves it to .target), not readable in place. PE base relocations
+    # carry no addend and are skipped (PE uses absolute pointers, read directly).
     relocs = []
     try:
-        for r in b.relocations:
-            ad = getattr(r, "addend", 0)
-            if ad:
-                relocs.append((int(r.address), int(ad)))
+        if fmt == "MACHO" and getattr(b, "has_dyld_chained_fixups", False):
+            for r in b.relocations:
+                if type(r).__name__ == "RelocationFixup":
+                    relocs.append((int(r.address), int(r.target)))
+        else:
+            for r in b.relocations:
+                ad = getattr(r, "addend", 0)
+                if ad:
+                    relocs.append((int(r.address), int(ad)))
     except Exception:
         pass
     return image_base, ptr, secs, syms, relocs
