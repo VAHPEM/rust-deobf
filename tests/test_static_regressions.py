@@ -178,3 +178,27 @@ def test_artifacts_extract_real_paths_bare_ip_and_hiveless_registry():
     assert "Software\\Northwind\\Agent\\Settings" in art["registry"]  # hive-less registry key
     assert "state.db" not in art["domains"]                         # a filename is not a domain
     assert "evil-c2.example.com" in art["domains"]                  # a real domain still tags
+
+
+# --- recover_rust_strings: 32-bit width and Mach-O chained fixups ---------------------------
+
+def test_i386_literals_recovered_with_4_byte_pointers():
+    import recover_rust_strings as L
+    f = FIX / "i386_literals"
+    if not f.is_file():
+        pytest.skip("fixture missing")
+    strs = {x["string"] for x in L.recover(f).get("strings", [])}
+    # an &str (ptr,len) table is 4+4 bytes on i386; read as 8+8 it found nothing
+    assert {"alpha-literal-one", "bravo-literal-two"} <= strs, strs
+
+
+@pytest.mark.parametrize("name", ["macho_classic.dylib", "macho_chained.dylib"])
+def test_macho_literals_recovered_classic_and_chained(name):
+    import recover_rust_strings as L
+    f = FIX / name
+    if not f.is_file():
+        pytest.skip("fixture missing")
+    strs = {x["string"] for x in L.recover(f).get("strings", [])}
+    # a chained-fixup pointer is an encoded fixup, not the address; decoding it recovers BOTH
+    # literals (only one came through before, and none in an executable with a non-zero base)
+    assert {"alpha-literal-one", "bravo-literal-two"} <= strs, (name, strs)
