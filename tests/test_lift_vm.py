@@ -135,6 +135,31 @@ def test_structurer_raises_goto_to_while_and_if():
     assert "goto" not in out                                       # fully structured here
 
 
+def test_cfg_layout_structures_a_noncontiguous_loop():
+    # a reducible loop the compiler laid out non-contiguously: the test/header is at 0x20, the body at
+    # the *lower* offset 0x08, the exit at 0x14. In offset order the peephole structurer cannot fold
+    # it; the CFG layout reorders the basic blocks so the loop is contiguous and it raises cleanly to
+    # while(1)+break. It also resolves branch targets to real instructions, so no goto dangles.
+    W = 3 << 6
+    C, ADD, ULE, JMP, JNZ, RET = W | 1, W | 2, W | 19, W | 28, W | 30, W | 0
+    bm = {C: 1, ADD: 2, ULE: 19, JMP: 28, JNZ: 30, RET: 0}
+    prog = [
+        (0x00, C, 1, 0, 0),       # i = 0
+        (0x04, JMP, 0, 0x20, 0),  # jump forward into the loop test
+        (0x08, ADD, 2, 2, 1),     # body: acc += i
+        (0x0c, ADD, 1, 1, 3),     # i += step
+        (0x10, JMP, 0, 0x20, 0),  # back-edge to the test
+        (0x14, RET, 0, 2, 0),     # exit: return acc
+        (0x20, ULE, 4, 5, 1),     # header/test: r4 = (limit <= i)
+        (0x24, JNZ, 4, 0x14, 0),  # if done -> exit
+        (0x28, JMP, 0, 0x08, 0),  # else -> body
+    ]
+    pc = lift_vm.lift_region(0x1000, prog, bm, [0], None)["pseudocode"]
+    body = "\n".join(pc)
+    assert body.count("while (1)") == 1 and "break" in body       # the non-contiguous loop folds
+    assert "goto" not in body                                      # fully structured, nothing dangles
+
+
 @pytest.mark.skipif(not RND.is_file(), reason="randomized fixture missing")
 def test_pseudocode_reconstructs_c_expression():
     # the lifter raises the recovered VM-assembly to C: resolve the constant pool, fold the

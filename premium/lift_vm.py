@@ -661,6 +661,215 @@ def _structure(stmts):
     return [s for s in stmts if not (re.match(r"^L\w+:$", s.strip()) and not tc.get(s.strip()[:-1]))]
 
 
+def _dominators(entry, nodes, preds):
+    """Immediate dominators over a basic-block graph (Cooper-Harvey-Kennedy). `nodes` is a reverse
+    postorder list from `entry`; returns idom[n]."""
+    rpo_index = {n: i for i, n in enumerate(nodes)}
+    idom = {entry: entry}
+
+    def intersect(a, b):
+        while a != b:
+            while rpo_index[a] > rpo_index[b]:
+                a = idom[a]
+            while rpo_index[b] > rpo_index[a]:
+                b = idom[b]
+        return a
+
+    changed = True
+    while changed:
+        changed = False
+        for n in nodes:
+            if n == entry:
+                continue
+            new = None
+            for p in preds.get(n, []):
+                if p in idom:
+                    new = p if new is None else intersect(new, p)
+            if new is not None and idom.get(n) != new:
+                idom[n] = new
+                changed = True
+    return idom
+
+
+def _cfg_layout(prog, bof, pool):
+    """Emit the control-flow body as a flat statement list, but with the basic blocks laid out so
+    that every natural loop's body is *contiguous* -- regardless of how the compiler ordered them --
+    and with each branch target resolved to a real instruction (a target that fell on a skipped
+    no-op is bumped to the next real offset, so no `goto` dangles). The peephole structurer then
+    folds the now-contiguous loops. Reordering is semantics-preserving because every edge between
+    blocks is made explicit (a fall-through is kept adjacent; anything else becomes a `goto`); an
+    irreducible back-edge simply is not treated as a loop, so its blocks stay as correct `goto`."""
+    import bisect
+    nodes = {p[0]: p for p in prog}
+    offs = sorted(nodes)
+    if not offs:
+        return []
+    nextoff = {o: (offs[i + 1] if i + 1 < len(offs) else None) for i, o in enumerate(offs)}
+
+    def resolve(t):
+        i = bisect.bisect_left(offs, t)
+        return offs[i] if i < len(offs) else None
+
+    def ins_succ(o):                                         # resolved successors of one instruction
+        _, op, dst, a, b = nodes[o]
+        base = bof(op)
+        if base in (0, 35):
+            return []
+        if base == 28:
+            return [resolve(a | (b << 8))]
+        if base in (29, 30):
+            return [resolve(a | (b << 8)), nextoff[o]]
+        return [nextoff[o]]
+
+    # basic blocks: leaders are the entry, every branch target, and the instruction after any
+    # control-transfer instruction.
+    leaders = {offs[0]}
+    for o in offs:
+        base = bof(nodes[o][1])
+        for s in ins_succ(o):
+            if s is not None:
+                leaders.add(s)
+        if base in (0, 35, 28, 29, 30) and nextoff[o] is not None:
+            leaders.add(nextoff[o])
+    leaders = sorted(leaders)
+    entry = leaders[0]
+    block = {}                                               # leader -> [offsets]
+    bb_of = {}
+    for i, ld in enumerate(leaders):
+        end = leaders[i + 1] if i + 1 < len(leaders) else None
+        blk = [o for o in offs if o >= ld and (end is None or o < end)]
+        block[ld] = blk
+        for o in blk:
+            bb_of[o] = ld
+
+    def bb_succ(ld):                                         # BB successors, as (leader, is_fallthrough)
+        last = block[ld][-1]
+        _, op, _, a, b = nodes[last]
+        base = bof(op)
+        if base in (0, 35):
+            return []
+        if base == 28:
+            return [(resolve(a | (b << 8)), False)]
+        if base in (29, 30):
+            return [(nextoff[last], True), (resolve(a | (b << 8)), False)]
+        return [(nextoff[last], True)]
+
+    succ = {ld: [s for s, _ in bb_succ(ld)] for ld in leaders}
+    preds = {ld: [] for ld in leaders}
+    for ld in leaders:
+        for s in succ[ld]:
+            if s is not None:
+                preds[s].append(ld)
+
+    # reverse postorder from entry, then dominators and natural loops.
+    rpo, seen = [], set()
+
+    def dfs(n):
+        seen.add(n)
+        for s in succ[n]:
+            if s is not None and s not in seen:
+                dfs(s)
+        rpo.append(n)
+    dfs(entry)
+    rpo.reverse()
+    reach = set(rpo)
+    idom = _dominators(entry, rpo, preds)
+
+    def dominates(a, b):
+        while b != idom.get(b, b):
+            if b == a:
+                return True
+            b = idom[b]
+        return b == a
+
+    loop_body = {}                                           # header -> set of BB leaders (incl header)
+    for u in leaders:
+        if u not in reach:
+            continue
+        for h in succ[u]:                                    # back-edge u -> h with h dominating u
+            if h is not None and dominates(h, u):
+                body = loop_body.setdefault(h, {h})
+                work = [u]
+                while work:
+                    m = work.pop()
+                    if m not in body:
+                        body.add(m)
+                        work.extend(preds[m])
+
+    def succ_pref(ld):                                       # fall-through first, so it stays adjacent
+        return [s for s, _ in sorted(bb_succ(ld), key=lambda sf: not sf[1])]
+
+    # lay the blocks out: a loop header expands its whole body contiguously, then its exits.
+    order, placed, expanding = [], set(), set()
+
+    def schedule(start, region):
+        local = []
+        local_seen = set()
+
+        def rec(n):
+            if n is None or n not in region or n in local_seen or n in placed:
+                return
+            if n in loop_body and n not in expanding:        # expand this loop's body as a unit
+                expanding.add(n)
+                body = {b for b in loop_body[n] if b in region}
+                for x in schedule(n, body):
+                    if x not in local_seen:
+                        local_seen.add(x)
+                        local.append(x)
+                expanding.discard(n)
+                exits = [t for b in body for t in succ[b] if t is not None and t not in body]
+                for e in exits:
+                    rec(e)
+                return
+            local_seen.add(n)
+            local.append(n)
+            for s in succ_pref(n):
+                rec(s)
+        rec(start)
+        return local
+
+    order = schedule(entry, set(reach))
+    for ld in leaders:                                       # any unreachable blocks, kept for safety
+        if ld not in order:
+            order.append(ld)
+
+    # emit the flat statements in the new order, making inter-block flow explicit.
+    out, pending = [], []
+    for idx, ld in enumerate(order):
+        nxt = order[idx + 1] if idx + 1 < len(order) else None
+        out.append(f"L{ld:04x}:")
+        blk = block[ld]
+        for o in blk:
+            _, op, dst, a, b = nodes[o]
+            s = _data_stmt(o, op, dst, a, b, bof, pool, pending)
+            if s is not None:
+                out.append("    " + s)
+        last = blk[-1]
+        _, op, dst, a, b = nodes[last]
+        base = bof(op)
+        if base == 0:
+            out.append(f"    return r{a};")
+        elif base == 35:
+            out.append("    return;")
+        elif base == 28:
+            tgt = resolve(a | (b << 8))
+            if tgt is not None and tgt != nxt:
+                out.append(f"    goto L{tgt:04x};")
+        elif base in (29, 30):
+            cond = f"r{dst} == 0" if base == 29 else f"r{dst} != 0"
+            tgt = resolve(a | (b << 8))
+            if tgt is not None:
+                out.append(f"    if ({cond}) goto L{tgt:04x};")
+            ft = nextoff[last]
+            if ft is not None and ft != nxt:
+                out.append(f"    goto L{ft:04x};")
+        else:                                                # falls through to its sequential successor
+            ft = nextoff[last]
+            if ft is not None and ft != nxt:
+                out.append(f"    goto L{ft:04x};")
+    return out
+
+
 def _pseudocode(prog, bof, pool):
     """Raise the VM-assembly to C-like pseudocode: resolve the constant pool, and -- for a
     straight-line (branchless) function, whose VM registers are each assigned once -- fold every
@@ -710,46 +919,40 @@ def _pseudocode(prog, bof, pool):
                     expr[dst] = e
         return [f"return {ret};"] if ret is not None else []
 
-    # control flow: flat statements with labels and gotos
-    labels = {a | (b << 8) for _, op, _, a, b in prog if bof(op) in (28, 29, 30)}
-    out, pending = [], []
-    for off, op, dst, a, b in prog:
-        base, w = bof(op), _width(op)
-        if off in labels:
-            out.append(f"L{off:04x}:")
-        pre = "    "
-        if base == 36:                                       # PUSHARG: stage one call argument
-            pending.append(f"r{a}")
-        elif base == 37:                                     # CALL: rD = fn[idx](staged args)
-            out.append(pre + f"r{dst} = fn{a}(" + ", ".join(pending) + ");")
-            pending = []
-        elif base == 0:
-            out.append(pre + f"return r{a};")
-        elif base == 35:
-            out.append(pre + "return;")
-        elif base == 1:
-            cv = _fmt_const(pool[a | (b << 8)], 64) if pool and (a | (b << 8)) < len(pool) else f"pool[{a|(b<<8)}]"
-            out.append(pre + f"r{dst} = {cv};")
-        elif base in _COPS:
-            out.append(pre + f"r{dst} = r{a} {_COPS[base]} r{b};")
-        elif base == 26:
-            out.append(pre + f"r{dst} = r{a};")
-        elif base == 27:
-            out.append(pre + f"r{dst} = r{a} ? r{b} : r{dst};")
-        elif base == 31:
-            out.append(pre + f"r{dst} = r{a} ? r{dst} : r{b};")
-        elif base == 34:
-            out.append(pre + f"r{dst} = sext{w}(r{a});")
-        elif base == 32:
-            out.append(pre + f"r{dst} = *(i{w}*)r{a};")
-        elif base == 33:
-            out.append(pre + f"*(i{w}*)r{a} = r{b};")
-        elif base == 28:
-            out.append(pre + f"goto L{(a|(b<<8)):04x};")
-        elif base in (29, 30):
-            cond = f"r{dst} == 0" if base == 29 else f"r{dst} != 0"
-            out.append(pre + f"if ({cond}) goto L{(a|(b<<8)):04x};")
-    return _structure(out)
+    # control flow: lay the basic blocks out loop-contiguously (so a non-contiguously compiled loop
+    # nest still structures), then fold with the peephole structurer.
+    return _structure(_cfg_layout(prog, bof, pool))
+
+
+def _data_stmt(off, op, dst, a, b, bof, pool, pending):
+    """The C statement for a non-control instruction (`pending` collects PUSHARG operands for a CALL).
+    Returns the statement string, or None for a control-transfer op (handled by the block layout)."""
+    base, w = bof(op), _width(op)
+    if base == 36:                                           # PUSHARG: stage one call argument
+        pending.append(f"r{a}")
+        return None
+    if base == 37:                                           # CALL: rD = fn[idx](staged args)
+        s = f"r{dst} = fn{a}(" + ", ".join(pending) + ");"
+        pending.clear()
+        return s
+    if base == 1:
+        cv = _fmt_const(pool[a | (b << 8)], 64) if pool and (a | (b << 8)) < len(pool) else f"pool[{a|(b<<8)}]"
+        return f"r{dst} = {cv};"
+    if base in _COPS:
+        return f"r{dst} = r{a} {_COPS[base]} r{b};"
+    if base == 26:
+        return f"r{dst} = r{a};"
+    if base == 27:
+        return f"r{dst} = r{a} ? r{b} : r{dst};"
+    if base == 31:
+        return f"r{dst} = r{a} ? r{dst} : r{b};"
+    if base == 34:
+        return f"r{dst} = sext{w}(r{a});"
+    if base == 32:
+        return f"r{dst} = *(i{w}*)r{a};"
+    if base == 33:
+        return f"*(i{w}*)r{a} = r{b};"
+    return None                                              # ret/retv/jmp/jcc -> a block terminator
 
 
 def lift_region(bc_va, prog, bytemap=None, pool=None, default_base=None):

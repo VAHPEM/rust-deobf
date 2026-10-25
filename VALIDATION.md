@@ -1827,3 +1827,39 @@ target sits far from the latch), so it is left as `if/goto` -- correct, just not
 relooper for non-contiguous / irreducible layouts is the next step. Crucially, structuring only
 rewrites control-flow syntax over the already-verified program, so an unstructured loop is less
 pretty, never less correct.
+
+## 42. A general relooper — CFG-based block layout for non-contiguous (and irreducible) loops (Oct 2026)
+
+§41 left the honest limit that a loop laid out *non-contiguously* by the compiler stayed as `if/goto`,
+because the peephole structurer needs the loop body contiguous in the statement list. Measuring the
+outer loop of `nested_sum` showed it is **reducible, merely non-contiguous**: header at `0x48`, the
+body jumps forward to the inner loop at `0xa4`, whose exit falls *back* to the latch at `0x74..0x94`
+(lower offsets), with the back-edge `0x94 -> 0x48`. Not irreducible -- just out of order. (The probe
+also found a latent bug: a branch target that landed on a skipped no-op offset emitted a `goto` to a
+label that was never produced -- a dangling `goto`.)
+
+So the relooper is now **CFG-based** (`_cfg_layout`): build the basic-block graph from the recovered
+program, resolve every branch target to a real instruction (bumping a no-op target to the next real
+offset -- no more dangling `goto`), compute dominators (Cooper-Harvey-Kennedy) and the natural loops
+from the back-edges, then lay the blocks out so each loop's body is **contiguous** (a loop header
+expands its whole body as a unit before its exits, fall-through edges kept adjacent). Every
+inter-block edge is made explicit, so the reordering is semantics-preserving; the existing, verified
+peephole structurer then folds the now-contiguous loops. An irreducible back-edge (header does not
+dominate the tail) is simply not treated as a loop, so those blocks stay as correct `goto` -- the
+layout degrades safely rather than emitting wrong structure.
+
+Results (each still self-verified; structuring only rewrites control-flow syntax over the verified
+program, never its logic):
+- **`nested_sum`, `tri_mix`: fully structured** -- both the inner and the (previously non-contiguous)
+  outer loop raise to nested `while (1)`, zero `goto` left, nothing dangling.
+- `crc_ish`, `sum_mix`, `roll`: more structure than before, no dangling `goto`.
+- `find_mix`: still `if/goto` -- its inner `break` makes a genuine multi-exit loop, which this
+  layout+peephole does not fold (a correct, honest limit); output is valid, just not raised.
+
+Pinned by a fixture test (the nested functions fully structure with no dangling target) and a
+self-contained unit test (a hand-built non-contiguous reducible loop folds to `while(1)`). Full suite
+green.
+
+**Remaining limit.** Multi-exit loops (an inner `break`/`continue`) and genuinely irreducible nests
+are still left as `goto`. The natural next step is labelled `break`/`continue` for multi-exit loops
+and node-splitting (or a dispatch block) for irreducible regions -- a full Relooper.

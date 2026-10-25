@@ -163,15 +163,25 @@ def test_emulation_recovers_nested_loops_and_structures_the_inner_while():
         out = subprocess.check_output(["nm", str(NESTFIX)]).decode().splitlines()
         return {p[2]: int(p[0], 16) for p in (l.split() for l in out) if len(p) == 3 and p[1] == "T"}
 
+    import re
     s = syms()
     for fn in ("nested_sum", "tri_mix", "find_mix"):      # find_mix has an inner break
         assert fn in s, f"fixture has no {fn} symbol"
         r = devirt_emulate.recover(NESTFIX, s[fn])
         assert r is not None, f"emulation failed to recover nested-loop {fn}"
         assert r["has_control_flow"], f"{fn} should lift with control flow"
-    # the inner loop of a clean nest raises to a structured while-loop.
+        pc = r["pseudocode"]
+        # no `goto` may dangle: every branch target resolves to an emitted label (the CFG layout bumps
+        # a target that fell on a skipped no-op to the next real instruction).
+        labels = {m.group(1) for line in pc for m in [re.match(r"^(L\w+):", line.strip())] if m}
+        gotos = {m.group(1) for line in pc for m in re.finditer(r"goto (L\w+)", line)}
+        assert not (gotos - labels), f"{fn} has dangling goto(s): {gotos - labels}"
+
+    # a clean nest (no inner break) fully structures: both loops become nested while(1), no goto left
+    # -- the CFG layout makes the non-contiguously compiled outer loop contiguous so it folds too.
     pc = "\n".join(devirt_emulate.recover(NESTFIX, s["nested_sum"])["pseudocode"])
-    assert "while (1)" in pc and "break" in pc, "the inner while-loop should be structured"
+    assert pc.count("while (1)") == 2 and "break" in pc, "both loops of nested_sum should structure"
+    assert "goto L" not in pc, "a clean reducible nest should leave no goto"
 
 
 @pytest.mark.skipif(not CALLFIX.is_file(), reason="fixture missing")
