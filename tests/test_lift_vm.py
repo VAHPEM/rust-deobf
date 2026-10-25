@@ -21,18 +21,30 @@ pytestmark = pytest.mark.skipif(not _X64, reason="x86-64 fixtures")
 
 
 def _mnemonics(fn):
-    return [text.split()[0] for _, _, text in fn["listing"]]
+    # strip the width suffix (add.i32 -> add) so tests compare base mnemonics
+    return [text.split()[0].split(".")[0] for _, _, text in fn["listing"]]
 
 
 @pytest.mark.skipif(not VMFIX.is_file(), reason="vm fixture missing")
 def test_lifts_all_virtualized_functions():
     r = lift_vm.lift(VMFIX)
-    assert r["count"] >= 4, f"expected the 4 virtualized functions, lifted {r['count']}"
+    assert r["count"] >= 4, f"expected at least 4 virtualized functions, lifted {r['count']}"
     # every listing ends in a ret and only uses known VM mnemonics
     known = {m for m, _ in lift_vm.OPS.values()}
     for fn in r["lifted"]:
         assert _mnemonics(fn)[-1] == "ret"
         assert set(_mnemonics(fn)) <= known
+
+
+@pytest.mark.skipif(not VMFIX.is_file(), reason="vm fixture missing")
+def test_memory_function_lifts_with_load_store():
+    r = lift_vm.lift(VMFIX)
+    mem = [f for f in r["lifted"] if f.get("has_memory")]
+    assert mem, "a buffer function should lift with memory load/store ops"
+    ms = set(_mnemonics(mem[0]))
+    assert "load" in ms or "store" in ms
+    # width-tagged ops render with their width (e.g. load.i8 / add.i32)
+    assert any("." in text.split()[0] for _, _, text in mem[0]["listing"])
 
 
 @pytest.mark.skipif(not VMFIX.is_file(), reason="vm fixture missing")

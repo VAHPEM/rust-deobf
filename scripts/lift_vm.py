@@ -26,8 +26,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-# opcode -> (mnemonic, kind). kind: "bin" dst,a,b ; "mov" dst,a ; "cmov" dst,a,b ;
-# "const" dst,idx ; "ret" a ; "jmp" tgt ; "jcc" dst,tgt
+# base opcode -> (mnemonic, kind). The opcode byte is `base | (wcode<<6)` where wcode in
+# {0:i8,1:i16,2:i32,3:i64} gives the width of a width-sensitive op. kind: "bin" dst,a,b ;
+# "mov" dst,a ; "cmov" dst,a,b ; "const" dst,idx ; "ret" a ; "retv" ; "jmp" tgt ; "jcc" dst,tgt ;
+# "load" dst,a ; "store" a,b ; "sext" dst,a
 OPS = {
     0: ("ret", "ret"), 1: ("const", "const"),
     2: ("add", "bin"), 3: ("sub", "bin"), 4: ("mul", "bin"), 5: ("and", "bin"),
@@ -39,7 +41,17 @@ OPS = {
     24: ("sgt", "bin"), 25: ("sge", "bin"),
     26: ("mov", "mov"), 27: ("cmovnz", "cmov"),
     28: ("jmp", "jmp"), 29: ("jz", "jcc"), 30: ("jnz", "jcc"),
+    32: ("load", "load"), 33: ("store", "store"), 34: ("sext", "sext"), 35: ("retv", "retv"),
 }
+WIDTH = {0: 8, 1: 16, 2: 32, 3: 64}
+
+
+def _base(op):
+    return op & 0x3f
+
+
+def _width(op):
+    return WIDTH[(op >> 6) & 3]
 
 
 def _read_va(img, va, n):
@@ -116,62 +128,76 @@ def _decode(blob):
     are 0-14, 16-30, so any other byte -- a pointer, pool value, padding -- bounds the blob).
     Returns [(off,op,dst,a,b)] or None if the region doesn't look like real bytecode. Several
     structural checks reject random data that happens to start with low bytes."""
-    if len(blob) < 4 or blob[0] not in OPS or blob[0] == 0:   # real bytecode never starts with RET
-        return None
+    if len(blob) < 4 or _base(blob[0]) not in OPS or _base(blob[0]) in (0, 35):
+        return None                                           # never starts with ret/retv
     prog = []
     off = 0
-    while off + 4 <= len(blob) and blob[off] in OPS:
+    while off + 4 <= len(blob) and _base(blob[off]) in OPS:
         prog.append((off, blob[off], blob[off + 1], blob[off + 2], blob[off + 3]))
         off += 4
-    if len(prog) < 10 or prog[-1][1] != 0:                    # too short / doesn't end in RET
+    if len(prog) < 10 or _base(prog[-1][1]) not in (0, 35):   # too short / doesn't end in ret(v)
         return None
-    if sum(1 for (_, op, _, _, _) in prog if op != 0) < 5:
+    if sum(1 for (_, op, _, _, _) in prog if _base(op) not in (0, 35)) < 5:
         return None
     # registers are densely numbered 0..nreg; a real stream's indices stay within ~the slot count,
     # whereas random data has sparse huge byte values (r128, r192, ...)
     cap = min(200, 4 * len(prog) + 8)
     for _, op, dst, a, b in prog:
-        if op in (1, 28):                                     # const idx / jmp target use a,b as u16
-            if op == 1 and (a | (b << 8)) >= 4096:
+        base = _base(op)
+        if base in (1, 28):                                   # const idx / jmp target use a,b as u16
+            if base == 1 and (a | (b << 8)) >= 4096:
                 return None
             if dst >= cap:
                 return None
-        elif op in (29, 30):                                  # jcc: dst is a reg, a,b a target
+        elif base in (29, 30):                                # jcc: dst is a reg, a,b a target
             if dst >= cap:
                 return None
         else:
             if dst >= cap or a >= cap or b >= cap:
                 return None
-        if op in (28, 29, 30) and ((a | (b << 8)) % 4 or (a | (b << 8)) >= len(prog) * 4):
+        if base in (28, 29, 30) and ((a | (b << 8)) % 4 or (a | (b << 8)) >= len(prog) * 4):
             return None
     return prog
 
 
 def lift_region(bc_va, prog):
-    nconst = max((a | (b << 8)) + 1 for (_, op, dst, a, b) in prog if op == 1) if \
-        any(op == 1 for (_, op, _, _, _) in prog) else 0
-    labels = {off for (_, op, _, a, b) in prog if op in (28, 29, 30) for off in [a | (b << 8)]}
+    nconst = max((a | (b << 8)) + 1 for (_, op, dst, a, b) in prog if _base(op) == 1) if \
+        any(_base(op) == 1 for (_, op, _, _, _) in prog) else 0
+    labels = {off for (_, op, _, a, b) in prog if _base(op) in (28, 29, 30)
+              for off in [a | (b << 8)]}
+    has_mem = any(_base(op) in (32, 33) for (_, op, _, _, _) in prog)
     lines = []
     for off, op, dst, a, b in prog:
-        mn, kind = OPS[op]
+        mn, kind = OPS[_base(op)]
+        w = _width(op)
+        ws = "" if _base(op) in (0, 1, 26, 27, 28, 29, 30, 35) else f".i{w}"
         lbl = f"L{off:04x}" if off in labels else "     "
+        tag = f"{mn}{ws}"
         if kind == "ret":
             lines.append((off, lbl, f"ret      r{a}"))
+        elif kind == "retv":
+            lines.append((off, lbl, "ret      (void)"))
         elif kind == "const":
             lines.append((off, lbl, f"const    r{dst}, pool[{a | (b << 8)}]"))
         elif kind == "bin":
-            lines.append((off, lbl, f"{mn:<6}   r{dst}, r{a}, r{b}"))
+            lines.append((off, lbl, f"{tag:<9} r{dst}, r{a}, r{b}"))
         elif kind == "mov":
             lines.append((off, lbl, f"mov      r{dst}, r{a}"))
         elif kind == "cmov":
             lines.append((off, lbl, f"cmovnz   r{dst}, r{a}, r{b}"))
+        elif kind == "sext":
+            lines.append((off, lbl, f"{tag:<9} r{dst}, r{a}"))
+        elif kind == "load":
+            lines.append((off, lbl, f"{tag:<9} r{dst}, [r{a}]"))
+        elif kind == "store":
+            lines.append((off, lbl, f"{tag:<9} [r{a}], r{b}"))
         elif kind == "jmp":
             lines.append((off, lbl, f"jmp      L{(a | (b << 8)):04x}"))
         elif kind == "jcc":
-            lines.append((off, lbl, f"{mn:<6}   r{dst}, L{(a | (b << 8)):04x}"))
-    has_cf = bool(labels)
+            lines.append((off, lbl, f"{tag:<9} r{dst}, L{(a | (b << 8)):04x}"))
     return {"bytecode_va": bc_va, "instructions": len(prog), "constants": nconst,
-            "has_control_flow": has_cf, "listing": lines, "labels": sorted(labels)}
+            "has_control_flow": bool(labels), "has_memory": has_mem,
+            "listing": lines, "labels": sorted(labels)}
 
 
 def lift(path: Path) -> dict:
@@ -193,7 +219,12 @@ def print_human(r: dict) -> None:
         print("  no virtualized function could be lifted")
         return
     for fn in r["lifted"]:
-        cf = "  (has control flow: branches/loops)" if fn["has_control_flow"] else ""
+        tags = []
+        if fn["has_control_flow"]:
+            tags.append("control flow")
+        if fn.get("has_memory"):
+            tags.append("memory load/store")
+        cf = f"  ({', '.join(tags)})" if tags else ""
         print(f"\n  bytecode @ 0x{fn['bytecode_va']:x}  ({fn['instructions']} vm-instructions, "
               f"{fn['constants']} constants){cf}")
         print("  " + "-" * 50)

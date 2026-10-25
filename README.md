@@ -281,8 +281,10 @@ it finds the embedded bytecode blob (anchored by its code cross-reference, since
 packed in `.rodata`), decodes the register-machine instructions — including the control-flow
 opcodes, so branches and loops come back as labelled `jmp`/`jnz` with the SSA PHI copies visible —
 and prints the function's logic as a compact VM-assembly listing instead of a dispatch loop. Gated
-on the detector (an ordinary binary lifts nothing). Round-1 lifter: VM-assembly, not yet
-C/pseudocode (re-SSA + expression folding + pool-value resolution are the next round); x86-64.
+on the detector (an ordinary binary lifts nothing). It decodes the width-tagged format too, so
+memory routines come back with their widths and accesses (`load.i8 rD, [rA]`, `store.i8 [rA], rB`,
+`add.i32`). Still VM-assembly, not yet C/pseudocode (re-SSA + expression folding + pool-value
+resolution are the next round); x86-64.
 
 `scripts/llm_triage.py <binary>` adds an **AI-assisted** read on top: it hands *only* the
 deterministically recovered facts (the triage card above — never the raw binary) to an LLM and asks

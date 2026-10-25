@@ -1323,3 +1323,37 @@ loop function lifts *with* control flow (labels + `jmp`/`jz`/`jnz`); the plain b
 scope jumps. BLUE: the lifter recovers VM-*assembly*, not yet C/pseudocode (re-SSA, expression
 folding and pool-value resolution are the next step), and it targets the x86-64 threaded-dispatch
 lowering (ARM, whose dispatch is a compare-tree, is the deferred detection/lift round).
+
+## 27. Round 8: memory virtualization (RustCloak) ↔ lifter keeps pace (rust-deobf) (Oct 2026)
+
+**RED — memory in `virt` (RustCloak).** Round 3 of the VM: loads, stores, `getelementptr`, pointers
+and mixed integer widths. The VM becomes a uniform **i64 register file**; each width-sensitive
+opcode carries its width (i8/i16/i32/i64) in its two high bits. New opcodes `LOAD`/`STORE`/`SEXT`/
+`RETV`. `getelementptr` lowers to i64 address arithmetic (sign-extend the index, multiply by the
+stride from the DataLayout, add); pointer arguments enter via `ptrtoint`; `ptrtoint`/`inttoptr`/
+`bitcast` are register moves; `zext` is a move (the lane is kept zero-extended), `trunc` an `AND`,
+`sext` its own opcode. Loads and stores hit **real process memory** -- the interpreter runs
+natively, so there is no memory to emulate and correctness follows from matching the address
+arithmetic. Still native: calls, global/constexpr references, floats, vectors (an auto-vectorized
+loop stays native). Verified behaviour-identical to native on x86-64 and AArch64 over a
+20,000-iteration stress fold that drives the virtualized functions through real buffers (a rolling
+byte transform doing i8 load+store, a hash reading an i32 array), matching exactly on both arches and
+across seeds.
+
+**BLUE — the lifter keeps pace.** `lift_vm.py` now decodes the width-tagged format: the opcode byte
+is `base | (wcode<<6)`, so every arithmetic/compare/load/store/sext instruction prints with its
+width (`add.i32`, `load.i8`, `store.i8`), and the new `LOAD`/`STORE`/`SEXT`/`RETV` opcodes render as
+`load.iW rD, [rA]` / `store.iW [rA], rB` / `sext.iW` / `ret (void)`. On the regenerated fixture it
+lifts all six virtualized functions, the two memory routines showing their load/store streams and
+GEP-lowered index arithmetic. detect_vm is unchanged (the threaded-dispatch signature does not
+depend on the opcode encoding).
+
+**Validated.** `tests/test_lift_vm.py` grows a case pinning that a buffer function lifts with
+load/store and width-tagged ops; detector + lifter suites green; full suite green. The red and blue
+halves were developed and verified on both the x86-64 container and the Kali AArch64 VM.
+
+**Honest limits / next rounds.** RED: calls and global references are the remaining native cases;
+after that, VM hardening (randomized per-build opcode encoding, multiple dispatch shapes). BLUE: the
+lifter still emits VM-*assembly*; raising it to C/pseudocode (re-SSA, expression folding, pool-value
+resolution) and recovering a per-build-randomized opcode map are the next steps, along with AArch64
+detection/lift.
