@@ -1915,13 +1915,10 @@ toolkit promises (x86-64 / ARM64 / x86-32, ELF / PE / Mach-O), the honest result
   and every recovery path returns empty in ~3 ms with no Unicorn run -- a clean decline, never a crash
   or a wrong result. Pinned by a test. (Note: the relooper itself is arch-agnostic -- it structures
   whatever program the recovery produces -- but no ARM64 *recovery* feeds it today.)
-- **x86-64 PE** -- `Image` (lief) loads a PE32+ DLL and reads its exports, but a PE that can be built
-  **in the cloud** is degenerate: freestanding, no `.pdata`, no CRT (there is no Windows SDK /
-  mingw here, only `lld-link`). The emulation loader finds *no* functions in such a DLL (function
-  starts come from `.pdata` / symbols) and even an explicit export VA traces nothing, so the
-  emulation path could not be fairly exercised on PE in-cloud. A realistic PE fixture (with `.pdata`
-  and a CRT) must be built on the **Windows VM** per the project's test-matrix rule; that is the
-  remaining matrix gap, not a confirmed limitation of the analysis itself.
+- **x86-64 PE** -- **supported; cell closed in §47.** A realistic PE (full mingw-w64 CRT, `.pdata`)
+  is now pinned (`tests/fixtures/vm/rustcloak_vm_pe.exe`): `detect_vm` flags the virtualized function
+  HIGH and emulation devirt recovers it correctly (numeric equivalence to the C source checked
+  offline). The earlier in-cloud gap was only the *toolchain* (no mingw at first), not the analysis.
 - **x86-32 ELF/PE, Mach-O** -- not exercised this session; x86-32 is declined by the same guard as
   ARM64, and Mach-O loads via `lief` but the VM devirt path is still x86-64-gated.
 
@@ -1989,3 +1986,50 @@ express without `goto` (no labelled break) -- and it *regressed* crc_ish / sum_m
 was dropped and the simpler DFS layout kept. The honest limit stands: a loop with exits to two
 different targets stays `goto`; folding it would need a label-variable dispatch, which is less
 readable than the `goto`, not more.
+
+## 47. Closing the x86-64 PE cell — and a false alarm that measure-first caught (Oct 2026)
+
+With mingw-w64 available in-cloud, the x86-64 PE cell of the matrix (§44) was closed. A realistic PE
+was built from the demo source (`rustcloak/test/vm_demo.c`) with the full Windows CRT and `.pdata`
+(`tests/fixtures/vm/rustcloak_vm_pe.exe`, 258 KB, sha256 `3816a8e0…9578`). On it:
+
+- **Detection works.** `detect_vm` flags the virtualized `fold64` (RVA `0x16b0`, 688 bytes) HIGH --
+  threaded dispatch + byte-fetches, exactly as on ELF. The address is an **RVA** (lief reports PE
+  section addresses relative to the imagebase); detect and `recover` both consume RVAs, so passing an
+  imagebase-relative VA finds nothing -- the one PE-specific addressing gotcha.
+- **Emulation devirt works.** `recover` lifts it to
+  `((((a0 ^ a1) * 0x100000001b3) >>u 41) + (((a0 ^ a1) * 0x80000000d9800000) + (a1 & 255)))`.
+
+Pinned by `test_pe_detection_and_emulation_devirt` (detect HIGH + recover + structural constants).
+
+**The false alarm (and why it is recorded).** The recovered PE expression looked wrong at first
+glance: a running demo compared it against the *simpler* `fold64` from a different source file
+(`h ^= v; h *= prime; h ^= h >> 32`) and it mismatched on 100% of random inputs. That looked like a
+PE-path soundness bug -- a "verified but wrong" recovery, since emulation verifies by re-executing
+its own observed trace (a closed loop that cannot catch an emulation error). Several hours went into
+localizing it: ruled out argument registers (the Microsoft x64 ABI passes args in RCX/RDX, not
+SysV's RDI/RSI -- a real difference, but `recover`'s observed argument-register map already handles
+it, so recovery is correct either way), ruled out memory mapping and relocations (no unmapped reads;
+the constant pool at RVA `0x9120` is read correctly), and ruled out codegen (plain `fold64` lowers
+identically on mingw and Linux clang, only the arg registers differ).
+
+The resolution was that **there was no bug**: `vm_demo.c`'s `fold64` is the *rotate-and-add* variant
+`h ^= v; h *= 0x100000001b3; h = rotl(h, 23); return h + (v & 0xff)`, and the recovered expression is
+algebraically exactly that -- `rotl(m, 23) == (m << 23) + (m >> 41)` over disjoint bits, and
+`(m << 23) == m * (prime << 23)` with `(prime << 23) mod 2**64 == 0x80000000d9800000`. Checked by
+re-executing the recovered expression against the real C source: **0 mismatches over 200000 random
+64-bit input pairs.** The investigation had been comparing against the wrong source's `fold64`.
+
+Two lessons, both the project's own discipline (*measure before concluding; a result is not a result
+until independently confirmed*):
+
+1. The discipline cut the right way in the end -- the "bug" was a verification error of mine, caught
+   by finally checking the recovered expression against the *actual* source rather than a remembered
+   one. No code was changed to chase it; the exploratory ABI / relocation / held-out-verification
+   edits made while hunting were all **reverted** once the recovery proved correct, since they fixed
+   nothing measurable and would have been speculative changes to working code.
+2. The real, standing limitation is unchanged and worth restating: emulation devirt self-verifies by
+   re-executing its own trace, so it is sound *relative to the interpreter's observed behavior* but
+   cannot, on its own, catch a case where the emulation itself diverges from the true program. On PE
+   that divergence did not occur (confirmed against source); the guard against trusting a recovery
+   blindly remains "check the recovered expression against ground truth", which is what settled this.

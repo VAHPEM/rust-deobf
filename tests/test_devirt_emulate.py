@@ -28,6 +28,7 @@ CALLFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_call.x64"
 OBFFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_obf.x64"
 NESTFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_nested.x64"
 ARM64FIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_arm64.so"
+PEFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_pe.exe"
 
 
 def _syms(fix):
@@ -246,3 +247,41 @@ def test_emulation_sees_through_an_obfuscated_interpreter():
     assert mix is not None, "emulation failed to recover mix through the obfuscated interpreter"
     pc = "\n".join(mix["pseudocode"])
     assert "^" in pc and "*" in pc                        # the mix's xor + multiply chain survived
+
+
+@pytest.mark.skipif(not PEFIX.is_file(), reason="fixture missing")
+def test_pe_detection_and_emulation_devirt():
+    """x86-64 PE (Windows) end to end: detect_vm flags the virtualized function, and emulation
+    devirt recovers its logic. Closes the x86-64 PE cell of the OS/format matrix.
+
+    Two PE-specific points are exercised here. (1) Addressing: lief reports PE section addresses as
+    RVAs (relative to the imagebase), so the interpreter sits at an RVA, which both detect_vm and
+    recover() consume directly -- passing an imagebase-relative VA instead finds nothing. (2) The
+    Microsoft x64 calling convention (args in RCX, RDX, ...) differs from System V, but recovery is
+    convention-agnostic: the incoming-argument registers are found by observation (a register read
+    before it is written), so the recovered body is expressed in terms of the logical arguments
+    regardless of which ABI registers carried them.
+
+    The fixture's fold64 is the rotate-and-add variant
+        h ^= v;  h *= 0x100000001b3;  h = rotl(h, 23);  return h + (v & 0xff)
+    with rotl(m, 23) == (m << 23) | (m >> 41) over disjoint bits == (m << 23) + (m >> 41), and
+    (m << 23) == m * (prime << 23) where (prime << 23) mod 2**64 == 0x80000000d9800000. The recovered
+    expression is exactly that; its numeric equivalence to the C source was checked offline (0
+    mismatches over 200000 random 64-bit input pairs) -- see VALIDATION.md section 47. Asserting the
+    three structural constants (the FNV prime, the prime<<23 multiplier, and the & 0xff tail) pins the
+    recovery without coupling the test to incidental pretty-printing.
+    """
+    import devirt_emulate
+    import detect_vm
+    r = detect_vm.detect(PEFIX)
+    assert r["count"] >= 1, "detect_vm found no VM function in the PE"
+    hi = [h for h in r["virtualized_functions"] if h["confidence"] == "high"]
+    assert hi, "no high-confidence VM function detected in the PE"
+
+    rec = devirt_emulate.recover(PEFIX, hi[0]["va"])
+    assert rec is not None, "emulation failed to recover the PE VM function"
+    pc = "\n".join(rec["pseudocode"])
+    assert pc.startswith("return ")
+    assert "0x100000001b3" in pc                          # FNV prime (h *= prime)
+    assert "0x80000000d9800000" in pc                     # (prime << 23): the rotate's high half
+    assert "255" in pc or "0xff" in pc                    # the + (v & 0xff) tail
