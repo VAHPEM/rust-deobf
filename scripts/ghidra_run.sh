@@ -51,9 +51,17 @@ fi
 
 # --- recover strings if no JSON supplied ----------------------------------------------------
 if [ -z "$JSON" ]; then
-  JSON="$(mktemp --suffix=.rd.json)"
+  # portable mktemp (GNU and BSD/macOS): a template whose X's end the name; removed on exit
+  JSON="$(mktemp "${TMPDIR:-/tmp}/rd-recover.XXXXXX")"
+  trap 'rm -f "$JSON"' EXIT
   echo "ghidra_run: recovering strings -> $JSON" >&2
-  python3 "$REPO/scripts/recover.py" "$BIN" --json > "$JSON"
+  rc=0
+  python3 "$REPO/scripts/recover.py" "$BIN" --json > "$JSON" || rc=$?
+  case "$rc" in
+    0) ;;
+    4) echo "ghidra_run: warning: an engine failed (see the notes in the JSON); annotating what was recovered" >&2 ;;
+    *) echo "ghidra_run: recover.py failed (exit $rc); nothing to annotate" >&2; exit "$rc" ;;
+  esac
 fi
 
 # --- fresh project, import + analyze + annotate ---------------------------------------------
@@ -61,8 +69,9 @@ PROJ="${3:-$(mktemp -d)}"
 mkdir -p "$PROJ"
 NAME="$(basename "$BIN")"
 echo "ghidra_run: importing $NAME into $PROJ and annotating from $JSON" >&2
+# -overwrite: re-running into the same project dir replaces the earlier import instead of failing
 python3 -m pyghidra.ghidra_launch ghidra.app.util.headless.AnalyzeHeadless \
-  "$PROJ" rd_proj -import "$BIN" \
+  "$PROJ" rd_proj -import "$BIN" -overwrite \
   -postScript "$REPO/scripts/ghidra_annotate.py" "$JSON"
 echo "ghidra_run: done. Open project '$PROJ/rd_proj' in Ghidra, or re-run with" >&2
 echo "            -process $NAME -noanalysis -postScript ghidra_dump_annotations.py to list them." >&2
