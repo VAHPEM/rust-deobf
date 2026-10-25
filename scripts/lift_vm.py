@@ -202,29 +202,46 @@ def _recover_map(img, fva, size, text_lo, text_hi):
     if table_base is None:
         return None
     idx32 = _alias32(idx_reg)
-    minv, extent = 0, 160
-    # the normalization (add idx,-min) and range check (cmp idx,N) sit just before the table load;
-    # restrict to that window so handler arithmetic on the same register isn't mistaken for them
-    for ins in lines[max(0, disp_i - 10):disp_i]:
+    idxpat = "(?:" + idx_reg + "|" + idx32 + ")"
+    minv, extent = 0, None
+    key_imm = []
+    # the normalization, range check and operand-decrypt all sit in the prologue just before the
+    # table load; restrict to that window so handler code on the same registers isn't mistaken.
+    win = lines[max(0, disp_i - 18):disp_i]
+    for ins in win:
         t = ins.mnemonic + " " + ins.op_str
-        m = re.match(r"add (?:" + idx_reg + "|" + idx32 + r"), (0x[0-9a-fA-F]+)$", t)
+        # normalization: either `add idx, -min` or `lea idx, [src - min]`
+        m = re.match(r"add " + idxpat + r", (0x[0-9a-fA-F]+)$", t)
         if m:
             imm = int(m.group(1), 16)
             imm -= (1 << 32) if imm >= 0x80000000 else 0
             minv = (-imm) & 0xff
-        c = re.match(r"cmp (?:" + idx_reg + "|" + idx32 + r"), (0x[0-9a-fA-F]+)$", t)
+        m = re.match(r"lea " + idxpat + r", \[\w+ - (0x[0-9a-fA-F]+)\]$", t)
+        if m:
+            minv = int(m.group(1), 16) & 0xff
+        c = re.match(r"cmp " + idxpat + r", (0x[0-9a-fA-F]+)$", t)
         if c:
             extent = int(c.group(1), 16) + 1                 # the switch range check bounds the table
+        # the three operand-decrypt keys (dst,a,b order): xor REG, IMM8 on any-width register
+        x = re.match(r"xor \w+, (0x[0-9a-fA-F]+)$", t)
+        if x and int(x.group(1), 16) <= 0xff:
+            key_imm.append(int(x.group(1), 16))
 
     def resolve(byte):
         idx = byte - minv
-        if idx < 0 or idx >= extent:
+        if idx < 0:
             return None
         ent = _read_va(img, table_base + idx * 4, 4)
         if len(ent) < 4:
             return None
         h = (table_base + struct.unpack("<i", ent)[0]) & 0xffffffffffffffff
         return h if text_lo <= h < text_hi else None
+
+    if extent is None:                                       # no explicit range check: the table runs
+        extent = 0                                           # until an entry points outside .text
+        while extent < 160 and resolve(minv + extent) is not None:
+            extent += 1
+    key = tuple(key_imm[:3]) if len(key_imm) >= 3 else (0, 0, 0)
 
     import collections
     cnt = collections.Counter(resolve(b) for b in range(minv, minv + extent) if resolve(b))
@@ -247,7 +264,7 @@ def _recover_map(img, fva, size, text_lo, text_hi):
                 if lm:
                     pool_va = ins.address + ins.size + int(lm.group(1), 16)
                     break
-    return bytemap, _recover_operand_key(lines), pool_va
+    return bytemap, key, pool_va
 
 
 def _decode_map(blob, bytemap, key=(0, 0, 0)):
@@ -389,6 +406,69 @@ def _fmt_const(v, width):
     return str(s) if -4096 < s < 65536 else hex(v)
 
 
+def _invert(cond):
+    return cond.replace(" != 0", " == 0") if " != 0" in cond else cond.replace(" == 0", " != 0")
+
+
+def _structure(stmts):
+    """Raise an if/goto statement list to structured while/if where the control flow is reducible,
+    by two correctness-preserving peepholes (a single back-edge -> do/while; a forward branch over a
+    straight block -> if). Anything irreducible (an -O2-unrolled loop nest) is left as if/goto."""
+    def targets(ss):
+        t = {}
+        for s in ss:
+            m = re.search(r"goto (L\w+);", s)
+            if m:
+                t[m.group(1)] = t.get(m.group(1), 0) + 1
+        return t
+
+    changed = True
+    while changed:
+        changed = False
+        labels = {s.strip()[:-1]: i for i, s in enumerate(stmts) if re.match(r"^L\w+:$", s.strip())}
+        tc = targets(stmts)
+        # do/while: a label L at i, a later `if (cond) goto L;` at j referenced only once, with no
+        # label inside (i,j) targeted from outside -> do { body } while (cond);
+        for lab, i in labels.items():
+            js = [k for k, s in enumerate(stmts) if k > i and re.match(rf"\s*if \(.*\) goto {lab};$", s)]
+            if len(js) != 1 or tc.get(lab, 0) != 1:
+                continue
+            j = js[0]
+            inner = stmts[i + 1:j]
+            if any(re.match(r"^L\w+:$", s.strip()) and tc.get(s.strip()[:-1], 0) for s in inner):
+                continue                                     # a nested label targeted elsewhere: skip
+            if any("goto" in s for s in inner):
+                continue                                     # keep it simple: straight-line body only
+            cond = re.search(r"if \((.*)\) goto", stmts[j]).group(1)
+            body = ["    " + s.strip() for s in inner]
+            stmts = stmts[:i] + ["do {"] + body + [f"}} while ({cond});"] + stmts[j + 1:]
+            changed = True
+            break
+        if changed:
+            continue
+        # if-then: `if (cond) goto T;` then a straight block then `T:` (T referenced once) ->
+        # if (!cond) { block }
+        for i, s in enumerate(stmts):
+            m = re.match(r"\s*if \((.*)\) goto (L\w+);$", s)
+            if not m:
+                continue
+            cond, tlab = m.group(1), m.group(2)
+            ti = labels.get(tlab)
+            if ti is None or ti <= i or tc.get(tlab, 0) != 1:
+                continue
+            block = stmts[i + 1:ti]
+            if not block or any("goto" in b or re.match(r"^L\w+:$", b.strip()) or b.startswith("do")
+                               or b.startswith("}") for b in block):
+                continue
+            body = ["    " + b.strip() for b in block]
+            stmts = stmts[:i] + [f"if ({_invert(cond)}) {{"] + body + ["}"] + stmts[ti + 1:]
+            changed = True
+            break
+    # drop labels no longer referenced
+    tc = targets(stmts)
+    return [s for s in stmts if not (re.match(r"^L\w+:$", s.strip()) and not tc.get(s.strip()[:-1]))]
+
+
 def _pseudocode(prog, bof, pool):
     """Raise the VM-assembly to C-like pseudocode: resolve the constant pool, and -- for a
     straight-line (branchless) function, whose VM registers are each assigned once -- fold every
@@ -463,7 +543,7 @@ def _pseudocode(prog, bof, pool):
         elif base in (29, 30):
             cond = f"r{dst} == 0" if base == 29 else f"r{dst} != 0"
             out.append(pre + f"if ({cond}) goto L{(a|(b<<8)):04x};")
-    return out
+    return _structure(out)
 
 
 def lift_region(bc_va, prog, bytemap=None, pool=None):

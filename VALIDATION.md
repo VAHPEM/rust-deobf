@@ -1431,3 +1431,34 @@ handle every register-allocation variant the compiler emits, so some functions i
 skipped rather than lifted wrong (conservative). Hardening that parser to full per-binary coverage,
 structuring control-flow pseudocode into real `if`/`while` (rather than `if/goto`), and the AArch64
 lift are the open BLUE items; virtualizing calls and global references remain the open RED items.
+
+## 30. Round 11: devirtualizer hardening + control-flow structuring (rust-deobf) (Oct 2026)
+
+A blue-only round: make the opcode/operand recovery more robust, and raise the control-flow
+pseudocode from `if/goto` toward structured `while`/`if`.
+
+**Parser robustness.** The per-function dispatch/operand-key parser now handles the
+register-allocation variants LLVM actually emits: the operand-decrypt key is read from the three
+`xor reg, IMM8` in the dispatch prologue whatever the register width (8/32/64-bit -- `xor dil,0x..`
+as well as `xor rcx,0x..`), and the opcode-index normalization is parsed from both `add idx,-min`
+and the `lea idx,[src-min]` form. The table extent comes from the `cmp idx,N` range check when
+present, else from scanning the jump table until an entry leaves `.text`. Operand keys are now
+recovered for the demo's VM functions across all these shapes.
+
+**Control-flow structuring.** `_structure` raises a reducible `if/goto` body to `do { } while (cond)`
+(a single back-edge) and `if (cond) { }` (a forward branch over a straight block), by two
+correctness-preserving peepholes, dropping the labels they consume; anything irreducible is left as
+`if/goto`. Unit-pinned (`tests/test_lift_vm.py::test_structurer_raises_goto_to_while_and_if`): a
+loop-plus-conditional body structures to `do/while` + inverted `if`, with no `goto` left.
+
+**Validated.** Full suite green. `check()` still devirtualizes to its exact one-line C from the
+randomized+operand-encrypted build.
+
+**Honest limits.** This is real but partial progress on the two open goals. Full *coverage* of a
+randomized build is not yet reached: some functions' maps are still incomplete (a handler shape the
+classifier doesn't yet label, a dispatch the parser doesn't fully bound), so they are skipped rather
+than lifted wrong -- `check()` is the end-to-end demonstration, not every function. And the
+structurer handles reducible control flow; the demo's one loop function is an `-O2`-unrolled nest
+(odd/even split, shared joins) that stays `if/goto`. Pushing coverage to every function and every
+compiler-emitted dispatch shape, and structuring irreducible/unrolled loops (a full relooper), are
+the continuing items -- along with the open red-side work (virtualizing calls and global references).

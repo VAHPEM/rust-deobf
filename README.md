@@ -291,7 +291,9 @@ CONST, …), rebuilding the opcode→operation map before decoding. When the ope
 to C pseudocode** — resolving the constant pool and folding the temporaries into one expression. From
 a VM with randomized opcodes *and* encrypted operands it reconstructs, e.g.,
 `return (((a0 > 1000) & (((((a0 * 31) + a1) ^ (a0 >> 3)) % 97) == 0)) ? (a1 + a0) : 0xffffffff);` —
-the function's exact source. x86-64.
+the function's exact source. Control-flow bodies are raised from `if/goto` toward structured
+`do/while` + `if` where the flow is reducible (an `-O2`-unrolled loop nest is left as `if/goto`).
+x86-64; recovery is demonstrated end-to-end on a function, with full per-binary coverage ongoing.
 
 `scripts/llm_triage.py <binary>` adds an **AI-assisted** read on top: it hands *only* the
 deterministically recovered facts (the triage card above — never the raw binary) to an LLM and asks

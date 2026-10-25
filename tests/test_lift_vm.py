@@ -99,6 +99,20 @@ def test_opcode_map_recovered_and_logic_reconstructed():
         f"did not reconstruct check()'s logic from randomized opcodes; got {sigs}"
 
 
+def test_structurer_raises_goto_to_while_and_if():
+    # the structurer turns a reducible if/goto body into structured while/if (correctness-preserving;
+    # irreducible -O2-unrolled control flow is left as if/goto)
+    stmts = [
+        "L0010:", "    r3 = r1 + r2;", "    r4 = r3 & 1;", "    if (r4 != 0) goto L0010;",
+        "    r5 = r3 > 100;", "    if (r5 == 0) goto L0030;", "    r6 = r3 + 7;",
+        "L0030:", "    return r6;",
+    ]
+    out = "\n".join(lift_vm._structure(list(stmts)))
+    assert "do {" in out and "} while (r4 != 0);" in out          # back-edge -> do/while
+    assert "if (r5 != 0) {" in out                                 # forward skip -> inverted if
+    assert "goto" not in out                                       # fully structured here
+
+
 @pytest.mark.skipif(not RND.is_file(), reason="randomized fixture missing")
 def test_pseudocode_reconstructs_c_expression():
     # the lifter raises the recovered VM-assembly to C: resolve the constant pool, fold the
