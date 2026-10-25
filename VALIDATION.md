@@ -1559,3 +1559,36 @@ memory (LOAD/STORE) opcodes the emulation recovery does not model yet, so they a
 than lifted. Extending the emulation model to control flow (reconstructing loops from the trace) and
 memory is the continuing item -- and the same work carries straight into round 13's
 interpreter-obfuscated target.
+
+## 33. Emulation: control-flow + memory framework (premium) (Oct 2026)
+
+Extends `premium/devirt_emulate.py` from the branchless core toward full coverage and the
+interpreter-obfuscated target (round 13). What is built and verified-safe:
+
+- **Control-flow observation.** The tracer records each VM instruction's *next* bytecode offset, so
+  a handler that changes the cursor is seen as a branch: an offset that always jumps is JMP, one that
+  sometimes jumps and sometimes falls through is a conditional, and JZ vs JNZ is decided by
+  correlating the taken direction with the observed condition-register value.
+- **Memory observation.** Dereferences (reads/writes outside the reg file, blob and pool) are
+  captured as LOAD/STORE; pointer arguments are pointed into a scratch region filled with
+  high-entropy data (and loop-count arguments kept small) so a function that walks its arguments
+  runs instead of faulting.
+- **Python-VM correctness gate.** The verifier is now a full register machine with control flow and a
+  scratch-backed memory model: it re-executes the recovered program and must reproduce both the
+  observed return value and the observed memory writes, or the function is refused. Nothing
+  unverified is ever emitted.
+
+**Validated.** `fold64` still devirtualizes and verifies; the branchless set is unchanged; the full
+suite stays green (`tests/test_devirt_emulate.py`, including that the memory-loop functions are
+refused, not guessed).
+
+**Honest limits — the remaining blocker.** The loop/memory functions (`crc_ish`, `sum_mix`, `roll`,
+`decode`) are still *refused*, not yet lifted. The framework (branch/memory classification, the VM
+verifier) is in place, but recovering each loop body's operands relies on a single global
+operand-encryption key, and a few instructions per function violate it -- read-modify-write ops
+whose destination is also a source, and dispatch reads that add a spurious slot access -- leaving one
+opcode per function unclassified, so the decode is incomplete and the verifier refuses. Landing these
+needs per-instruction operand recovery (resolve each instruction's operands from its own observations
+rather than a global key), which is the next step -- and it is the same precision the
+interpreter-obfuscated round-13 target needs. Until then the module stays strictly safe: it lifts
+what it can verify and refuses the rest.
