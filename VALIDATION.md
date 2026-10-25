@@ -1357,3 +1357,42 @@ after that, VM hardening (randomized per-build opcode encoding, multiple dispatc
 lifter still emits VM-*assembly*; raising it to C/pseudocode (re-SSA, expression folding, pool-value
 resolution) and recovering a per-build-randomized opcode map are the next steps, along with AArch64
 detection/lift.
+
+## 28. Round 9: VM hardening -- randomized opcodes (RustCloak) ↔ opcode-map recovery (rust-deobf) (Oct 2026)
+
+The real VM-protector escalation: shuffle the instruction set per build so a deobfuscator cannot
+assume opcode numbers, and answer it by recovering the map from the interpreter itself.
+
+**RED -- per-build, per-function opcode randomization (RustCloak).** The logical-opcode->byte map is
+now a seeded random permutation of the low 6 bits (`rustcloak::rng("vmenc:"+function)`), chosen per
+build and per function; the width still rides in the top two bits. Two builds -- or two functions in
+one build -- share no VM instruction set. It changes only the encoding, not behaviour: verified
+byte-identical to native on x86-64 and AArch64 over the 20,000-iteration buffer stress fold, across
+seeds 1/5/9 (each a different opcode map). And it defeats the fixed-table lifter outright -- the
+round-8 `lift_vm` reports "no virtualized function could be lifted" on a randomized build.
+
+**BLUE -- opcode-map recovery by handler semantics (rust-deobf).** The lifter no longer assumes
+opcode numbers. For each VM function it parses the dispatch jump table
+(`lea base,[rip+T]; add idx,-min; cmp idx,N; movsxd r,[base+idx*4]; add r,base; jmp r`) to map each
+opcode byte to its handler, then classifies the handler by its characteristic native instruction
+(an `xor` of two register-file slots -> XOR, `idiv` with the remainder stored -> SREM, a conditional
+move into the register file -> CMOVNZ, a rip-relative pool load -> CONST, a load/store through a
+register pointer -> LOAD/STORE, a `setCC` -> the matching comparison, ...), recovering the whole
+opcode->operation map. It then decodes the bytecode under the recovered map. End to end on a
+randomized build it reconstructs `check()`'s exact logic -- `const; mul; add; ashr; xor; srem; eq;
+sgt; and; mov; cmovnz; ret` -- i.e. `t = serial*31 + salt ^ serial>>3; ok = (t%97==0) & (serial>K);
+return ok ? serial+salt : -1`, from a VM whose opcode bytes are build-specific.
+
+**Validated.** `tests/test_lift_vm.py` grows two cases on a committed randomized fixture: the
+randomized build shares no bytes with the fixed-opcode fixture, and the lifter recovers the opcode
+map and reconstructs `check()`'s operation set (`mul/ashr/xor/srem/eq/sgt/and/cmovnz`). The
+fixed-opcode fixtures and their lift tests still pass (the lifter keeps the fixed-table path as a
+fallback). Full suite green (84 passed).
+
+**Honest limits / next rounds.** The handler classifier and jump-table parser are robust enough to
+recover a function end to end, but not yet every function in one binary across every LLVM
+switch-lowering (some functions' dispatch parses incompletely and are skipped rather than lifted
+wrong -- conservative by design). Hardening the recovery to full coverage, raising the lifted
+VM-assembly to C/pseudocode (re-SSA + expression folding + pool-value resolution), and the AArch64
+dispatch are the open items. On the red side: virtualizing calls and global references, and bytecode
+whose operand encoding (not just the opcodes) is also per-build encrypted.

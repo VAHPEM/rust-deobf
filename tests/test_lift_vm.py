@@ -72,3 +72,27 @@ def test_loop_function_lifts_with_control_flow():
 @pytest.mark.skipif(not PLAIN.is_file(), reason="plain fixture missing")
 def test_plain_build_lifts_nothing():
     assert lift_vm.lift(PLAIN)["count"] == 0
+
+
+# --- round 9: per-build randomized opcode encoding + map recovery ---------------------------------
+RND = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_rnd.x64"
+
+
+@pytest.mark.skipif(not RND.is_file(), reason="randomized fixture missing")
+def test_randomized_build_opcodes_differ_from_fixed():
+    # RustCloak randomizes the opcode->byte map per build: the two fixtures encode the same program
+    # but share no opcode bytes for, e.g., CONST. (Sanity that the randomized fixture is different.)
+    assert RND.read_bytes() != VMFIX.read_bytes()
+
+
+@pytest.mark.skipif(not RND.is_file(), reason="randomized fixture missing")
+def test_opcode_map_recovered_and_logic_reconstructed():
+    # the lifter cannot assume opcode numbers; it must recover the map from the dispatch handlers.
+    # Success = it reconstructs a function's exact logic. check() is distinctive: a signed modulo
+    # and a select guarded by two comparisons.
+    r = lift_vm.lift(RND)
+    assert r["count"] >= 1, "recovered no function from the randomized build"
+    sigs = [set(_mnemonics(fn)) for fn in r["lifted"]]
+    want = {"mul", "ashr", "xor", "srem", "eq", "sgt", "and", "cmovnz"}
+    assert any(want <= s for s in sigs), \
+        f"did not reconstruct check()'s logic from randomized opcodes; got {sigs}"

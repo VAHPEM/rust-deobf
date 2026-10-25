@@ -283,8 +283,12 @@ opcodes, so branches and loops come back as labelled `jmp`/`jnz` with the SSA PH
 and prints the function's logic as a compact VM-assembly listing instead of a dispatch loop. Gated
 on the detector (an ordinary binary lifts nothing). It decodes the width-tagged format too, so
 memory routines come back with their widths and accesses (`load.i8 rD, [rA]`, `store.i8 [rA], rB`,
-`add.i32`). Still VM-assembly, not yet C/pseudocode (re-SSA + expression folding + pool-value
-resolution are the next round); x86-64.
+`add.i32`). And when the VM's opcode bytes are **randomized per build** (RustCloak's hardening), the
+lifter **recovers the opcode map**: it parses the dispatch jump table and classifies each handler by
+its native instruction (an `idiv` with the remainder stored → SREM, a rip-relative pool load →
+CONST, …), rebuilding the opcode→operation map before decoding — reconstructing a function's exact
+logic from a VM whose instruction set is build-specific. Still VM-assembly, not yet C/pseudocode;
+x86-64.
 
 `scripts/llm_triage.py <binary>` adds an **AI-assisted** read on top: it hands *only* the
 deterministically recovered facts (the triage card above — never the raw binary) to an LLM and asks
