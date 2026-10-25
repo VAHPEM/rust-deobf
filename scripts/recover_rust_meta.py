@@ -21,18 +21,32 @@ from __future__ import annotations
 import argparse, json, re, struct, sys
 from pathlib import Path
 
-RE_SRC_PATH = re.compile(rb"[0-9A-Za-z_./\\:+-]*?\.rs\b")
+# A source path ending in .rs. The class must allow what real paths contain between the string's
+# start and the extension, or the match starts partway in and the Location pointer (which points at
+# the true start) falls outside it: spaces ("C:\Users\John Doe\..."), '~', and UTF-8 bytes
+# (\x80-\xff, e.g. "C:\Users\Phạm\..."). NUL and newline are excluded, so a match still stays within
+# one rodata string.
+RE_SRC_PATH = re.compile(rb"[0-9A-Za-z_./\\:+~ \x80-\xff-]*?\.rs\b")
+# semver allowing BOTH a pre-release and a build-metadata part (1.0.0-rc.1+build.5)
+_SEMVER = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
 # `.cargo/registry/src/<index>/<crate>-<ver>/` under ~/.cargo, or `cargo/registry/...` when
 # CARGO_HOME has no dot (the official Docker images use /usr/local/cargo), plus `cargo vendor`
 # trees (`vendor/<crate>-<ver>/`, versioned when vendored with --versioned-dirs)
 RE_CARGO = re.compile(
     r"(?:(?:[\\/]|^)\.?cargo[\\/]registry[\\/]src[\\/][^\\/]+|(?:[\\/]|^)vendor)[\\/]"
-    r"(?P<crate>[A-Za-z0-9_.-]+?)-(?P<ver>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)[\\/]")
+    r"(?P<crate>[A-Za-z0-9_.-]+?)-(?P<ver>" + _SEMVER + r")[\\/]")
+# a git dependency: `.cargo/git/checkouts/<repo>-<checkout-hash>/<rev>/...`. The crate is the repo
+# name with its trailing checkout hash stripped; there is no version in the path (a git rev instead).
+RE_CARGO_GIT = re.compile(
+    r"(?:[\\/]|^)\.?cargo[\\/]git[\\/]checkouts[\\/](?P<repo>[A-Za-z0-9_.-]+?)-[0-9a-f]{8,}[\\/]")
 RE_RUSTC = re.compile(r"/rustc/(?P<hash>[0-9a-f]{7,40})/")
 # crates vendored into the standard library itself (gimli, addr2line, miniz_oxide, ...):
 # their panic paths read `/rust/deps/<crate>-<ver>/src/...` and are not the author's code
 RE_STD_DEP = re.compile(
-    r"(?:[\\/]|^)rust[\\/]deps[\\/](?P<crate>[A-Za-z0-9_.-]+?)-(?P<ver>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)[\\/]")
+    r"(?:[\\/]|^)rust[\\/]deps[\\/](?P<crate>[A-Za-z0-9_.-]+?)-(?P<ver>" + _SEMVER + r")[\\/]")
+# a Rust legacy-mangled symbol ends with the hash component `17h<16 hex>E`; a v0 symbol starts `_R`.
+# Itanium C++ also emits `_ZN...E`, so the `_ZN` prefix ALONE does not prove Rust -- the hash does.
+RE_RUST_HASH = re.compile(r"17h[0-9a-f]{16}E")
 
 # the standard library's own sources; toolchains that do not remap them (e.g. windows-gnu
 # std) leave them relative, without the /rustc/<hash>/ prefix
@@ -247,10 +261,14 @@ def find_location_structs(secs, ptr, src_by_va, relocs=None):
 
     packP = "<Q" if ptr == 8 else "<I"
     for base, data in secs:
+        if not starts:
+            break  # no known .rs strings -> nothing an absolute pointer could land on
         step = 4  # pointers in rodata are at least 4-byte aligned
-        for off in range(0, len(data) - (ptr + 8), step):
+        # the record spans ptr (filename) + ptr (len) + 8 (line,col = <II>); the last byte read is
+        # at off + 2*ptr + 8, so off must not exceed len(data) - (2*ptr + 8) or unpack_from raises
+        for off in range(0, len(data) - (2 * ptr + 8) + 1, step):
             cand = struct.unpack_from(packP, data, off)[0]
-            if cand < starts[0] if starts else True:
+            if cand < starts[0]:
                 continue
             rec_len = struct.unpack_from(packP, data, off + ptr)[0]
             if not 0 < rec_len < 4096:
@@ -294,6 +312,10 @@ def fingerprint_crates(paths, raw_text, strong_rust):
         m = RE_CARGO.search(p)
         if m:
             crates.setdefault(m.group("crate"), set()).add(m.group("ver"))
+        g = RE_CARGO_GIT.search(p)
+        if g:
+            # a git dependency: list the crate (version unknown -- the path carries a rev, not a semver)
+            crates.setdefault(g.group("repo"), set())
         r = RE_RUSTC.search(p.replace("\\", "/"))
         if r:
             rustc = r.group("hash")
@@ -329,8 +351,11 @@ def recover(path: Path):
     raw_text = b"\n".join(d for _, d in secs).decode("latin-1", "ignore")
     src = find_source_paths(secs)
     locs = find_location_structs(secs, ptr, src, relocs)
+    # Rust-mangled symbols only: v0 (`_R...`), or legacy (`_ZN...`) carrying the `17h<hex>E` hash.
+    # A bare `_ZN...E` is also how C++ (Itanium) mangles, so matching that alone made every
+    # unstripped C++ binary look like Rust -- require the hash for the legacy form.
     rust_syms = [demangle(s) for s in syms
-                 if s.startswith(("_ZN", "_R")) or "17h" in s]
+                 if s.startswith("_R") or (s.startswith("_Z") and RE_RUST_HASH.search(s))]
     # Strong Rust evidence = structure only a Rust build produces: a cargo-registry path,
     # a /rustc/<hash>/ path, a recovered Location record, or a mangled Rust symbol. Generic
     # panic-ish substrings and loose markers do NOT count (they false-positive on C/C++).
@@ -359,8 +384,9 @@ def recover(path: Path):
     if strong_rust:
         for p in src:
             q = p.replace("\\", "/")
-            if "/rustc/" in q or RE_CARGO.search(p) or RE_STD_DEP.search(p) or RE_STD_LIB.match(q):
-                continue
+            if ("/rustc/" in q or RE_CARGO.search(p) or RE_CARGO_GIT.search(p)
+                    or RE_STD_DEP.search(p) or RE_STD_LIB.match(q)):
+                continue  # a dependency (registry, git, vendored std) or rustc-internal, not own code
             tail = next((e for e in exact if e != q and q.endswith(e)), None)
             c = tail or _clean_own(p)
             if c:
