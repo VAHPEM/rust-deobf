@@ -567,9 +567,11 @@ def _invert(cond):
 
 
 def _structure(stmts):
-    """Raise an if/goto statement list to structured while/if where the control flow is reducible,
-    by two correctness-preserving peepholes (a single back-edge -> do/while; a forward branch over a
-    straight block -> if). Anything irreducible (an -O2-unrolled loop nest) is left as if/goto."""
+    """Raise an if/goto statement list to structured while/if where the control flow is reducible, by
+    correctness-preserving peepholes (a single conditional back-edge -> do/while; a single
+    unconditional back-edge with a forward exit -> while(1) with break; a forward branch over a
+    straight block -> if). Applied to a fixpoint so loop nests structure innermost-first. Anything
+    irreducible (an -O2-unrolled loop nest) is left as if/goto."""
     def targets(ss):
         t = {}
         for s in ss:
@@ -598,6 +600,40 @@ def _structure(stmts):
             cond = re.search(r"if \((.*)\) goto", stmts[j]).group(1)
             body = ["    " + s.strip() for s in inner]
             stmts = stmts[:i] + ["do {"] + body + [f"}} while ({cond});"] + stmts[j + 1:]
+            changed = True
+            break
+        if changed:
+            continue
+        # while loop: a label L at i with a single *unconditional* back-edge `goto L;` at j, and the
+        # statement right after it a label Lexit. A top-tested `for`/`while` compiles to exactly this
+        # (the loop test is a forward `if (cond) goto Lexit;` inside the body). The only control flow
+        # the body may leave is a forward branch to Lexit, which becomes `break;`; an already-
+        # structured inner loop is just nested blocks (no bare goto), so nests fold innermost-first.
+        for lab, i in labels.items():
+            js = [k for k, s in enumerate(stmts) if k > i and re.match(rf"\s*goto {lab};$", s)]
+            # exactly one back-edge (a `goto lab` at or after the head); entry edges before the head
+            # are fine and keep the head's label so they still resolve.
+            if len(js) != 1 or any(k != js[0] and re.search(rf"\bgoto {lab};", s)
+                                   for k, s in enumerate(stmts) if k > i):
+                continue
+            j = js[0]
+            mexit = re.match(r"^(L\w+):$", stmts[j + 1].strip()) if j + 1 < len(stmts) else None
+            if not mexit:
+                continue
+            exit_lab = mexit.group(1)
+            inner = stmts[i + 1:j]
+            # the body may only branch forward to Lexit; any other goto target, or a label inside that
+            # is still targeted from elsewhere, means this level is not a clean single-exit loop yet.
+            if any(m.group(1) != exit_lab for s in inner for m in re.finditer(r"goto (L\w+);", s)):
+                continue
+            if any(re.match(r"^L\w+:$", s.strip()) and tc.get(s.strip()[:-1], 0) for s in inner):
+                continue
+            body = []
+            for s in inner:
+                s2 = re.sub(rf"if \((.*)\) goto {exit_lab};", r"if (\1) break;", s)
+                s2 = re.sub(rf"^(\s*)goto {exit_lab};$", r"\1break;", s2)
+                body.append("    " + s2)
+            stmts = stmts[:i + 1] + ["while (1) {"] + body + ["}"] + stmts[j + 1:]
             changed = True
             break
         if changed:

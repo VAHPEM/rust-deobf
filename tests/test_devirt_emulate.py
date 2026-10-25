@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "premium"))
 
 CALLFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_call.x64"
 OBFFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_obf.x64"
+NESTFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_nested.x64"
 
 
 def _syms(fix):
@@ -145,6 +146,32 @@ def test_select_detector_is_codegen_agnostic_both_polarities():
     assert run(NZ, 3) == 0x99 and run(NZ, 1) == 0x11          # CMOVNZ: cond!=0 takes val, else prev
     rendered = lift_vm.lift_region(0x1000, [(0xc, Z, 3, 1, 2)], bm, None, None)
     assert any("cmovz" in t for _, _, t in rendered["listing"])
+
+
+@pytest.mark.skipif(not NESTFIX.is_file(), reason="fixture missing")
+def test_emulation_recovers_nested_loops_and_structures_the_inner_while():
+    """Loop nests stress two things. Emulation: a nest's trip count is the product of its bounds, so
+    the ordinary input vectors blow past the execution budget and leave too few cleanly-returning
+    runs -- the tiny-count vectors (every lane small) fix that, and all three nested functions recover
+    and self-verify (recover() returns only verified output). The relooper: a top-tested `for`/`while`
+    is a single unconditional back-edge with a forward exit, which the while(1)+break peephole raises
+    to a structured loop, so the recovered body shows at least one `while (1)`."""
+    import devirt_emulate
+
+    def syms():
+        import subprocess
+        out = subprocess.check_output(["nm", str(NESTFIX)]).decode().splitlines()
+        return {p[2]: int(p[0], 16) for p in (l.split() for l in out) if len(p) == 3 and p[1] == "T"}
+
+    s = syms()
+    for fn in ("nested_sum", "tri_mix", "find_mix"):      # find_mix has an inner break
+        assert fn in s, f"fixture has no {fn} symbol"
+        r = devirt_emulate.recover(NESTFIX, s[fn])
+        assert r is not None, f"emulation failed to recover nested-loop {fn}"
+        assert r["has_control_flow"], f"{fn} should lift with control flow"
+    # the inner loop of a clean nest raises to a structured while-loop.
+    pc = "\n".join(devirt_emulate.recover(NESTFIX, s["nested_sum"])["pseudocode"])
+    assert "while (1)" in pc and "break" in pc, "the inner while-loop should be structured"
 
 
 @pytest.mark.skipif(not CALLFIX.is_file(), reason="fixture missing")

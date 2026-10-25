@@ -1797,3 +1797,33 @@ recovery now handles both:
 Because RustCloak cannot produce CMOVZ, the new polarity is exercised by a self-contained unit test
 (synthetic observations for detection; a synthetic program for interpretation and rendering) rather
 than a binary fixture. crc_ish (a real CMOVNZ) and the full coverage of §39 are unchanged.
+
+## 41. Nested-loop fixture — stressing (and extending) the relooper (Oct 2026)
+
+A fixture of reducible loop *nests* (`tests/fixtures/vm/rustcloak_vm_nested.x64`, source
+`rustcloak/test/vm_nested.c`): `nested_sum` (a clean double loop), `tri_mix` (triangular -- inner
+bound depends on the outer index), and `find_mix` (an inner `break`). Built VM-only with
+`RUSTCLOAK_VM=1 opt-18 -passes=virt` on scalar IR (`-fno-vectorize -fno-slp-vectorize
+-fno-unroll-loops`, so the loops stay virtualizable rather than being auto-vectorized like `decode`),
+plus an obfuscated-interpreter build via the full `-fpass-plugin` pipeline. It stressed two layers:
+
+**Emulation coverage.** A nest's trip count is the *product* of its bounds, so the existing input
+vectors drove the inner loop past the execution budget (a 400k native-instruction cap, ~18k VM
+instructions) and left only one or two cleanly-returning runs -- too few to reconstruct from. Fix:
+tiny-count input vectors whose every lane is a small value, so a nest still terminates within budget.
+With those, all three functions recover and self-verify, on both the clean and the obfuscated builds.
+
+**The relooper.** `_structure` had only `do/while` (a conditional back-edge) and `if-then`. A
+top-tested `for`/`while` is a *different* shape -- a single unconditional back-edge `goto L` with the
+loop test as a forward `if (cond) goto Lexit` inside the body -- so every loop here was left as
+`if/goto`. Added a `while(1)` peephole: a head label with a single unconditional back-edge and the
+statement after it a label becomes `while (1) { body }`, with forward branches to that exit label
+rewritten to `break`. Applied in the existing fixpoint, so nests fold innermost-first. The inner loop
+of each nest now structures (and `sum_mix`/`roll`/`crc_ish` gained structure too, no regression).
+
+**Honest limit still standing.** The peephole needs the loop body *contiguous* between head and
+back-edge. The outer loop of a nest is often laid out non-contiguously by the compiler (its back-edge
+target sits far from the latch), so it is left as `if/goto` -- correct, just not raised. A general
+relooper for non-contiguous / irreducible layouts is the next step. Crucially, structuring only
+rewrites control-flow syntax over the already-verified program, so an unstructured loop is less
+pretty, never less correct.

@@ -70,6 +70,13 @@ _VALUE_VECTORS = [
     [0x3b, 0x17, 0x2d, 0x1f, 0x29, 0x35],
     [0x51, 0x3a, 0x6c, 0x27, 0x4e, 0x19],
     [0x7, 0xd, 0xb, 0x13, 0x25, 0x11],
+    # tiny-count vectors: *every* lane is small, so a loop *nest* (whose trip count is the product of
+    # its bounds) still terminates within the execution budget. Without these, a doubly-nested loop
+    # driven by the vectors above blows past the budget on all but the smallest vector and leaves too
+    # few cleanly-returning runs to reconstruct from. Distinct small values keep the ops separable.
+    [2, 3, 4, 5, 2, 3],
+    [4, 2, 5, 3, 4, 2],
+    [3, 5, 2, 4, 3, 5],
 ]
 _SCRATCH = 0x20000000
 _SCRATCH_SIZE = 0x400000
