@@ -1739,3 +1739,34 @@ a *produit d'appel* (an adoption draw) for a repo that is still building its aud
 
 Net: five modules remain premium (`lift_vm`, `devirt_emulate`, `deobf_deflatten`, `deobf_cff`,
 `deobf_expr` — the control-flow and VM analyses), and the triage layer is free.
+
+## 39. The last holdout falls — `crc_ish` devirtualizes (branchless select + unrolled loop) (Oct 2026)
+
+`crc_ish` was the one virtualized function emulation still refused, on both the clean and the
+obfuscated builds. Tracing the refusal with a lockstep differential (follow the *observed* control
+flow, compute each instruction with the *recovered* op, flag the first value that disagrees) pinned
+two distinct root causes -- both now fixed, and neither specific to crc_ish:
+
+1. **A branchless select (CMOVNZ) the emulator dropped.** One instruction is
+   `r[dst] = r[cond] ? r[val] : r[dst]`. Compiled as a conditional move (or a tiny branch), the trace
+   shows, per occurrence, the condition plus whichever operand *that run* took -- so the source set
+   varies between occurrences. The fixed-operand arithmetic inference could not see it and, worse,
+   mistook the condition-nonzero majority for `AND(val, val)`; and `_vm_exec` had opcode 27 on its
+   "not modelled -> bail" list. Fix: model CMOVNZ in the interpreter, and add a `_cmov` detector that
+   recognises the select from two-sided evidence (an occurrence where the condition is zero and the
+   result preserves the destination, and one where it is non-zero and the result equals a distinct
+   value register), so it never fires on a genuine binary op.
+
+2. **A 32-bit parameter seeded at full width.** `crc_ish` takes a `uint32`; the VM narrows it into the
+   register file (`arg & 0xffffffff`). An op reading it had been recovered as 64-bit (its low half
+   matched the narrowed operand), so seeding the register with the full 64-bit argument leaked the
+   high bits. Fix: `_arg_map` now records the *width* each argument entered at -- the widest mask under
+   which the observed value still equals the argument across every run -- and `_vm_exec` seeds at that
+   width. A genuine 64-bit argument still matches at full width; a narrowed one falls to 0xffffffff.
+
+With these, `crc_ish` recovers and self-verifies, its branchless select rendered as `cmovnz` and its
+FNV constants (`0x1000193`, `0x811c9dc5`) intact. Coverage is now **complete**: clean build
+`static 3 / emulated 4 / count 7` -- every virtualized function in the demo -- and obfuscated build
+`static 0 / emulated 5`, the whole set recovered through an obfuscated interpreter by emulation alone.
+`decode` is still (correctly) declined: it is not virtualized (auto-vectorized), so there is nothing
+to devirtualize, and recovery returns None rather than emit anything unverified.

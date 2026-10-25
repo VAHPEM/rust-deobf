@@ -300,14 +300,19 @@ def recover(path: Path, fva: int, size: int | None = None) -> dict | None:
 
 
 def _arg_map(clean):
-    """Recover which VM register holds each incoming argument: {vm_reg -> arg_index}.
+    """Recover which VM register holds each incoming argument: {vm_reg -> (arg_index, mask)}.
 
     The interpreter copies the function's arguments into its register file by its own (build-specific)
     convention -- arg0 need not land in r0. We find it by observation: a register that is read before
     it is ever written is an input, and its first observed value equals one argument across every run.
-    Arguments are often narrowed to the parameter's C width (a uint32 arg appears as arg & 0xffffffff),
-    so we accept a match under any integer width. Requiring the SAME argument index across all runs
-    rules out a constant that coincidentally equals one run's argument."""
+
+    `mask` is the width at which the argument entered the register. A C `uint32` parameter is narrowed
+    on the way in (the VM register only ever holds `arg & 0xffffffff`), so an op that reads it may have
+    been recovered as 64-bit (its low half matched the narrowed operand), and seeding the register with
+    the *full* 64-bit argument would then leak the high bits into that op. We therefore seed each
+    argument register at the narrowest integer width that matches every run -- the parameter's true
+    width. Requiring the SAME argument index across all runs rules out a constant that coincidentally
+    equals one run's argument."""
     first = {}                                               # vm_reg -> [(value, args) per run]
     for args, instrs, _ in clean:
         seen = {}
@@ -324,11 +329,16 @@ def _arg_map(clean):
         for k in range(6):
             if any(k >= len(a) for _, a in rows):
                 continue
-            # one width must explain the match in *every* run (a uint32 arg is always & 0xffffffff)
-            if any(all((v & m) == (a[k] & m) for v, a in rows)
-                   for m in (0xff, 0xffff, 0xffffffff, _M64)):
-                hit = k if hit is None else "amb"
-        if isinstance(hit, int):
+            # the *widest* width at which the observed value still equals the argument in every run is
+            # the parameter's width: if the VM dropped the argument's high bits (a uint32 parameter),
+            # the full-width compare fails and we fall to 0xffffffff; a genuine 64-bit argument matches
+            # at _M64. (When the observed value equals the full argument, every mask matches, so taking
+            # the narrowest would wrongly shrink a 64-bit parameter -- hence widest-first.)
+            mask = next((m for m in (_M64, 0xffffffff, 0xffff, 0xff)
+                         if all((v & m) == (a[k] & m) for v, a in rows)), None)
+            if mask is not None:
+                hit = (k, mask) if hit is None else "amb"
+        if isinstance(hit, tuple):
             amap[r] = hit
     return amap
 
@@ -447,8 +457,11 @@ def _reconstruct(runs, by_off, nreg):
                 idx = poolidx[val]
                 entries[off] = (1, 64, s0["dst"], idx & 0xff, (idx >> 8) & 0xff)
             else:
+                cm = _cmov(occ, regs, s0["dst"])
                 r = _arith(occ, regs)
-                if r is not None:
+                if cm is not None:                           # branchless select: cond ? val : prev
+                    entries[off] = (27, 64, s0["dst"], cm[0], cm[1])
+                elif r is not None:
                     op, w, a, b = r
                     entries[off] = (op, w, s0["dst"], a, b)
                 elif len({i for i, _ in rd}) == 1:           # single source -> MOV
@@ -463,6 +476,42 @@ def _reconstruct(runs, by_off, nreg):
         bytemap[ob] = logical
         prog.append((off, ob, dst, a, b))
     return prog, bytemap, (pool or None)
+
+
+def _cmov(occ, regs, dst):
+    """Detect a CMOVNZ (branchless select) `r[dst] = r[cond] ? r[val] : r[dst]` and return
+    (cond_idx, val_idx), else None.
+
+    A select reads a condition register and, when it is non-zero, writes a value register; when it is
+    zero it leaves the destination unchanged. Compiled as a conditional move or a tiny branch, the
+    trace shows, per occurrence, the condition plus whichever operand that run actually took -- so the
+    source set *varies* between occurrences, which is why the fixed-operand arithmetic inference misses
+    it (and can even mistake the cond-nonzero majority for `AND(val, val)`). We require two-sided
+    evidence so this never fires on a real binary op: at least one occurrence where the condition is
+    zero and the result equals the destination's own prior value, and at least one where it is non-zero
+    and the result equals a distinct value register, consistently across every occurrence of each."""
+    def eq(x, y):
+        return (x & _M64) == (y & _M64) or (x & 0xffffffff) == (y & 0xffffffff)
+
+    data = [(dict(regs(o["srcs"])), o["result"]) for o in occ if o["result"] is not None]
+    data = [(rd, res) for rd, res in data if rd]
+    if len(data) < 2:
+        return None
+    cond_candidates = set.intersection(*[set(rd) for rd, _ in data])
+    for c in cond_candidates:
+        cz = [(rd, res) for rd, res in data if rd[c] == 0]
+        cnz = [(rd, res) for rd, res in data if rd[c] != 0]
+        if not cz or not cnz:
+            continue
+        # cond==0 occurrences must preserve the destination (result == r[dst] observed as a source)
+        if not all(dst in rd and eq(rd[dst], res) for rd, res in cz):
+            continue
+        # cond!=0 occurrences must all select the same value register (distinct from the condition)
+        vs = set.intersection(*[{i for i, v in rd.items() if i != c and eq(v, res)} for rd, res in cnz])
+        vs.discard(dst)
+        if vs:
+            return c, min(vs)
+    return None
 
 
 def _arith(occ, regs):
@@ -626,16 +675,18 @@ def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000, argmap=No
     """Interpret the recovered program (register machine + control flow + memory) over args. Returns
     (return_value_or_None, memory) or None if it hits an op it does not model (call/select/sext...).
 
-    `argmap` is {vm_reg -> argument_index}: which VM register holds each incoming argument, recovered
-    by observation. The interpreter lays its arguments into VM registers by its own convention (an
-    obfuscated build may put arg0 in r10, not r0), so seeding reg[i]=args[i] blindly feeds the program
-    zeros for its real inputs. When no map is supplied we fall back to that positional assumption."""
+    `argmap` is {vm_reg -> (argument_index, mask)}: which VM register holds each incoming argument and
+    the width it entered at, recovered by observation. The interpreter lays its arguments into VM
+    registers by its own convention (an obfuscated build may put arg0 in r10, not r0) and narrows each
+    to its C parameter width, so seeding reg[i]=args[i] blindly feeds the program zeros for its real
+    inputs -- or the full 64 bits of a value the program only uses 32 of. When no map is supplied we
+    fall back to the positional assumption."""
     import bisect
     if argmap:
         reg = {i: 0 for i in range(64)}
-        for vr, k in argmap.items():
+        for vr, (k, mask) in argmap.items():
             if k < len(args):
-                reg[vr] = args[k] & _M64
+                reg[vr] = args[k] & mask                      # seed at the parameter's observed width
     else:
         reg = {i: (args[i] & _M64 if i < len(args) else 0) for i in range(64)}
     mem = _ScratchMem()
@@ -664,6 +715,9 @@ def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000, argmap=No
             reg[dst] = (pool[a | (b << 8)] if pool and (a | (b << 8)) < len(pool) else 0) & _M64
         elif base == 26:
             reg[dst] = reg.get(a, 0)
+        elif base == 27:                                     # CMOVNZ: r[dst] = r[a] ? r[b] : r[dst]
+            if reg.get(a, 0) != 0:
+                reg[dst] = reg.get(b, 0)
         elif base == 32:
             reg[dst] = mem.read(reg.get(a, 0), w) & _M64
         elif base == 33:
@@ -680,7 +734,7 @@ def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000, argmap=No
                 if i is None:
                     return None
                 continue
-        elif base is None or base in (27, 34, 36, 37):       # select/sext/pusharg/call: not modelled
+        elif base is None or base in (34, 36, 37):           # sext/pusharg/call: not modelled
             return None
         else:
             v = _rel(base, reg.get(a, 0) & m, reg.get(b, 0) & m, m)
