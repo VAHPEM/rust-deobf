@@ -663,16 +663,22 @@ def _static_bytes(path):
         return b""
 
 
+# cap a section's in-memory span: a crafted binary can declare a huge VirtualSize/.bss, and both
+# the content buffer and the mapping are driven by it, so an uncapped value would OOM the analyzer.
+# Real code/data sections are far smaller; a larger declared size is zero anyway.
+_SEG_CAP = 0x8000000       # 128 MB
+
+
 def _content(s):
     """Section bytes as loaded: zeros for NOBITS (.bss/.tbss), whose `content` LIEF fills with
     whatever follows in the file (a .comment string in a mutex's place)."""
     try:
         if str(getattr(s, "type", "")).endswith("NOBITS"):
-            return b"\x00" * s.size
+            return b"\x00" * min(s.size, _SEG_CAP)
     except Exception:
         pass
     c = bytes(s.content)
-    n = max(s.size, getattr(s, "virtual_size", 0) or 0)      # PE: zero-filled up to virtual size
+    n = min(max(s.size, getattr(s, "virtual_size", 0) or 0), _SEG_CAP)   # PE: up to virtual size
     return c + b"\x00" * max(0, n - len(c))
 
 
@@ -681,7 +687,7 @@ def _seg_extent(s):
     PE, VirtualSize often exceeds SizeOfRawData (a .bss merged into .data), and _content() zero-pads
     up to it -- so the mapping must cover VirtualSize, or the write of the padded content faults and
     (the error being swallowed) the whole section is left unmapped/zero."""
-    return max(len(bytes(s.content)), s.size, getattr(s, "virtual_size", 0) or 0)
+    return min(max(len(bytes(s.content)), s.size, getattr(s, "virtual_size", 0) or 0), _SEG_CAP)
 
 
 def map_image(uc, binary):
