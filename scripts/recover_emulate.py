@@ -84,6 +84,13 @@ TLS_SIZE = 0x20000
 TRAMP = 0x7e000000        # one 16-byte `ret` trampoline per import
 TRAMP_SIZE = 0x100000
 BRK = 0x60000000          # program break for brk()
+# the return address the top frame returns to, where emu_start stops. It must NOT be 0: a call
+# through a null pointer sets PC=0, and with until=0 Unicorn stops there cleanly -- looking like a
+# normal top-level return -- so everything the function did after that null call was lost. With a
+# distinct sentinel the null call instead faults on the fetch at 0 and is unwound (the callee
+# returns 0 to its caller), the designed behaviour. Page-aligned (ARM needs an even LR), in the gap
+# between TRAMP and the 32-bit stack, so no real code is ever there.
+RET_SENTINEL = 0x7fff0000
 BUDGET = 40000            # instructions per run of one function
 FRAME_BUDGET = 20000      # instructions a direct callee (with everything below it) may use
 INNER_BUDGET = 6000       # ... and any deeper callee: a lock spinning in std is cut off there
@@ -167,6 +174,7 @@ class Image:
         except Exception:
             pass
         self.patches = {}   # va -> 8-byte value written after mapping (relocations, import slots)
+        self._tls_off = {}  # TLS symbol -> distinct thread-pointer-relative offset (initial-exec)
         self.tramp = []     # import names; import i lives at TRAMP + 16*i
         self._relocate()
         self.lse_flags = self._lse_flags() if self.arm else []
@@ -213,12 +221,24 @@ class Image:
         else:
             rank = {".init_array": 0, ".ctors": 1}
             secs = sorted((s for s in b.sections if s.name in rank), key=lambda s: rank[s.name])
-        addends = {}
+        # slot VA -> the constructor's real target address, for the forms where the in-place value
+        # is NOT it: ELF RELA (x86-64/arm64, target in the addend) and Mach-O chained fixups (an
+        # encoded pointer; LIEF resolves .target). A 0 addend (i386 REL, Mach-O rebase) is left out
+        # on purpose, so the loop reads the target IN PLACE -- recording 0 made every such
+        # constructor resolve to 0 and be skipped, silently disabling the replay on those formats.
+        reloc_target = {}
         try:
+            chained = self.macho and getattr(b, "has_dyld_chained_fixups", False)
             for r in b.relocations:
                 a = getattr(r, "address", 0) or 0
-                if a:
-                    addends[a] = getattr(r, "addend", 0) or 0
+                if not a:
+                    continue
+                if chained and type(r).__name__ == "RelocationFixup":
+                    reloc_target[a] = int(r.target)
+                else:
+                    ad = getattr(r, "addend", 0) or 0
+                    if ad:
+                        reloc_target[a] = ad
         except Exception:
             pass
         mask = (1 << (8 * ptr)) - 1
@@ -229,7 +249,7 @@ class Image:
             if n == 0:
                 continue
             for i, v in enumerate(struct.unpack_from(f"<{n}{'I' if ptr == 4 else 'Q'}", raw)):
-                target = (addends.get(s.virtual_address + i * ptr, v)) & mask
+                target = (reloc_target.get(s.virtual_address + i * ptr, v)) & mask
                 if target in (0, mask):                      # .ctors terminators (0 / -1)
                     continue
                 if self.text_va <= target < self.text_end:   # a real code address, not a data ptr
@@ -260,6 +280,17 @@ class Image:
                 sym = bind.symbol.name if bind.symbol else None
                 if sym and bind.address:
                     self.patches[bind.address] = self._import(sym)
+        except Exception:
+            pass
+        # Chained fixups (LC_DYLD_CHAINED_FIXUPS, the default for current macOS/iOS targets): each
+        # on-disk pointer is an ENCODED fixup (target offset plus next/bind bits), not the address,
+        # so the slot would read wrong (0x10000100000378 for 0x100000378). LIEF resolves each to its
+        # target; write that so internal pointer tables and &str fields hold real addresses.
+        try:
+            if getattr(b, "has_dyld_chained_fixups", False):
+                for r in b.relocations:
+                    if type(r).__name__ == "RelocationFixup":
+                        self.patches[r.address] = r.target
         except Exception:
             pass
 
@@ -317,6 +348,19 @@ class Image:
                         self.patches[r.address] = sym.value + r.addend
                     elif sym.name:
                         self.patches[r.address] = self._import(sym.name)
+                elif "TPOFF" in t or "TPREL" in t or "TLS_TPREL" in t:
+                    # initial-exec thread-local: the GOT slot holds the variable's offset from the
+                    # thread pointer. Left 0, every thread-local sits AT the thread pointer, so they
+                    # alias each other and a write corrupts the TP self-pointer. Give each a distinct
+                    # offset inside the mapped TLS block (below TP on x86-64 SysV; above the TCB on
+                    # AArch64 variant-I), so distinct thread-locals get distinct, writable storage.
+                    key = r.symbol.name if (r.has_symbol and r.symbol.name) else r.address
+                    off = self._tls_off.get(key)
+                    if off is None:
+                        k = len(self._tls_off)
+                        off = (16 + 8 * k) if self.arm else -(0x1000 + 8 * k)
+                        self._tls_off[key] = off
+                    self.patches[r.address] = off & ((1 << (8 * self.ptr)) - 1)
         except Exception:
             pass
 
@@ -632,15 +676,23 @@ def _content(s):
     return c + b"\x00" * max(0, n - len(c))
 
 
+def _seg_extent(s):
+    """The in-memory span of a section: the larger of raw size, section size, and VirtualSize. On
+    PE, VirtualSize often exceeds SizeOfRawData (a .bss merged into .data), and _content() zero-pads
+    up to it -- so the mapping must cover VirtualSize, or the write of the padded content faults and
+    (the error being swallowed) the whole section is left unmapped/zero."""
+    return max(len(bytes(s.content)), s.size, getattr(s, "virtual_size", 0) or 0)
+
+
 def map_image(uc, binary):
     """Map every section at its virtual address (rebased under BASE window)."""
     pages = {}
     for s in binary.sections:
-        if s.size == 0 or s.virtual_address == 0:
-            continue
+        if s.virtual_address == 0 or _seg_extent(s) == 0:
+            continue                       # a pure .bss (SizeOfRawData 0, VirtualSize>0) still maps
         va = BASE + s.virtual_address
         start = va & ~0xfff
-        end = (va + max(len(bytes(s.content)), s.size) + 0xfff) & ~0xfff
+        end = (va + _seg_extent(s) + 0xfff) & ~0xfff
         for p in range(start, end, 0x1000):
             pages[p] = True
     run = None
@@ -976,6 +1028,8 @@ class Emulator:
         self._thunks = {}
         self._allocs = {}
         self._primed = None      # writable-memory baseline after constructor priming (or None)
+        self._primed_heap = None  # (heap_top, heap bytes, sizes) after priming: a ctor's malloc'd
+        #                           block and allocator cursor, so later runs do not reuse its address
         self._md_lite = Cs(CS_ARCH_X86, CS_MODE_32 if self.x32 else CS_MODE_64)
         if self.arm:
             self.SP, self.PC, self.RET = A.UC_ARM64_REG_SP, A.UC_ARM64_REG_PC, A.UC_ARM64_REG_X0
@@ -1112,8 +1166,17 @@ class Emulator:
             uc.mem_write(region, b"\x00" * size)
         if getattr(self, "heap_top", HEAP) > HEAP:
             uc.mem_write(HEAP, b"\x00" * (min(self.heap_top, HEAP + HEAP_SIZE) - HEAP))
-        self.heap_top = HEAP
-        self.sizes = {}
+        if self._primed_heap is not None:
+            # restore the post-constructor heap (contents + cursor), so a block a constructor
+            # allocated is intact and the next malloc goes ABOVE it instead of aliasing it
+            top, blob, sizes = self._primed_heap
+            if blob:
+                uc.mem_write(HEAP, blob)
+            self.heap_top = top
+            self.sizes = dict(sizes)
+        else:
+            self.heap_top = HEAP
+            self.sizes = {}
         self.last_error = 0
         self.brk = BRK
         # thread-local storage: Rust reads thread-locals (the current thread, panic count, output
@@ -1142,6 +1205,8 @@ class Emulator:
         if self.arm:
             for i in range(31):
                 uc.reg_write(getattr(A, f"UC_ARM64_REG_X{i}"), 0)
+            # LR: the top frame returns here, where emu_start stops (not 0 -- see RET_SENTINEL)
+            uc.reg_write(A.UC_ARM64_REG_X30, RET_SENTINEL)
         elif self.x32:
             for r in (X.UC_X86_REG_EAX, X.UC_X86_REG_EBX, X.UC_X86_REG_ECX, X.UC_X86_REG_EDX,
                       X.UC_X86_REG_ESI, X.UC_X86_REG_EDI):
@@ -1159,12 +1224,13 @@ class Emulator:
         for r in self.ARGS:
             uc.reg_write(r, SCRATCH + 0x8000)
         if self.x32:
-            uc.mem_write(top, struct.pack("<I", 0))
+            uc.mem_write(top, struct.pack("<I", RET_SENTINEL))
             for i in range(8):
                 uc.mem_write(top + 4 + 4 * i, struct.pack("<I", (SCRATCH + 0x8000) & 0xffffffff))
         elif not self.arm:
-            # a return address the run stops at, so `ret` from the top frame is well defined
-            uc.mem_write(top, struct.pack("<Q", 0))
+            # a return address the run stops at (RET_SENTINEL, not 0), so `ret` from the top frame
+            # is well defined and a null call is not mistaken for it
+            uc.mem_write(top, struct.pack("<Q", RET_SENTINEL))
 
     def prime_constructors(self):
         """Replay global constructors on the shared engine, then bake their writes into the
@@ -1188,6 +1254,15 @@ class Emulator:
             except Exception:
                 pass
             self._capture_primed()     # keep this ctor's writes for the next ctor and the sweep
+        # also snapshot the heap: a constructor that malloc'd a block left a global pointing into
+        # it, so later runs must start with that block in place and the allocator cursor above it,
+        # or the first malloc of every run hands back the constructor's block (reading as zero)
+        try:
+            top = self.heap_top
+            blob = bytes(self.uc.mem_read(HEAP, top - HEAP)) if top > HEAP else b""
+            self._primed_heap = (top, blob, dict(self.sizes))
+        except Exception:
+            self._primed_heap = None
         return ran
 
     def _capture_primed(self):
@@ -1225,9 +1300,13 @@ class Emulator:
                     raw = _content(s)
                     c = bytearray(raw + b"\x00" * max(0, s.size - len(raw)))
                     lo = s.virtual_address
+                    # write each relocation patch at the pointer width: on x86-32 a pointer is 4
+                    # bytes, and writing 8 zeroed the next word (e.g. a Rust vtable's size field) and
+                    # skipped the section's last 4-byte slot
+                    pw = self.ptr
                     for va, v in self.img.patches.items():
-                        if lo <= va and va + 8 <= lo + len(c):
-                            c[va - lo:va - lo + 8] = struct.pack("<Q", v & 0xffffffffffffffff)
+                        if lo <= va and va + pw <= lo + len(c):
+                            c[va - lo:va - lo + pw] = struct.pack(self.pfmt, v & self.pmask)
                     for va in self.img.lse_flags:
                         if lo <= va < lo + len(c):
                             c[va - lo] = 1
@@ -1290,7 +1369,7 @@ class Emulator:
                 return p
             if n == "posix_memalign":
                 p = self._alloc(arg(2))
-                uc.mem_write(arg(0), struct.pack("<Q", p))
+                uc.mem_write(arg(0), struct.pack(self.pfmt, p & self.pmask))   # 4-byte ptr on x86-32
                 return 0
             if n in ("memcpy", "memmove", "memcpy_chk", "memmove_chk"):
                 d, s, k = arg(0), arg(1), arg(2)
@@ -1314,8 +1393,28 @@ class Emulator:
                     return 0 if x == y else (1 if x > y else 0xffffffffffffffff)
                 return 0
             if n == "strlen":
-                s = bytes(uc.mem_read(arg(0), 0x1000))
-                return s.index(0) if 0 in s else 0x1000
+                # read in page-sized chunks so a string within 4 KB of a mapping's end does not
+                # fault the whole fixed-0x1000 read (which returned 0, a wrong length)
+                p, total = arg(0), 0
+                while total < 0x100000:
+                    try:
+                        s = bytes(uc.mem_read(p + total, 0x1000))
+                    except UcError:
+                        if total:
+                            s = b""
+                            for off in range(0, 0x1000):     # salvage the readable bytes one page in
+                                try:
+                                    s += bytes(uc.mem_read(p + total + off, 1))
+                                except UcError:
+                                    break
+                        else:
+                            return 0
+                    if 0 in s:
+                        return total + s.index(0)
+                    if len(s) < 0x1000:
+                        return total + len(s)
+                    total += 0x1000
+                return total
             # output succeeds: a `write` that returns 0 is io::ErrorKind::WriteZero, and std's
             # print! panics ("failed printing to stdout") after the first line, ending the run
             if n == "write":
@@ -1490,14 +1589,27 @@ class Emulator:
         self._args_left -= 1
         self._args_gen = self.writes.gen
         regs = list(uc.reg_read_batch(self.ARGS[:6]))
+        if self.x32:
+            # x86-32 is cdecl: the &str (ptr,len) pair is passed on the stack, not in registers
+            # (ARGS is only ecx/edx), so used/exact were never set on i386. Read the first stack
+            # arguments too.
+            try:
+                raw = bytes(uc.mem_read(uc.reg_read(self.SP), 32))
+                regs += list(struct.unpack("<8I", raw))
+            except UcError:
+                pass
         try_str, plausible = self._try_str, self._plausible
         for a, b in zip(regs, regs[1:]):
             if 6 <= b <= 4096:
                 try_str(a, b)
-        # depth-first, the same order as a recursive walk, without a Python call per value
+        # depth-first, the same order as a recursive walk, without a Python call per value. Walk at
+        # the pointer width: a &str struct on i386 is 4-byte (ptr,len), not 8.
+        pw = self.ptr
+        words = 64 // pw
+        unpack = struct.Struct(("<%dI" if pw == 4 else "<%dQ") % words).unpack
+        read = uc.mem_read
         seen, budget = set(), 48
         stack = [(r, 3) for r in reversed(regs) if plausible(r)]
-        unpack, read = struct.Struct("<8Q").unpack, uc.mem_read
         while stack and budget > 0:
             p, depth = stack.pop()
             if p in seen:
@@ -1505,10 +1617,10 @@ class Emulator:
             seen.add(p)
             budget -= 1
             try:
-                q = unpack(read(p, 64))
+                q = unpack(read(p, pw * words))
             except UcError:
                 continue
-            for k in range(7):
+            for k in range(words - 1):
                 if 6 <= q[k + 1] <= 4096:
                     try_str(q[k], q[k + 1])
             if depth > 1:
@@ -1582,8 +1694,14 @@ class Emulator:
                 else:
                     b = bytes(self.uc.mem_read(address, 6))
                     if b[:2] == b"\xff\x25":
-                        slot = address + 6 + struct.unpack("<i", b[2:])[0]
-                        tgt = struct.unpack("<Q", self.uc.mem_read(slot, 8))[0]
+                        # jmp [mem]: on x86-64 the disp is RIP-relative; on x86-32 it is an
+                        # absolute address, and the slot is a 4-byte pointer
+                        if self.x32:
+                            slot = struct.unpack("<I", b[2:])[0]
+                            tgt = struct.unpack("<I", self.uc.mem_read(slot, 4))[0]
+                        else:
+                            slot = address + 6 + struct.unpack("<i", b[2:])[0]
+                            tgt = struct.unpack("<Q", self.uc.mem_read(slot, 8))[0]
                         if TRAMP <= tgt < TRAMP + TRAMP_SIZE:
                             i = (tgt - TRAMP) // 16
                             hit = self.img.tramp[i] if i < len(self.img.tramp) else "?"
@@ -1796,7 +1914,7 @@ class Emulator:
         for _ in range(64):
             try:
                 self.fault = False
-                self.uc.emu_start(pc, 0, timeout=0, count=max(1, budget - self.count))
+                self.uc.emu_start(pc, RET_SENTINEL, timeout=0, count=max(1, budget - self.count))
                 if not self.fault:
                     # out of instructions while still writing text (a cipher decrypting one
                     # string after another, e.g. ChaCha20 at opt-level="z" with nothing
@@ -2307,7 +2425,8 @@ _NUMBER = re.compile(rb"^(?=[0-9a-fA-F]*\d)[0-9a-fA-F]+(?![A-Za-z0-9_])"
 
 
 _EMULATOR_VALUES = tuple(
-    fmt % v for v in (SCRATCH, SCRATCH + 0x8000, STACK, STACK + STACK_SIZE // 2, HEAP)
+    fmt % v for v in (SCRATCH, SCRATCH + 0x8000, STACK, STACK + STACK_SIZE // 2, HEAP,
+                      STACK32, STACK32 + STACK_SIZE // 2)   # the 32-bit stack base, formatted too
     for fmt in ("%d", "%x", "%#x"))
 
 
@@ -2534,7 +2653,24 @@ def _drop_overlap_artifacts(records):
     scrambled |= (stutters & alive) - used - exact
     alive -= scrambled
     keep = [r for r in keep if r["string"] in alive]
-    return [r for r in keep if not any(o != r["string"] and r["string"] in o for o in alive)]
+
+    # A string contained in another surviving string is dropped only when it is a VIEW of the same
+    # buffer -- a half-decoded prefix or a stale piece -- not when it is an indicator the code built
+    # and used in its own right. Dropping every substring unconditionally lost real separate
+    # indicators: a C2 host `c2.northwind.example` next to the full URL `https://c2.northwind.
+    # example/api/beacon`, `Global\NW-mutex` next to `Local\Global\NW-mutex-2`. Keep it when the code
+    # used it at its own length, when it was captured exact, or when it was seen at a buffer address
+    # the container was not (two buffers that merely share text).
+    def _is_contained_view(s, o):
+        if s in used or s in exact:
+            return False                   # independent evidence the code used s at this length
+        if diff_buffer(s, o):
+            return False                   # different buffers that only share this text
+        return True
+
+    return [r for r in keep
+            if not any(o != r["string"] and r["string"] in o and _is_contained_view(r["string"], o)
+                       for o in alive)]
 
 
 def _static_share(b, file_bytes, min_piece=4):
@@ -2833,25 +2969,50 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
     if workers > 1 and len(order) < PARALLEL_MIN:
         workers = 1                        # small binary: one in-process pass, no children
         ram_note = None
+    parallel_ok = False
     if workers > 1 and len(order) >= PARALLEL_MIN:
         import concurrent.futures as cf
         import multiprocessing as mp
         ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context("spawn")
         shares = [[f for f, _ in order[i::workers]] for i in range(workers)]
         by_string, tried, runs, timed_out, found = {}, 0, 0, False, set()
+        completed = set()                  # indices of shares whose worker returned cleanly
+        t0 = time.monotonic()
         try:
             with cf.ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
-                jobs = [pool.submit(_worker, str(path), sh, canaries, time_budget, explore) for sh in shares]
-                for j in jobs:
+                fut = {pool.submit(_worker, str(path), sh, canaries, time_budget, explore): i
+                       for i, sh in enumerate(shares)}
+                for j in cf.as_completed(fut):
                     bs, t, r, to, fd = j.result()
                     _merge(by_string, bs)
                     tried += t
                     runs += r
                     timed_out |= to
                     found |= fd
+                    completed.add(fut[j])
         except Exception:
-            workers = 1                    # (no processes here: fall back to one)
-    if workers <= 1 or len(order) < PARALLEL_MIN:
+            # a worker died (e.g. OOM -> BrokenProcessPool, which fails the whole pool); keep every
+            # result already merged and redo only the shares that did not complete
+            pass
+        failed = [sh for i, sh in enumerate(shares) if i not in completed]
+        parallel_ok = True
+        if failed:
+            # rerun just the failed shares in-process, merging into what succeeded, within the
+            # budget still left (not a fresh full budget, and not re-running the whole order)
+            fdict = dict(funcs)
+            sub = [(f, fdict[f]) for sh in failed for f in sh if f in fdict]
+            remaining = None
+            if time_budget is not None:
+                remaining = max(5.0, time_budget - (time.monotonic() - t0))
+            explained = _static_cover(img.file_bytes + img.code_constants())
+            bs, ts, r, to, fd = _emulate(img, sub, scores, explained, canaries, remaining, explore)
+            _merge(by_string, bs)
+            tried += len(ts)
+            runs += r
+            timed_out |= to
+            found |= fd
+            parallel_ok = True
+    if not parallel_ok and (workers <= 1 or len(order) < PARALLEL_MIN):
         explained = _static_cover(img.file_bytes + img.code_constants())
         by_string, tried_set, runs, timed_out, found = _emulate(img, order, scores, explained,
                                                                 canaries, time_budget, explore)
@@ -2862,7 +3023,8 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
     return {"functions_tried": tried, "functions_total": len(funcs), "runs": runs,
             "timed_out": timed_out, "recovered": sorted(found), "workers": workers,
             "ram_note": ram_note,
-            "recall": len(found), "n": len(canaries), "arch": "aarch64" if img.arm else "x86-64",
+            "recall": len(found), "n": len(canaries),
+            "arch": "aarch64" if img.arm else ("x86" if img.x32 else "x86-64"),
             "recovered_texts": [r["string"] for r in records], "records": records}
 
 
