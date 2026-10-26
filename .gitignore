@@ -17,3 +17,6 @@ build/build_manifest.jsonl
 obf_src/*/target/
 obf_src/*/Cargo.lock
 obf_src/ollvm_fla/fla
+
+# transient fuzz_recover.py crash artifacts (regression reproducers live in tests/fixtures/fuzz/)
+build/fuzz_crashes/

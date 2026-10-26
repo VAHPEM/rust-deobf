@@ -96,6 +96,9 @@ FRAME_BUDGET = 20000      # instructions a direct callee (with everything below 
 INNER_BUDGET = 6000       # ... and any deeper callee: a lock spinning in std is cut off there
 QUICK = 10000             # instructions per function in the first, sweeping pass
 CTOR_BUDGET = 60000       # instructions per global constructor replayed before the sweep
+_MAX_CTORS = 64           # most constructors to replay (a crafted .init_array can list thousands)
+_CTOR_TIMEOUT_US = 2_000_000   # wall-clock bound per constructor run (slow-hook instrs -> seconds)
+_CTOR_TOTAL_S = 10.0      # wall-clock bound for the whole priming phase
 MAX_DEPTH = 8             # call levels executed below the emulated function
 MAX_RUNS = 8              # runs per function (1 natural + forced-branch runs)
 WRITE_BUDGET = 1 << 21    # bytes one run may store
@@ -667,33 +670,85 @@ def _static_bytes(path):
 # the content buffer and the mapping are driven by it, so an uncapped value would OOM the analyzer.
 # Real code/data sections are far smaller; a larger declared size is zero anyway.
 _SEG_CAP = 0x8000000       # 128 MB
+# aggregate cap across ALL sections: per-section _SEG_CAP alone still sums without bound, so a
+# crafted binary with many huge-VirtualSize sections OOMs the mapper/snapshot/writable-section
+# buffers (found by fuzz_recover.py). It is spent up to ~3x over independent buffers (the page
+# snapshot, the writable-section bytearrays, and Unicorn's own mapping), so 192 MB keeps the peak
+# well under a 2 GB analysis ceiling while staying far above any real image (the largest binaries
+# in the FP corpus total well under 70 MB of sections); it only trims a pathological one.
+_TOTAL_MAP_CAP = 0xC000000    # 192 MB
+# a section mapped at BASE+va must sit inside a sane address range: real VAs and the emulator's own
+# regions (STACK 0x7f0000000000, TRAMP 0x7e000000) are all under 2^48; a crafted huge/wrapping VA is
+# rejected rather than mapped page-by-page (a ~25 s hang in map_image's fallback).
+_MAX_MAP_VA = 1 << 48
+_MAX_FALLBACK_PAGES = 8192    # cap per-page map fallback (32 MB) so a huge run can't hang the mapper
+# zero-fill tail (the span a section claims beyond its on-disk bytes: .bss, a PE section whose
+# VirtualSize exceeds SizeOfRawData) that we materialise. Legit .bss is far smaller; a tiny file
+# declaring a gigantic section is crafted, and padding it to _SEG_CAP made the mapper/snapshot spend
+# ~minutes on phantom zeros (found by fuzz_recover.py), so the tail past the real content is capped.
+_BSS_CAP = 0x1000000          # 16 MB
+
+
+def _nobits(s) -> bool:
+    try:
+        return str(getattr(s, "type", "")).endswith("NOBITS")
+    except Exception:
+        return False
 
 
 def _content(s):
     """Section bytes as loaded: zeros for NOBITS (.bss/.tbss), whose `content` LIEF fills with
-    whatever follows in the file (a .comment string in a mutex's place)."""
-    try:
-        if str(getattr(s, "type", "")).endswith("NOBITS"):
-            return b"\x00" * min(s.size, _SEG_CAP)
-    except Exception:
-        pass
+    whatever follows in the file (a .comment string in a mutex's place). Non-NOBITS content is its
+    real bytes plus the bounded zero tail _seg_extent allows (a crafted huge declared size does not
+    force a huge zero buffer)."""
+    if _nobits(s):
+        return b"\x00" * min(s.size or 0, _BSS_CAP, _SEG_CAP)
     c = bytes(s.content)
-    n = min(max(s.size, getattr(s, "virtual_size", 0) or 0), _SEG_CAP)   # PE: up to virtual size
-    return c + b"\x00" * max(0, n - len(c))
+    n = _seg_extent(s)
+    return c[:n] + b"\x00" * max(0, n - len(c))
 
 
 def _seg_extent(s):
-    """The in-memory span of a section: the larger of raw size, section size, and VirtualSize. On
-    PE, VirtualSize often exceeds SizeOfRawData (a .bss merged into .data), and _content() zero-pads
-    up to it -- so the mapping must cover VirtualSize, or the write of the padded content faults and
-    (the error being swallowed) the whole section is left unmapped/zero."""
-    return min(max(len(bytes(s.content)), s.size, getattr(s, "virtual_size", 0) or 0), _SEG_CAP)
+    """The in-memory span of a section. On PE, VirtualSize often exceeds SizeOfRawData (a .bss merged
+    into .data), so the span must cover the larger of raw bytes / size / VirtualSize -- but only up
+    to a bounded zero tail past the real content (_BSS_CAP), so a crafted section whose declared size
+    dwarfs its on-disk bytes cannot force a huge zero materialisation. A pure NOBITS section (empty
+    content) is all zeros up to its declared size, also capped."""
+    raw = len(bytes(s.content))
+    declared = max(s.size or 0, getattr(s, "virtual_size", 0) or 0)
+    if _nobits(s) or raw == 0:
+        return min(declared, _BSS_CAP, _SEG_CAP)
+    # has real content: span is the content plus at most _BSS_CAP of legitimate (merged-.bss) tail
+    return min(max(raw, min(declared, raw + _BSS_CAP)), _SEG_CAP)
+
+
+def _mappable_sections(binary):
+    """Sections to map / snapshot / zero-pad, in file order, whose cumulative in-memory extent
+    stays within _TOTAL_MAP_CAP. Legit images are far under the cap, so nothing is trimmed; a
+    crafted binary with many huge-VirtualSize sections is bounded. The same order and budget are
+    used everywhere a section loop allocates (map_image, the _orig page snapshot, _writable_sections)
+    so they all agree on the included set."""
+    total = 0
+    for s in binary.sections:
+        va = s.virtual_address
+        ext = _seg_extent(s)
+        # reject a crafted VA near the top of the address space: mapping BASE+va..+ext there fails
+        # the big mem_map and drops into map_image's per-page fallback (~36k individual 0.7 ms maps
+        # -> ~25 s hang, found by fuzz_recover.py). Legit section VAs and the emulator's own fixed
+        # regions (STACK at 0x7f0000000000) are all well under _MAX_MAP_VA; a huge/wrapping one is not.
+        if va and (BASE + va + ext > _MAX_MAP_VA or BASE + va < 0):
+            continue
+        if total + ext > _TOTAL_MAP_CAP:
+            continue                       # skip this (bogus) one; keep fitting smaller real ones
+        total += ext
+        yield s
 
 
 def map_image(uc, binary):
     """Map every section at its virtual address (rebased under BASE window)."""
     pages = {}
-    for s in binary.sections:
+    secs = list(_mappable_sections(binary))
+    for s in secs:
         if s.virtual_address == 0 or _seg_extent(s) == 0:
             continue                       # a pure .bss (SizeOfRawData 0, VirtualSize>0) still maps
         va = BASE + s.virtual_address
@@ -710,13 +765,15 @@ def map_image(uc, binary):
             try:
                 uc.mem_map(run[0], run[1] - run[0])
             except UcError:
-                for q in range(run[0], run[1], 0x1000):
+                # per-page fallback for a partially-overlapping run; bounded so a pathological
+                # large run cannot turn into tens of thousands of slow per-page maps (a hang)
+                for q in list(range(run[0], run[1], 0x1000))[:_MAX_FALLBACK_PAGES]:
                     try:
                         uc.mem_map(q, 0x1000)
                     except UcError:
                         pass
         run = [p, p + 0x1000] if p is not None else None
-    for s in binary.sections:
+    for s in secs:
         c = _content(s)
         if c and s.virtual_address:
             try:
@@ -1083,13 +1140,17 @@ class Emulator:
                 uc.mem_write(BASE + va, struct.pack(self.pfmt, v & self.pmask))
             except UcError:
                 pass
-        # the loaded image, page by page, to undo whatever a run writes into it
+        # the loaded image, page by page, to undo whatever a run writes into it. The span is the
+        # same _seg_extent map_image mapped (capped at _SEG_CAP): a crafted section whose size /
+        # VirtualSize field is huge would otherwise make this range() iterate for ~forever (a hang
+        # before any time budget applies -- found by fuzz_recover.py), and the pages past the
+        # mapped extent are unmapped anyway, so mem_read would only raise and be skipped.
         self._orig = {}
-        for sec in self.img.binary.sections:
+        for sec in _mappable_sections(self.img.binary):
             if not sec.virtual_address or not sec.size:
                 continue
             lo = (BASE + sec.virtual_address) >> 12
-            hi = (BASE + sec.virtual_address + max(sec.size, getattr(sec, "virtual_size", 0) or 0) + 0xfff) >> 12
+            hi = (BASE + sec.virtual_address + _seg_extent(sec) + 0xfff) >> 12
             for pg in range(lo, hi):
                 if pg not in self._orig:
                     try:
@@ -1252,10 +1313,17 @@ class Emulator:
             vas = []
         if not vas:
             return 0
+        # A real image has a handful of constructors; a crafted .init_array can list thousands, each
+        # able to burn its full (finite) CTOR_BUDGET of slow-hook instructions -> minutes of hang.
+        # Cap the count and the total wall clock, and give each run a per-run wall-clock bound.
+        vas = vas[:_MAX_CTORS]
+        ctor_deadline = time.monotonic() + _CTOR_TOTAL_S
         ran = 0
         for va in vas:
+            if time.monotonic() > ctor_deadline:
+                break
             try:
-                self.run(va, 0x4000, budget=CTOR_BUDGET)
+                self.run(va, 0x4000, budget=CTOR_BUDGET, timeout_us=_CTOR_TIMEOUT_US)
                 ran += 1
             except Exception:
                 pass
@@ -1295,7 +1363,7 @@ class Emulator:
                 self._image_snapshot = self._primed
                 return self._image_snapshot
             out = []
-            for s in self.img.binary.sections:
+            for s in _mappable_sections(self.img.binary):
                 if not s.virtual_address or not s.size:
                     continue
                 if self.img.pe:
@@ -1303,8 +1371,11 @@ class Emulator:
                 else:
                     w = bool(int(s.flags) & 0x1)
                 if w:
-                    raw = _content(s)
-                    c = bytearray(raw + b"\x00" * max(0, s.size - len(raw)))
+                    # _content already returns the loaded bytes zero-padded to the _SEG_CAP-capped
+                    # extent (the span map_image mapped). Re-padding to the raw s.size would try to
+                    # allocate gigabytes / OverflowError on a crafted huge size field, for pages that
+                    # are not even mapped (found by fuzz_recover.py).
+                    c = bytearray(_content(s))
                     lo = s.virtual_address
                     # write each relocation patch at the pointer width: on x86-32 a pointer is 4
                     # bytes, and writing 8 zeroed the next word (e.g. a Rust vtable's size field) and
@@ -1886,12 +1957,20 @@ class Emulator:
 
     # ---- running a function ----------------------------------------------------------------
 
-    def run(self, func_va, size, plan=None, budget=None):
+    def run(self, func_va, size, plan=None, budget=None, timeout_us=0):
         """Emulate one function once, forcing the branches in `plan` ({addr: taken}), for at
         most `budget` instructions (BUDGET).
 
+        `timeout_us` (0 = none) adds a wall-clock bound to each emu_start AND to the whole call.
+        The sweep leaves it 0 so recovery stays deterministic (instruction-count bounded, not
+        machine-speed bounded); only constructor priming sets it, because a crafted constructor can
+        execute its full (finite) budget of slow-hook instructions for many seconds -- a DoS in a
+        batch run -- and priming is best-effort state setup, so cutting a pathological one off is
+        safe (a legit constructor finishes in well under the bound).
+
         Returns (strings, branches seen, (branch, direction) pairs covered)."""
         budget = budget or BUDGET
+        t_run = time.monotonic()
         self._reset()
         self.writes = _Writes()
         self._args_gen = -1
@@ -1918,9 +1997,11 @@ class Emulator:
         faults = {}
         extend = 3 if budget >= BUDGET else 0
         for _ in range(64):
+            if timeout_us and (time.monotonic() - t_run) * 1e6 > timeout_us:
+                break                      # wall-clock bound (priming only): stop re-entering
             try:
                 self.fault = False
-                self.uc.emu_start(pc, RET_SENTINEL, timeout=0, count=max(1, budget - self.count))
+                self.uc.emu_start(pc, RET_SENTINEL, timeout=timeout_us, count=max(1, budget - self.count))
                 if not self.fault:
                     # out of instructions while still writing text (a cipher decrypting one
                     # string after another, e.g. ChaCha20 at opt-level="z" with nothing
@@ -2800,7 +2881,10 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
     """The two passes over `order` with one emulator; returns (records by string, functions
     tried, runs, timed out, canaries found)."""
     from recover_callsite import looks_like_text
-    emu = Emulator(img)
+    try:
+        emu = Emulator(img)            # setup can fault on a crafted image (a section rebased onto
+    except Exception:                  # the fixed STACK/HEAP/TLS/SCRATCH/TRAMP window -> UC_ERR_MAP):
+        return {}, set(), 0, False, set()   # that image is not emulatable, so yield nothing cleanly
     try:
         emu.prime_constructors()       # run the loader's constructors first (defeats anti-emulation)
     except Exception:

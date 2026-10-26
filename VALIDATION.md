@@ -2037,3 +2037,87 @@ until independently confirmed*):
    cannot, on its own, catch a case where the emulation itself diverges from the true program. On PE
    that divergence did not occur (confirmed against source); the guard against trusting a recovery
    blindly remains "check the recovered expression against ground truth", which is what settled this.
+
+## 48. Round 8: fuzzing rust-deobf itself — robustness on hostile input (Oct 2026)
+
+§22 fuzzed *RustCloak* (the obfuscator) for behaviour preservation. This round turns the fuzzer on
+the *deobfuscator*: rust-deobf runs in SOC pipelines on attacker-controlled files, so a crafted
+ELF/PE/Mach-O that crashes, hangs or exhausts memory in the loader/emulator is a real defect — one
+bad sample kills an analyst's whole batch run. The property under test is not recovery, it is
+**robustness: never take the process down, on any input.**
+
+**The harness — `scripts/fuzz_recover.py`.** A mutation fuzzer over the whole path that touches
+attacker bytes — `recover.detect`, `recover_emulate.Image`, the metadata / &str-literal /
+stack-string / static-call-site / cryptify / VM-detection primitives, the Unicorn `emulate` sweep,
+and the hardened front ends `recover.run` / `soc_triage.triage` — across ELF/PE/Mach-O and
+x86-64/aarch64/x86. It mirrors §22's design: coverage-guided via **Atheris/libFuzzer** when its
+runtime is present (`--atheris`), else a standalone mutation driver. The committed benign fixtures
+(every format/arch) are the seed corpus; mutation is half whole-file (stress the header parsers)
+and half body-only past the header (keep the file parseable so the *deep* loader/emulator code
+actually runs — the richest crash surface). Each input is run in an isolated child with an
+address-space **rlimit** and a wall-clock **timeout**, so a native segfault, an OOM, or a true hang
+becomes a recorded *finding* instead of taking the fuzzer down. The contract is explicit: the
+never-raise front ends (`recover.run`, `recover.detect`) must return on any input; the lower
+primitives may raise a *controlled* parse rejection (`ValueError`, `struct.error`, lief errors,
+`soc_triage`'s `UnsupportedInput`) but never an *uncontrolled* failure (`MemoryError`,
+`RecursionError`, a C-level abort, or a hang).
+
+**Five bugs found and fixed, over two campaigns (all the `_SEG_CAP` bug class the first review
+flagged — raw attacker-controlled size fields and crafted layouts used as loop / allocation bounds).**
+A body mutation that writes a huge value into a section's `size` / `VirtualSize` field, or rebases a
+section onto the emulator's fixed memory, is parsed fine by lief but then:
+
+1. **`Emulator._fresh` hung.** The per-page image snapshot bounded its `range()` by the raw
+   `max(size, VirtualSize)`, so a `0xffff...`-sized section made the loop iterate over ~2^52 pages —
+   an effectively infinite hang, *before* any `--time-budget` applied. Fixed to use the same
+   `_seg_extent` (per-section `_SEG_CAP`, 128 MB) `map_image` maps; pages past it are unmapped anyway.
+2. **`_writable_sections` overflowed / OOM'd.** It re-padded the already-capped section content up to
+   the raw `size` with `b"\x00" * (size - len(raw))` — `OverflowError` on an enormous size, a
+   multi-gigabyte allocation on a merely-large one, and redundant (`_content` already pads to the
+   capped extent). Fixed to use the capped content directly.
+3. **Aggregate OOM across many sections.** Per-section `_SEG_CAP` still sums without bound, so a
+   binary with many huge-`VirtualSize` sections OOM'd the mapper, the page snapshot and the
+   writable-section buffers together. Fixed with a new `_mappable_sections` helper enforcing an
+   aggregate `_TOTAL_MAP_CAP` (192 MB — far above any real image, which total well under 70 MB) used
+   by all three section loops so they agree on the included set.
+4. **Fixed-region collision (`UC_ERR_MAP`).** A section whose rebased VA lands on the emulator's
+   fixed STACK/HEAP/TLS/SCRATCH/TRAMP window made the fixed-region `mem_map` raise. Such an image is
+   not emulatable; `_emulate` now catches a setup fault and yields nothing cleanly instead of raising.
+5. **`prime_constructors` hung.** Each `.init_array`/`.ctors` target was replayed for up to
+   `CTOR_BUDGET` instructions with `emu_start(timeout=0)` — finite but, with the per-block Python
+   hooks, seconds long, and unbounded across a crafted `.init_array` listing thousands of entries.
+   Fixed with a wall-clock bound per constructor run and for the whole priming phase, plus a cap on
+   the number replayed. The *sweep* is deliberately left instruction-count-bounded (no wall clock),
+   so recovery stays deterministic and reproducible across machines; priming is best-effort state
+   setup, so a wall-clock cut there is safe and never fires on a real (sub-millisecond) constructor.
+
+**Validated.** `tests/test_fuzz.py` commits ten reproducers (mutations of the benign canary fixtures
+— no malware, no live indicators, just corrupted benign binaries) covering all five root causes;
+each used to hang or crash and now finishes in well under a second, checked both in-process and
+through the isolated rlimit+timeout runner, which also pins the robustness classifier. The harness's
+own pinned-corpus self-test (14 hand-built malformed inputs run clean through every target) runs in
+CI via `tests/test_selftests.py`. After the fixes a fresh isolated campaign of **2,500** mutated
+inputs over the deep loader/emulator path (seed 20261026) reported **0 findings** where the first
+campaigns had found one within ~100 inputs, and 8,000 inputs over the fast parser surface reported
+**0**. Full fast suite green (186 passed), with no recovery regression — for a real binary
+`_mappable_sections` yields every section and the priming cap never fires, so legit behaviour is
+byte-identical.
+
+*(Isolation note: the campaign runner uses a `forkserver` — a fresh clean child per input — not a
+plain `fork`; forking after the parent has instantiated Unicorn inherits poisoned JIT state and fails
+with "Could not allocate dynamic translator buffer", which a `forkserver`/`spawn` child avoids.)*
+
+**Multi-VM / multi-arch.** The harness is architecture- and OS-agnostic by construction — it mutates
+ELF/PE/Mach-O x86-64/aarch64/x86 seeds and drives the same loader/emulator code that runs on every
+host — so a loader/emulator defect it surfaces on the x86-64 container is a defect on every target.
+To run it natively on the [dual-vm-ai-agent](https://github.com/VAHPEM/dual-vm-ai-agent) Kali AArch64
+and Windows x64 VMs (as §22 did for the differential fuzzer), build that host's fixtures
+(`bash scripts/build_all.sh`) and run `python3 scripts/fuzz_recover.py --time 1800 --seeds build/`
+there; crashing inputs land in `build/fuzz_crashes/` with a `.txt` repro note, replayable with
+`--reproduce`.
+
+**Honest limits.** The standalone driver is dumb mutation, not coverage-guided, unless Atheris is
+installed (`--atheris` wires it to libFuzzer). The rlimit/timeout isolation catches native crashes
+and hangs but a crash that only manifests under a specific real OS/libc (not the container's) still
+needs the native VM run above. And robustness is a moving target: new engine code is new crash
+surface, so the fuzzer is meant to be re-run, not run once.
