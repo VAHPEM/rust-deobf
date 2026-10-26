@@ -155,7 +155,15 @@ Cursor, …) can call it next to whatever decompiler tooling it already drives:
 python3 scripts/soc_triage.py sample.bin --json      # one-screen facts: toolchain, crates, IOCs, signal
 python3 scripts/recover.py   sample.bin --json       # every decoded string + the function that builds it
 scripts/ghidra_run.sh sample.bin                     # write them into the Ghidra decompiler as plate comments
+python3 scripts/mcp_server.py                         # or serve recover/triage/metadata/detect as MCP tools
 ```
+
+Prefer typed tools over CLI parsing? `scripts/mcp_server.py` exposes `detect` / `metadata` /
+`triage` / `recover` as [MCP](https://modelcontextprotocol.io) tools over stdio (no third-party
+package needed), so an agent calls them with a JSON schema and gets structured JSON back. And
+`scripts/export_rules.py` turns the recovered facts into **capa** rules and **YARA** rules (the
+Mandiant detection formats), for the obfuscation crates and from the recovered decoder idioms /
+hash-obfuscated imports — `--static-only` emits the crate family ruleset for any corpus.
 
 A prompt that works well:
 
@@ -196,6 +204,7 @@ python3 scripts/recover.py samples/ --jsonl triage.jsonl          # a whole dire
 # name library functions in a stripped binary (needs a signature DB for its toolchain):
 python3 scripts/recover_libfuncs.py --gen build/*release*nostrip   # build the DB once per toolchain
 python3 scripts/recover_libfuncs.py path/to/binary                 # identify; --json for records
+python3 scripts/recover_libfuncs.py path/to/binary --propagate     # + call-graph thunks & drop-glue
 # push strings + library names into Ghidra (headless, PyGhidra):
 scripts/ghidra_run.sh path/to/binary
 
@@ -660,7 +669,15 @@ ARM64_GNU=1 bash scripts/build_all.sh             # + AArch64 glibc (dynamic); c
 python3 -m pytest tests -q                        # recall and precision, canary + scatter
 python3 scripts/eval_scatter.py                   # the scatter table above
 python3 scripts/measure_fp.py --pipeline          # false positives on real binaries
+python3 scripts/fuzz_recover.py --time 300        # robustness fuzz: malformed ELF/PE/Mach-O
 ```
+
+The last one fuzzes rust-deobf *itself* — it mutates the committed binary fixtures and feeds the
+malformed results through the whole loader/emulator path, each input isolated with an rlimit and a
+timeout, so a crafted binary that would hang or crash the analyzer in a SOC pipeline is caught as a
+finding (and saved for `--reproduce`). It found and we fixed two such hangs/OOMs; see
+[VALIDATION.md §48](VALIDATION.md). `--atheris` drives libFuzzer when the `atheris` package is
+installed; otherwise a standalone mutation driver runs.
 
 <details>
 <summary><b>Build details</b></summary>
