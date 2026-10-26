@@ -20,7 +20,15 @@ recover_rust_meta.py's crate+version fingerprint to pick the right signature set
     # identify library functions in a target:
     python3 scripts/recover_libfuncs.py path/to/binary            # human-readable
     python3 scripts/recover_libfuncs.py path/to/binary --json     # {va, name, sym} records
+    python3 scripts/recover_libfuncs.py path/to/binary --propagate  # + call-graph propagation
     python3 scripts/recover_libfuncs.py --selftest
+
+Signature matching only labels functions it has an exact masked match for -- a fraction of the
+library code in a stripped static build. `--propagate` carries those labels further through the
+call graph, conservatively (a wrong label is worse than none): a function that is just a `jmp F` /
+`call F; ret` forwarder to a labelled F is named `thunk.<F>`, and Rust `drop_in_place` glue whose
+calls are all to known drop glue / the deallocator is itself marked drop glue, to a fixed point.
+Propagated labels carry a `via` field so they are never confused with signature hits.
 
 Signatures describe one toolchain's prebuilt std; a different rustc produces different code, so
 the DB is keyed by rust release (from recover_rust_meta) and matching prefers the target's own
@@ -306,6 +314,171 @@ def match_binary(path: Path, db=None):
     return out
 
 
+# ---------------------------------------------------------------------------------------------
+# signature propagation: a byte-signature DB only labels functions it has an exact masked match
+# for, which on a stripped static build is a fraction of the library code. The call graph lets us
+# carry those labels further, conservatively (a wrong label is worse than none):
+#   * forwarder thunks  - a function that is just `jmp F` or `call F; ret` to a labelled F is a
+#                         monomorphisation/ICF thunk of F -> label it thunk.<F> (exact: it forwards).
+#   * drop glue         - Rust `drop_in_place<T>` glue whose calls are all to known drop glue /
+#                         drop_in_place / the deallocator is itself drop glue; propagated to a fixed
+#                         point (a dropper of a type whose fields are themselves droppers).
+# Both are reported with a `via` field so an analyst sees they are inferred, not signature-matched.
+# ---------------------------------------------------------------------------------------------
+_CALL_X86 = 0xE8
+_JMP32_X86, _JMP8_X86 = 0xE9, 0xEB
+_RET_X86 = {0xC3, 0xC2}
+_DEALLOC_HINT = re.compile(r"__rust_dealloc|dealloc|\bfree\b|GlobalAlloc.*dealloc", re.I)
+_DROP_HINT = re.compile(r"drop_in_place|core::ptr::drop|::drop\b", re.I)
+
+
+def _cs_md(arch: str):
+    from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_MODE_32, CS_MODE_64, CS_MODE_LITTLE_ENDIAN
+    if arch == "aarch64":
+        return Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    return Cs(CS_ARCH_X86, CS_MODE_32 if arch == "x86" else CS_MODE_64)
+
+
+def _call_graph(code: bytes, base: int, starts: list[int], arch: str):
+    """{start: {"calls": set(target_starts), "tail": target_or_None, "size": bytes, "insns": n}}.
+
+    Direct calls/branches only (E8/E9/EB on x86, bl/b on arm64); indirect calls are left out. A
+    function spans from its start to the next start. `tail` is the single direct unconditional jump
+    a forwarder thunk is, when that is the function's only control flow."""
+    md = _cs_md(arch)
+    startset = set(starts)
+    nexts = {s: n for s, n in zip(starts, starts[1:] + [base + len(code)])}
+    graph = {}
+    for s in starts:
+        end = nexts[s]
+        chunk = code[s - base:end - base]
+        calls, tail, insns, other_flow = set(), None, 0, 0
+        ends_ret = False
+        try:
+            # disassemble only up to the first terminator (ret / unconditional jump): thunks and
+            # drop glue are straight-line, and anything with earlier branching sets other_flow and
+            # is excluded from propagation anyway. Stopping here avoids disassembling inter-function
+            # padding (zeros -> junk `add` instructions) as part of the function.
+            for insn in md.disasm(chunk, s):
+                insns += 1
+                stop = False
+                if arch == "aarch64":
+                    m = insn.mnemonic
+                    if m == "bl" and insn.op_str.startswith("#"):
+                        t = _imm(insn.op_str)
+                        if t in startset:
+                            calls.add(t)
+                    elif m == "b" and insn.op_str.startswith("#"):
+                        t = _imm(insn.op_str)
+                        if t in startset and not calls and insns <= 4:
+                            tail = t     # forwarder: short, no calls, tail-branch to a known fn
+                        other_flow += 1
+                        stop = True                       # unconditional branch ends the block
+                    elif m == "ret":
+                        ends_ret = True
+                        stop = True
+                    elif m in ("br", "blr", "cbz", "cbnz", "tbz", "tbnz") or m.startswith("b."):
+                        other_flow += 1
+                else:
+                    b0 = insn.bytes[0]
+                    if b0 == _CALL_X86:
+                        t = _rel_target(insn)
+                        if t in startset:
+                            calls.add(t)
+                    elif b0 in (_JMP32_X86, _JMP8_X86):
+                        t = _rel_target(insn)
+                        if t in startset and not calls and insns <= 4:
+                            tail = t     # forwarder: short, no calls, tail-jump to a known fn
+                        other_flow += 1
+                        stop = True                       # unconditional jump ends the block
+                    elif b0 in _RET_X86:
+                        ends_ret = True
+                        stop = True
+                    elif insn.mnemonic.startswith("j") or insn.mnemonic == "call":
+                        other_flow += 1   # indirect / conditional
+                if stop:
+                    break
+        except Exception:
+            pass
+        graph[s] = {"calls": calls, "tail": tail, "size": end - s, "insns": insns,
+                    "ends_ret": ends_ret, "other_flow": other_flow}
+    return graph
+
+
+def _imm(op_str: str) -> int:
+    try:
+        return int(op_str.split("#", 1)[1].split(",")[0].strip(), 0)
+    except Exception:
+        return -1
+
+
+def _rel_target(insn) -> int:
+    try:
+        # capstone x86: the branch target is the sole immediate operand
+        return int(insn.op_str, 0)
+    except Exception:
+        return -1
+
+
+def propagate(path: Path, matches: list, db=None) -> list:
+    """Extra labels derived from `matches` (the signature hits) via the call graph. Returns
+    [{va, name, via}] for functions not already in `matches`; `via` is 'thunk'/'drop-glue'."""
+    import lief
+    G = _engine()
+    b = lief.parse(str(path))
+    arch = G._arch(b)
+    text = next((s for s in b.sections if s.name == ("__text" if b.format.name == "MACHO" else ".text")), None)
+    if text is None:
+        return []
+    code, base = bytes(text.content), text.virtual_address
+    starts = sorted(a for a in G.function_starts(b) if base <= a < base + len(code))
+    graph = _call_graph(code, base, starts, arch)
+    return _propagate_from_graph(starts, graph, matches)
+
+
+def _propagate_from_graph(starts: list, graph: dict, matches: list) -> list:
+    """The pure call-graph propagation (no lief): seed from `matches`, grow thunks + drop glue."""
+    labelled = {m["va"]: m["name"] for m in matches}
+    dealloc = {va for va, nm in labelled.items() if _DEALLOC_HINT.search(nm)}
+    dropglue = {va for va, nm in labelled.items() if _DROP_HINT.search(nm)}
+    out = {}
+
+    # 1) forwarder thunks: a single tail `jmp F`, or a body that is just `call F` (+ prologue/ret)
+    for s in starts:
+        if s in labelled or s in out:
+            continue
+        g = graph.get(s) or {}
+        tgt = None
+        if g.get("tail") is not None and g["tail"] in labelled:
+            tgt = g["tail"]                                    # jmp F
+        elif (len(g.get("calls", ())) == 1 and g.get("ends_ret") and g.get("other_flow", 0) == 0
+              and g.get("size", 999) <= 48):
+            only = next(iter(g["calls"]))
+            if only in labelled:
+                tgt = only                                     # call F; ret (small forwarder)
+        if tgt is not None:
+            out[s] = {"va": s, "name": "thunk." + labelled[tgt], "via": "thunk"}
+
+    # 2) drop glue to a fixed point: a function whose every direct call goes to known drop glue /
+    #    drop_in_place / the deallocator, with at least one such call, is itself drop glue.
+    known_drop = set(dropglue)
+    changed = True
+    while changed:
+        changed = False
+        for s in starts:
+            if s in labelled or s in out or s in known_drop:
+                continue
+            g = graph.get(s) or {}
+            calls = g.get("calls", set())
+            if not calls or g.get("other_flow", 0) > 0:
+                continue
+            if all(c in known_drop or c in dropglue or c in dealloc for c in calls):
+                known_drop.add(s)
+                out[s] = {"va": s, "name": "core::ptr::drop_in_place (glue)", "via": "drop-glue"}
+                changed = True
+    return sorted(out.values(), key=lambda x: x["va"])
+
+
 def _selftest():
     # v0 demangle of real std symbols seen in a release build
     cases = {
@@ -327,7 +500,43 @@ def _selftest():
         "_RNvNtCs40k4W9msRzi_5alloc5alloc8box_free", "goldberg_cff", set())
     assert not _is_library_symbol(
         "_RNvCs8FMd1QCh2cR_12goldberg_cff4band", "goldberg_cff", set())
-    print("selftest OK: v0 paths, base62, library classification")
+
+    # --- call-graph propagation: thunks + drop glue on a hand-assembled x86-64 .text ---
+    base = 0x1000
+    # F   @0x1000: std::foo (labelled)              : nop; ret
+    # B   @0x1010: jmp F                             -> thunk.std::foo
+    # C   @0x1020: call F; ret                       -> thunk.std::foo (single-call forwarder)
+    # DP  @0x1030: core::ptr::drop_in_place (labelled): ret
+    # DA  @0x1040: __rust_dealloc (labelled)         : ret
+    # D1  @0x1050: call DP; call DA; ret             -> drop glue (two calls: drops then deallocs)
+    # D2  @0x1060: call D1; ret                      -> drop glue (fixed point: calls known glue)
+    def rel32(frm, to):  # E8/E9 rel is to-(frm+5)
+        return (to - (frm + 5)) & 0xffffffff
+    code = bytearray(0x100)
+    code[0x00:0x02] = b"\x90\xc3"                                             # F: nop; ret
+    code[0x10:0x15] = b"\xe9" + rel32(0x1010, 0x1000).to_bytes(4, "little")   # B: jmp F
+    code[0x20:0x26] = b"\xe8" + rel32(0x1020, 0x1000).to_bytes(4, "little") + b"\xc3"   # C: call F; ret
+    code[0x30:0x31] = b"\xc3"                                                 # DP: ret
+    code[0x40:0x41] = b"\xc3"                                                 # DA: ret
+    code[0x50:0x5b] = (b"\xe8" + rel32(0x1050, 0x1030).to_bytes(4, "little")  # D1: call DP; call DA; ret
+                       + b"\xe8" + rel32(0x1055, 0x1040).to_bytes(4, "little") + b"\xc3")
+    code[0x60:0x66] = b"\xe8" + rel32(0x1060, 0x1050).to_bytes(4, "little") + b"\xc3"   # D2: call D1; ret
+    starts = [0x1000, 0x1010, 0x1020, 0x1030, 0x1040, 0x1050, 0x1060]
+    graph = _call_graph(bytes(code), base, starts, "x86_64")
+    assert graph[0x1010]["tail"] == 0x1000, graph[0x1010]
+    assert graph[0x1020]["calls"] == {0x1000} and graph[0x1020]["ends_ret"], graph[0x1020]
+    assert graph[0x1050]["calls"] == {0x1030, 0x1040}, graph[0x1050]
+    assert graph[0x1060]["calls"] == {0x1050}, graph[0x1060]
+    matches = [{"va": 0x1000, "name": "std::foo", "sym": "F"},
+               {"va": 0x1030, "name": "core::ptr::drop_in_place", "sym": "DP"},
+               {"va": 0x1040, "name": "alloc::alloc::__rust_dealloc", "sym": "DA"}]
+    prop = {p["va"]: p for p in _propagate_from_graph(starts, graph, matches)}
+    assert prop[0x1010]["name"] == "thunk.std::foo" and prop[0x1010]["via"] == "thunk", prop.get(0x1010)
+    assert prop[0x1020]["name"] == "thunk.std::foo", prop.get(0x1020)
+    assert prop[0x1050]["via"] == "drop-glue" and prop[0x1060]["via"] == "drop-glue", prop
+    assert 0x1000 not in prop and 0x1030 not in prop          # already labelled, not re-emitted
+    print("selftest OK: v0 paths, base62, library classification, call-graph propagation "
+          "(2 thunks + 2 drop-glue to a fixed point)")
 
 
 def main():
@@ -353,16 +562,23 @@ def main():
                       % (tool, arch, len(lst), len({e["name"] for e in lst})))
         return
     as_json = "--json" in args
+    do_prop = "--propagate" in args
     paths = [Path(a) for a in args if not a.startswith("--")]
     if not paths:
-        sys.exit("usage: recover_libfuncs.py <binary> [--json]  |  --gen <builds...>  |  --selftest")
+        sys.exit("usage: recover_libfuncs.py <binary> [--json] [--propagate]  |  "
+                 "--gen <builds...>  |  --selftest")
     res = match_binary(paths[0])
+    prop = propagate(paths[0], res) if do_prop else []
     if as_json:
-        print(json.dumps({"file": str(paths[0]), "libfuncs": res}, indent=1))
+        print(json.dumps({"file": str(paths[0]), "libfuncs": res, "propagated": prop}, indent=1))
     else:
         print("identified %d library function(s) in %s" % (len(res), paths[0]))
         for r in sorted(res, key=lambda x: x["va"]):
             print("  0x%x  %s" % (r["va"], r["name"]))
+        if do_prop:
+            print("propagated %d more via the call graph (thunks + drop glue):" % len(prop))
+            for r in prop:
+                print("  0x%x  %s  [%s]" % (r["va"], r["name"], r["via"]))
 
 
 if __name__ == "__main__":
