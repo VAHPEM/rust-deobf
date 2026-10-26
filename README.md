@@ -670,14 +670,21 @@ python3 -m pytest tests -q                        # recall and precision, canary
 python3 scripts/eval_scatter.py                   # the scatter table above
 python3 scripts/measure_fp.py --pipeline          # false positives on real binaries
 python3 scripts/fuzz_recover.py --time 300        # robustness fuzz: malformed ELF/PE/Mach-O
+python3 scripts/redblue_loop.py --rounds 20       # RustCloak hides random strings, rust-deobf recovers
 ```
 
-The last one fuzzes rust-deobf *itself* — it mutates the committed binary fixtures and feeds the
+`fuzz_recover.py` fuzzes rust-deobf *itself* — it mutates the committed binary fixtures and feeds the
 malformed results through the whole loader/emulator path, each input isolated with an rlimit and a
 timeout, so a crafted binary that would hang or crash the analyzer in a SOC pipeline is caught as a
-finding (and saved for `--reproduce`). It found and we fixed two such hangs/OOMs; see
+finding (and saved for `--reproduce`). It found and we fixed five such hangs/OOMs; see
 [VALIDATION.md §48](VALIDATION.md). `--atheris` drives libFuzzer when the `atheris` package is
 installed; otherwise a standalone mutation driver runs.
+
+`redblue_loop.py` is the recovery-side fuzzer and the overfitting answer: each round generates a
+*random* benign Rust program that plants known indicator strings (documentation placeholders only),
+compiles it under a *random* RustCloak configuration (needs the RustCloak plugin + a matching nightly
+`rustc`), and checks rust-deobf recovers every planted string — misses are saved as regression
+fixtures. See [VALIDATION.md §49](VALIDATION.md).
 
 <details>
 <summary><b>Build details</b></summary>

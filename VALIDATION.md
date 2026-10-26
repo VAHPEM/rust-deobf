@@ -2121,3 +2121,42 @@ installed (`--atheris` wires it to libFuzzer). The rlimit/timeout isolation catc
 and hangs but a crash that only manifests under a specific real OS/libc (not the container's) still
 needs the native VM run above. And robustness is a moving target: new engine code is new crash
 surface, so the fuzzer is meant to be re-run, not run once.
+
+## 49. Round 9: a red/blue loop that generates its own held-out cases (Oct 2026)
+
+The reviews' sharpest critique was overfitting: a fixed benchmark proves recovery on *those shapes*,
+not in general. `scripts/redblue_loop.py` answers it structurally — it is a fuzzer for the recovery
+engine, the analysis-side counterpart to §48's robustness fuzzer. Each round:
+
+1. generates a *random* benign Rust program that plants known indicator-shaped strings (built only
+   from reserved documentation placeholders — RFC 5737 TEST-NET ranges, `.invalid`/`.example` TLDs,
+   synthetic tokens) in four different places: a plain print, an equality compare, a `match` arm,
+   and a branch that never runs (the hardest, exercising path exploration);
+2. compiles it under a *random* RustCloak configuration — seed × {string encryption, lazy, anti-
+   emulation, virtualization} — via nightly `rustc -Zllvm-plugins` and the RustCloak LLVM plugin;
+3. runs rust-deobf and checks every planted string was recovered. Recovery is **ground truth by
+   construction**: we planted the strings, so the exact answer is known. A miss is a real, held-out
+   gap — the binary is saved as a regression fixture and recorded, so it cannot silently reappear.
+
+**Run here, end to end.** Built `libRustCloak.so` against LLVM 18.1.3 and used
+`nightly-2024-06-15` (LLVM 18.1.7). A 5-round run (seed 3, 8 indicators each) compiled all five
+obfuscated programs and recovered **20/40** planted strings, saving three miss fixtures. The split
+is the finding: the **lazy / virtualized** builds recovered **8/8** (lazy string encryption decrypts
+each string in a per-string getter the sweep emulates; the getter *builds* the plaintext, so it is
+captured), while the **eager** `strenc` builds recovered only 1–2/8. The gap is specific and
+concrete: eager mode decrypts every string once in a global constructor, and constructor priming
+(§24) *does* restore that plaintext into the image — but the per-function sweep only reports strings
+a function **builds**, so an eagerly-decrypted string that is merely *read* (compared, matched, or
+on a dead branch) sits decrypted in memory and is never surfaced, while a printed one (whose bytes
+flow through a captured buffer) is. That is why the fixed benchmark, whose canaries print their
+strings, reads 5/5 on eager strenc yet these read-only placements do not: exactly the held-out shape
+the loop exists to find. The blue follow-up is to report indicator-shaped plaintext that priming
+produced in writable memory but no run rebuilt — weighed against the precision floor, since a
+constructor that decrypts/initialises data is also ordinary-program behaviour.
+
+**Validated.** `redblue_loop.py --selftest` (run in CI via `tests/test_selftests.py`) pins the
+generator (four placements, documentation-placeholder indicators only), the configuration space, the
+recovery diff (hit via substring / miss-by-tag / extra), and prerequisite detection — all without a
+toolchain. The loop itself needs the plugin and a matching nightly (it detects both and explains what
+is missing); its miss fixtures and JSONL report are written under `build/redblue/` (git-ignored, like
+the fuzzer's crash corpus). Re-running it on each toolchain update keeps the overfitting answer live.
