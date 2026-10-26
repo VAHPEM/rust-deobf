@@ -2160,3 +2160,32 @@ recovery diff (hit via substring / miss-by-tag / extra), and prerequisite detect
 toolchain. The loop itself needs the plugin and a matching nightly (it detects both and explains what
 is missing); its miss fixtures and JSONL report are written under `build/redblue/` (git-ignored, like
 the fuzzer's crash corpus). Re-running it on each toolchain update keeps the overfitting answer live.
+
+## 50. Round 10: Rust type-layout recovery — trait-object vtables (Oct 2026)
+
+The first "beyond strings for a decompiler" tier, and the clearest gap vs. academic Rust
+decompilers (which recover types but put obfuscation out of scope). `scripts/recover_types.py`
+recovers **trait-object vtables**: every `dyn Trait` pointer in Rust is a fat pointer (data, vtable),
+and the vtable is a fixed read-only record — `[drop_in_place, size, align, method_0, method_1, ...]`.
+Recovering it lets a decompiler resolve dynamic dispatch (which function a `dyn Trait` call reaches),
+label each vtable, and recover the concrete type's size/align and method set.
+
+**Precise by construction.** The recogniser requires the exact vtable shape — a drop pointer into
+executable code, a plausible type `size` (≤ 1 MB, a multiple of `align`), an `align` that is a power
+of two ≤ 4 KB, and at least one method pointer into code — and, crucially, scans only the data
+sections where vtables live (`.data.rel.ro`/`.rodata`/`.data`; `__const`/`__data` on Mach-O), not the
+symbol/hash/relocation tables whose pointer-shaped bytes otherwise yield absurd false "vtables". It
+reuses the emulator's relocation resolver so a PIE's vtable slots (stored as relocation addends or
+Mach-O chained fixups, 0 in the raw file) read as real addresses. Layout is position-independent, so
+one recogniser covers x86-64/AArch64 and ELF/PE/Mach-O.
+
+**Validated.** `recover_types.py --selftest` (CI via `tests/test_selftests.py`) pins the recogniser
+on a synthetic buffer: one real vtable plus decoys (a bad alignment, a size not a multiple of align,
+a run of plain pointers) are correctly accepted/rejected, a zero-sized (ZST) vtable is handled, and a
+Ghidra struct is emitted per method-count. `tests/test_types.py` runs it end to end on the committed
+`benign_rust_std.x64`: it recovers 9 structurally-sound vtables (every drop/method pointer in code,
+every size a multiple of a power-of-two align) where the un-whitelisted scan had produced 150+ false
+ones — the precision regression guard. `ghidra_annotate.py` lays each `RustVtable_<n>m` struct on its
+vtable address, comments it, and renames the method functions behind the trait (`tests/
+test_ghidra_annotate.py`, stubbed Ghidra API). Enum-discriminant and Option/Result niche-layout
+recovery from `match` jump tables is the next tier.

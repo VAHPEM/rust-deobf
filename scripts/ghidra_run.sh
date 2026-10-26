@@ -62,6 +62,21 @@ if [ -z "$JSON" ]; then
     4) echo "ghidra_run: warning: an engine failed (see the notes in the JSON); annotating what was recovered" >&2 ;;
     *) echo "ghidra_run: recover.py failed (exit $rc); nothing to annotate" >&2; exit "$rc" ;;
   esac
+  # also recover trait-object vtables and merge them into the JSON so ghidra_annotate lays the
+  # vtable structs and names the method functions behind the trait (best-effort; never fatal)
+  TYPES="$(mktemp "${TMPDIR:-/tmp}/rd-types.XXXXXX")"
+  trap 'rm -f "$JSON" "$TYPES"' EXIT
+  if python3 "$REPO/scripts/recover_types.py" "$BIN" --json > "$TYPES" 2>/dev/null; then
+    python3 - "$JSON" "$TYPES" <<'PY' || true
+import json, sys
+j, t = sys.argv[1], sys.argv[2]
+with open(j) as f: data = json.load(f)
+with open(t) as f: types = json.load(f)
+data["vtables"] = types.get("vtables", [])
+data["ghidra_types"] = types.get("ghidra_types", [])
+with open(j, "w") as f: json.dump(data, f)
+PY
+  fi
 fi
 
 # --- fresh project, import + analyze + annotate ---------------------------------------------

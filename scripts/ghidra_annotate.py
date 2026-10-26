@@ -137,6 +137,82 @@ def _fmt(s, tags):
     return "  %s%s" % (s, ("  [" + ",".join(sorted(tags)) + "]") if tags else "")
 
 
+def _build_vtable_type(ghidra_types, method_count):
+    """A StructureDataType matching recover_types' RustVtable_<n>m spec, or None if unavailable."""
+    try:
+        from ghidra.program.model.data import (StructureDataType, PointerDataType,
+                                               UnsignedLongDataType, CategoryPath)
+    except Exception:
+        return None
+    spec = next((t for t in ghidra_types if t.get("name") == "RustVtable_%dm" % method_count), None)
+    if spec is None:
+        return None
+    try:
+        st = StructureDataType(CategoryPath("/rust-deobf"), spec["name"], spec["size"])
+        ptr = PointerDataType()
+        for f in spec["fields"]:
+            dt = ptr if f["type"] == "pointer" else UnsignedLongDataType()
+            st.replaceAtOffset(f["offset"], dt, dt.getLength(), f["name"], None)
+        return currentProgram.getDataTypeManager().addDataType(st, None)
+    except Exception as e:
+        print("vtable type build failed (%s): %s" % (spec["name"], e))
+        return None
+
+
+def _apply_vtables(data):
+    """Recovered trait-object vtables (recover_types): comment + bookmark each vtable, name its
+    method functions (still-default FUN_/SUB_ only), and best-effort lay a RustVtable_<n>m struct on
+    it. Observational like the rest; any step that cannot apply is skipped, never fatal."""
+    vtables = data.get("vtables") or []
+    if not vtables:
+        return
+    from ghidra.program.model.listing import CodeUnit
+    listing = currentProgram.getListing()
+    btm = currentProgram.getBookmarkManager()
+    fm = currentProgram.getFunctionManager()
+    ghidra_types = data.get("ghidra_types") or []
+    applied = named = 0
+    for vt in vtables:
+        a = _resolve_addr(vt.get("va"))
+        if a is None:
+            continue
+        mc = vt.get("method_count", len(vt.get("methods") or []))
+        plate = ("rust-deobf: dyn Trait vtable\n  size=%s align=%s  %d method(s)"
+                 % (vt.get("size"), vt.get("align"), mc))
+        try:
+            listing.setComment(a, CodeUnit.PLATE_COMMENT, plate)
+            btm.setBookmark(a, "Analysis", "rust-deobf",
+                            "vtable: size=%s align=%s %dm" % (vt.get("size"), vt.get("align"), mc))
+            applied += 1
+        except Exception as e:
+            print("vtable comment failed at %s: %s" % (a, e))
+        dt = _build_vtable_type(ghidra_types, mc)
+        if dt is not None:
+            try:
+                end = a.add(dt.getLength() - 1)
+                listing.clearCodeUnits(a, end, False)
+                listing.createData(a, dt)
+            except Exception:
+                pass                    # undefined/conflicting bytes: keep the comment, skip the type
+        # name the concrete type's methods behind the trait
+        for idx, m in enumerate(vt.get("methods") or []):
+            r = _resolve(m)
+            if r is None:
+                continue
+            entry, func = r
+            if func is None:
+                continue
+            nm = func.getName()
+            if nm.startswith("FUN_") or nm.startswith("SUB_"):
+                try:
+                    func.setName("rd_vtmethod_%x_%d" % (_va(vt.get("va")) or 0, idx),
+                                 SourceType.ANALYSIS)
+                    named += 1
+                except Exception:
+                    pass
+    print("ghidra_annotate: vtables annotated %d, vtable methods named %d" % (applied, named))
+
+
 def main():
     data = _load()
     if not data:
@@ -220,6 +296,9 @@ def main():
         listing.setComment(a, CodeUnit.PRE_COMMENT, "rust-deobf decodes: " + " | ".join(lines))
     print("ghidra_annotate: annotated %d function(s), %d call site(s), renamed %d, library fns named %d"
           % (annotated, len(sites), renamed, lib_renamed))
+
+    # recovered trait-object vtables (recover_types, merged into the JSON by ghidra_run.sh)
+    _apply_vtables(data)
 
 
 main()

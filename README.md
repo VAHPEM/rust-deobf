@@ -205,7 +205,9 @@ python3 scripts/recover.py samples/ --jsonl triage.jsonl          # a whole dire
 python3 scripts/recover_libfuncs.py --gen build/*release*nostrip   # build the DB once per toolchain
 python3 scripts/recover_libfuncs.py path/to/binary                 # identify; --json for records
 python3 scripts/recover_libfuncs.py path/to/binary --propagate     # + call-graph thunks & drop-glue
-# push strings + library names into Ghidra (headless, PyGhidra):
+# recover Rust trait-object vtables (dyn Trait dispatch) as Ghidra data types:
+python3 scripts/recover_types.py path/to/binary                    # --json for records
+# push strings + library names + vtables into Ghidra (headless, PyGhidra):
 scripts/ghidra_run.sh path/to/binary
 
 # AI-assisted read over the recovered facts only (local model, API, or --offline):
