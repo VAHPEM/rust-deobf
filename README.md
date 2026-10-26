@@ -124,7 +124,8 @@ crypto-clipper config, staging paths. [More below](#-real-malware).
 - **Beyond strings** — config/C2 extraction, hash-obfuscated API-import resolution, unpacked
   stage-2 carving, control-flow-flattening detection **and reconstruction** (x86-64 and AArch64,
   validated on goldberg, OLLVM `-fla` and a real LLVM-18 flattening pass), MBA / opaque-predicate
-  simplification with Z3.
+  simplification with Z3, Rust trait-object vtable recovery (`recover_types.py`), and
+  optimization-reversal (jump-table un-switching, unrolled-loop detection — `premium/opt_reverse.py`).
 - **Code virtualization** — `detect_vm.py` flags VMProtect/Themida/Tigress-style bytecode VMs; the
   premium devirtualizer lifts them back. From a VM with **randomized opcodes and encrypted
   operands**, it reconstructs:

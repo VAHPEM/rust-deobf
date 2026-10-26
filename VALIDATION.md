@@ -2189,3 +2189,31 @@ ones — the precision regression guard. `ghidra_annotate.py` lays each `RustVta
 vtable address, comments it, and renames the method functions behind the trait (`tests/
 test_ghidra_annotate.py`, stubbed Ghidra API). Enum-discriminant and Option/Result niche-layout
 recovery from `match` jump tables is the next tier.
+
+## 51. Round 11: reversing optimizations before structuring (premium) (Oct 2026)
+
+Oxidizer (IEEE S&P 2026) calls "revert optimizations before structuring" decompilation's #1 open
+problem. `premium/opt_reverse.py` is a reusable pass for the two optimizations that most garble
+recovered control flow, both mechanical to undo:
+
+* **Un-switch jump tables.** A `match`/`switch` lowers to an indirect jump through an offset table;
+  the case→target structure is implicit. `recover_jump_tables()` matches the LLVM rel32 idiom
+  (`lea B,[rip+d]; movsxd R,[B+idx*4]; add R,B; jmp R`), takes the arm count from the preceding
+  `cmp idx, K` bound, and reads the table back to an explicit `{index: target}` map. The bound is
+  **required**: without it the table length is unknown and reading until an entry leaves `.text`
+  over-reads into adjacent code-pointing data (observed as 700-case phantom tables), so a bounded
+  exact recovery is kept over a guessed one — precision over recall, as everywhere in this project.
+  x86-64 and 32-bit x86; AArch64 (adr/ldrsw/add/br) is the next tier. Reusable by the deflattener's
+  relooper and the VM devirtualizer (both dispatch through jump tables) and by any downstream
+  decompiler.
+* **Detect unrolled loops.** `-O2` unrolls a small loop into N identical body copies. `detect_unrolled
+  _loops()` finds the repeated-body run by instruction-mnemonic shape plus a constant stride (so it
+  is not fooled by the immediates the copies differ in) and reports the stride/count a re-roller
+  needs. Detection only; lifting the copies back to one loop body is the next tier.
+
+**Validated.** `opt_reverse.py --selftest` recovers a hand-assembled 3-case rel32 switch to its exact
+`{index: target}` map, rejects a plain instruction stream, and detects a 4×-unrolled body with the
+right stride/count. `tests/test_opt_reverse.py` also compiles a real dense `match` with rustc (skips
+without it) and checks the 8-arm switch is recovered to eight bounded cases whose targets all land in
+`.text`, and pins the sub-register canonicalisation (`cmp edi` bounds an index `rdi`). On a real
+optimized Rust binary it recovers 52 bounded jump tables, no phantom over-reads.
