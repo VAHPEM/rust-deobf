@@ -2660,23 +2660,35 @@ def _drop_overlap_artifacts(records):
     alive -= scrambled
     keep = [r for r in keep if r["string"] in alive]
 
-    # A string contained in another surviving string is dropped only when it is a VIEW of the same
-    # buffer -- a half-decoded prefix or a stale piece -- not when it is an indicator the code built
-    # and used in its own right. Dropping every substring unconditionally lost real separate
-    # indicators: a C2 host `c2.northwind.example` next to the full URL `https://c2.northwind.
-    # example/api/beacon`, `Global\NW-mutex` next to `Local\Global\NW-mutex-2`. Keep it when the code
-    # used it at its own length, when it was captured exact, or when it was seen at a buffer address
-    # the container was not (two buffers that merely share text).
-    def _is_contained_view(s, o):
-        if s in used or s in exact:
-            return False                   # independent evidence the code used s at this length
-        if diff_buffer(s, o):
-            return False                   # different buffers that only share this text
-        return True
+    # A string contained in another surviving string is dropped by default -- it is almost always a
+    # VIEW of the same decode (a half-decoded prefix, a stale piece, a mid-string fragment from a
+    # forced path). The one exception, so a real indicator that happens to sit inside a longer one is
+    # not lost (a C2 host `c2.northwind.example` inside the full URL, `Global\NW-mutex` inside
+    # `Local\Global\NW-mutex-2`): keep it only when it is clearly a SEPARATE indicator, i.e. all of
+    #   - decoded by a different function than every string that contains it (not a progressive
+    #     decode, which is captured `used` at disjoint scratch addresses by one decoder), AND
+    #   - the code used it at its own length (`used`/`exact`), AND
+    #   - it carries a strong indicator tag (url/domain/ip/registry/mutex/email/token) -- which a
+    #     junk fragment like `hema-ver` does not, so precision on the benchmark is preserved.
+    from recover_callsite import ioc_tags as _ioc_tags
+    _STRONG = {"url", "domain", "ip", "registry", "mutex", "email", "token"}
 
-    return [r for r in keep
-            if not any(o != r["string"] and r["string"] in o and _is_contained_view(r["string"], o)
-                       for o in alive)]
+    def _is_separate_indicator(s, containers):
+        fs = funcs.get(s)
+        if not (fs and (s in used or s in exact)):
+            return False
+        if not all(funcs.get(o) and fs.isdisjoint(funcs.get(o)) for o in containers):
+            return False
+        return bool(_STRONG.intersection(_ioc_tags(s)))
+
+    out = []
+    for r in keep:
+        s = r["string"]
+        containers = [o for o in alive if o != s and s in o]
+        if containers and not _is_separate_indicator(s, containers):
+            continue
+        out.append(r)
+    return out
 
 
 def _static_share(b, file_bytes, min_piece=4):

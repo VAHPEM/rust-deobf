@@ -106,3 +106,19 @@ def test_primed_heap_block_survives_reset():
     emu._reset()
     ptr = struct.unpack("<Q", emu.uc.mem_read(R.BASE + G.sym_va(b, g), 8))[0]
     assert bytes(emu.uc.mem_read(ptr, 8)) == b"KKKKKKKK"
+
+
+def test_dedup_keeps_cross_function_indicators_drops_same_function_views():
+    # a substring from a DIFFERENT function than its container is a separate indicator (keep); a
+    # half-decoded prefix from the SAME decoder is a view (drop), even though both are 'used'
+    recs = [
+        {"string": "https://c2.northwind.example/api/beacon", "function": 0xf100, "used": True},
+        {"string": "c2.northwind.example", "function": 0xf200, "used": True},
+        {"string": "C:\\ProgramData\\NorthwindSvc\\state.db", "function": 0x16a0, "used": True},
+        {"string": "C:\\Progra", "function": 0x16a0, "used": True},
+    ]
+    out = {r["string"] for r in R._drop_overlap_artifacts(recs)}
+    assert "c2.northwind.example" in out                 # separate indicator, different function
+    assert "C:\\Progra" not in out                       # half-decoded view, same function
+    assert "https://c2.northwind.example/api/beacon" in out
+    assert "C:\\ProgramData\\NorthwindSvc\\state.db" in out
