@@ -2345,3 +2345,18 @@ a clean stream has none. `tests/test_antianalysis.py` checks provenance on the c
 (PIE/stripped/NX, Rust 1.97.0), that it shows no evasion, and -- with clang -- that a program using
 `cpuid`+`__rdtsc` is flagged `cpuid probe` + `timing-check`. The direct-syscall flag is gated on
 dynamic linking so static-musl Rust binaries are not false-flagged.
+
+## 59. Round 19: AArch64 jump-table recovery (opt_reverse parity) (Oct 2026)
+
+Round 11's jump-table un-switch was x86 only. `opt_reverse.recover_jump_tables_arm64` adds the
+AArch64 rel32 idiom: `cmp idx,#K; b.hi default; adr Xtbl,<table>; adr Xanchor,<anchor>;
+ldrsw Xt,[Xtbl,idx,lsl #2]; add Xdst,Xanchor,Xt; br Xdst`, where the table holds 32-bit offsets
+from the anchor (capstone resolves each `adr` immediate to an absolute address). As on x86 the arm
+count comes from the `cmp` bound, which is required, so a bounded exact `{index: target}` map is
+recovered rather than a guessed one.
+
+**Validated.** `--selftest` pins the AArch64 operand parsers. `tests/test_opt_reverse.py` cross-
+compiles a real 20-arm `match` for `aarch64-unknown-linux-musl` (skipped if the target is not
+installed) and checks it recovers one table of exactly 20 bounded cases whose targets all land in
+`.text` -- no phantom over-reads. AArch64 VM-detection remains the next tier (it structurally
+overlaps control-flow flattening, so the intended path is deflatten-then-detect).

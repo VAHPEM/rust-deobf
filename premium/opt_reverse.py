@@ -15,8 +15,8 @@ mechanical to undo:
 
 This is a reusable analysis, not tied to one engine: the deflattener's relooper and the VM
 devirtualizer both dispatch through jump tables, and so does ordinary optimized code a decompiler
-reads. x86-64 and 32-bit x86 (the LLVM `lea table; movsxd [table+idx*4]; add; jmp` rel32 idiom);
-AArch64 (adr/ldrsw/add/br) is the next tier.
+reads. x86-64 and 32-bit x86 (the LLVM `lea table; movsxd [table+idx*4]; add; jmp` rel32 idiom) and
+AArch64 (`adr table; adr anchor; ldrsw [table+idx*4]; add; br`).
 
     python3 premium/opt_reverse.py path/to/binary            # list recovered jump tables
     python3 premium/opt_reverse.py path/to/binary --loops    # + unrolled-loop runs
@@ -130,6 +130,75 @@ def recover_jump_tables(code: bytes, base: int, arch: str, read_i32, text_lo: in
     return out
 
 
+import re as _re
+_A64_LDRSW = _re.compile(r"^(\w+), \[(\w+), (\w+), lsl #2\]$")
+_A64_ADD = _re.compile(r"^(\w+), (\w+), (\w+)$")
+_A64_IMM = _re.compile(r"^(\w+), #(0x[0-9a-f]+|\d+)$")
+
+
+def recover_jump_tables_arm64(code, base, read_i32, text_lo, text_hi):
+    """AArch64 rel32 jump tables. LLVM lowers a dense `match`/`switch` to:
+        cmp  idx, #K ; b.hi default
+        adr  Xtbl, <table>            ; table base (an array of rel32 offsets)
+        adr  Xanchor, <anchor>        ; the base the offsets are added to
+        ldrsw Xt, [Xtbl, idx, lsl #2]
+        add  Xdst, Xanchor, Xt        ; target = anchor + table[idx]
+        br   Xdst
+    recovered to {index: target}. capstone resolves each `adr` immediate to an absolute address."""
+    from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    insns = list(md.disasm(code, base))
+    out = []
+    for i, br in enumerate(insns):
+        if br.mnemonic != "br":
+            continue
+        dst = br.op_str.strip()
+        win = insns[max(0, i - 10):i]
+        regs = {}                       # reg -> adr-resolved absolute address seen in the window
+        for w in win:
+            if w.mnemonic == "adr":
+                m = _A64_IMM.match(w.op_str)
+                if m:
+                    regs[m.group(1)] = int(m.group(2), 0)
+        add_a = add_t = tbl_reg = idx_reg = None
+        for w in reversed(win):
+            if add_a is None and w.mnemonic == "add":
+                m = _A64_ADD.match(w.op_str)
+                if m and m.group(1) == dst:
+                    add_a, add_t = m.group(2), m.group(3)
+            elif add_t is not None and tbl_reg is None and w.mnemonic in ("ldrsw", "ldr"):
+                m = _A64_LDRSW.match(w.op_str)
+                if m and m.group(1) == add_t:
+                    tbl_reg, idx_reg = m.group(2), m.group(3)
+        if tbl_reg is None or add_a is None:
+            continue
+        table_va, anchor = regs.get(tbl_reg), regs.get(add_a)
+        if table_va is None or anchor is None:
+            continue
+        count = None
+        for w in reversed(win):
+            if w.mnemonic in ("cmp", "subs") and idx_reg:
+                m = _A64_IMM.match(w.op_str)
+                if m and m.group(1) == idx_reg:
+                    count = int(m.group(2), 0) + 1
+                    break
+        if count is None or not (0 < count <= _MAX_CASES):
+            continue
+        cases = {}
+        for k in range(count):
+            entry = read_i32(table_va + 4 * k)
+            if entry is None:
+                break
+            target = (anchor + entry) & ((1 << 64) - 1)
+            if not (text_lo <= target < text_hi):
+                break
+            cases[k] = target
+        if len(cases) == count:
+            out.append({"br_va": br.address, "table_va": table_va, "anchor": anchor,
+                        "index_reg": idx_reg, "count": count, "default": None, "cases": cases})
+    return out
+
+
 def detect_unrolled_loops(code: bytes, base: int, arch: str, min_repeat: int = 3):
     """Find runs of >= min_repeat consecutive instruction blocks with an identical instruction-
     mnemonic shape and a constant byte stride: the fingerprint of an `-O2`-unrolled loop body. Returns
@@ -180,10 +249,7 @@ def analyze(path) -> dict:
     emulator's Image (so a PIE's table is read correctly)."""
     import recover_emulate
     img = recover_emulate.Image(path)
-    arch = "x86" if img.x32 else "x86_64"
-    if img.arm:
-        return {"arch": "aarch64", "jump_tables": [], "unrolled_loops": [],
-                "note": "AArch64 jump-table recovery is the next tier"}
+    arch = "aarch64" if img.arm else ("x86" if img.x32 else "x86_64")
     data = {s.virtual_address: bytes(s.content) for s in img.binary.sections
             if s.virtual_address and not img._exec_sec(s)}
     data_sorted = sorted(data.items())
@@ -195,7 +261,10 @@ def analyze(path) -> dict:
                 return struct.unpack_from("<i", raw, o)[0]
         return None
 
-    jts = recover_jump_tables(img.code, img.text_va, arch, read_i32, img.text_va, img.text_end)
+    if img.arm:
+        jts = recover_jump_tables_arm64(img.code, img.text_va, read_i32, img.text_va, img.text_end)
+    else:
+        jts = recover_jump_tables(img.code, img.text_va, arch, read_i32, img.text_va, img.text_end)
     loops = detect_unrolled_loops(img.code, img.text_va, arch)
     return {"arch": arch, "jump_tables": jts, "unrolled_loops": loops}
 
@@ -269,8 +338,14 @@ def _selftest():
     # a non-repeating stream has no unrolled loop
     assert detect_unrolled_loops(b"\x90\x48\xff\xc0\x5d\xc3", base, "x86_64") == []
 
+    # AArch64 idiom operand parsers
+    assert _A64_LDRSW.match("x10, [x8, x0, lsl #2]").groups() == ("x10", "x8", "x0")
+    assert _A64_ADD.match("x9, x9, x10").groups() == ("x9", "x9", "x10")
+    assert _A64_IMM.match("x8, #0x200240").groups() == ("x8", "0x200240")
+    assert _A64_IMM.match("x0, #0x13").group(2) == "0x13"
+
     print("selftest OK: rel32 jump-table recovery (3-case switch -> {index: target}), rejects a "
-          "plain stream, and unrolled-loop detection (4x body, stride/count)")
+          "plain stream, unrolled-loop detection (4x body), and AArch64 idiom operand parsing")
 
 
 def main(argv=None) -> int:

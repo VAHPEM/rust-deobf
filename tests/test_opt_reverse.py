@@ -30,6 +30,42 @@ def test_canonical_subregisters():
     assert O._canon("rax") == "rax"
 
 
+def _aarch64_target():
+    try:
+        out = subprocess.check_output(["rustup", "target", "list", "--installed"], text=True)
+        return "aarch64-unknown-linux-musl" in out
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not (shutil.which("rustc") and _aarch64_target()),
+                    reason="aarch64-unknown-linux-musl target not installed")
+def test_real_arm64_jump_table(tmp_path):
+    src = tmp_path / "a.rs"
+    src.write_text(
+        "use std::hint::black_box;\n"
+        "#[inline(never)] pub fn d(n:u64)->u64{ match n {\n"
+        + "".join(f"    {i} => black_box({10 + i}u64),\n" for i in range(20))
+        + "    _ => black_box(999),\n} }\n"
+        "fn main(){ println!(\"{}\", d(black_box(3))); }\n")
+    binp = tmp_path / "a"
+    r = subprocess.run(["rustc", "-O", "--target", "aarch64-unknown-linux-musl",
+                        "-C", "linker=rust-lld", "-C", "link-self-contained=yes",
+                        str(src), "-o", str(binp)], capture_output=True, text=True)
+    if r.returncode != 0 or not binp.exists():
+        pytest.skip("aarch64 build failed: " + r.stderr.strip()[-200:])
+    res = O.analyze(binp)
+    assert res["arch"] == "aarch64"
+    twenty = [jt for jt in res["jump_tables"] if jt["count"] == 20]
+    assert twenty, [jt["count"] for jt in res["jump_tables"]]
+    import recover_emulate as E
+    img = E.Image(str(binp))
+    for jt in twenty:
+        assert set(jt["cases"]) == set(range(20))
+        for t in jt["cases"].values():
+            assert img.text_va <= t < img.text_end
+
+
 @pytest.mark.skipif(not shutil.which("rustc"), reason="rustc not available")
 def test_real_match_jump_table(tmp_path):
     src = tmp_path / "m.rs"
