@@ -2360,3 +2360,24 @@ compiles a real 20-arm `match` for `aarch64-unknown-linux-musl` (skipped if the 
 installed) and checks it recovers one table of exactly 20 bounded cases whose targets all land in
 `.text` -- no phantom over-reads. AArch64 VM-detection remains the next tier (it structurally
 overlaps control-flow flattening, so the intended path is deflatten-then-detect).
+
+## 60. Round 20: opaque-predicate detection in ordinary functions (premium) (Oct 2026)
+
+deobf_expr proves MBA/opaque facts over expressions; the VM lifter already feeds it lifted ones.
+`premium/deobf_opaque.py` brings that to *ordinary* machine code: it symbolically executes a single
+straight-line basic block (registers only, a strict integer subset), builds a z3 expression for the
+terminating conditional branch's condition, and asks z3 whether it is constant for all inputs -- an
+opaque predicate guarding a bogus/dead branch (RustCloak `bogus`, OLLVM opaque predicates), which a
+decompiler can prune.
+
+**Sound by construction.** The symbolic executor models only an exactly-known integer instruction
+set and ABANDONS the block on anything else (a memory access, a call, an unmodelled mnemonic), so it
+never lifts a wrong expression and then "proves" a false opaque claim -- it understands the whole
+block or says nothing. z3 then decides always-true / always-false / input-dependent; only the first
+two are reported, with the dead direction.
+
+**Validated.** `--selftest` and `tests/test_opaque.py` pin, on hand-assembled blocks: `(x|1)!=0` ->
+always-taken (dead fall-through), `(x&0)==1` -> never-taken, a genuine input-dependent `cmp x,5; jb`
+-> not flagged, and a memory-touching block -> abandoned (no unsound claim). Precision on the
+committed `benign_rust_std.x64`: **0** opaque branches across 524 functions (normal code has real
+branches). x86-64/x86; memory + cross-block lifting and AArch64 are the next tier.
