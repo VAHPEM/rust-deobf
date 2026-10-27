@@ -2217,3 +2217,21 @@ right stride/count. `tests/test_opt_reverse.py` also compiles a real dense `matc
 without it) and checks the 8-arm switch is recovered to eight bounded cases whose targets all land in
 `.text`, and pins the sub-register canonicalisation (`cmp edi` bounds an index `rdi`). On a real
 optimized Rust binary it recovers 52 bounded jump tables, no phantom over-reads.
+
+## 52. Round 12: crypto-primitive identification (Oct 2026)
+
+Malware that encrypts its config/C2/payload embeds the cipher's constants, and those constants are
+universal -- identical bytes in every implementation, any language or compiler. `scripts/recover_
+crypto.py` recognises them to name the algorithm in a stripped binary: the Rijndael S-boxes, the
+ChaCha/Salsa `expand 32-byte k` sigma and the Base64 alphabet as exact byte sequences; SHA-1/256/512,
+MD5, CRC32 and BLAKE2b by their round/init constant sets (scanned as little-endian words, flagged
+only above a per-algorithm threshold so a stray constant is not a hit). Language-agnostic, so it
+covers hand-rolled crypto, a C crypto lib linked via FFI, or a Go binary -- complementing the
+Rust-specific `recover_cryptify`/`muddy` which already name and key those two crates.
+
+**Validated.** `--selftest` identifies AES/ChaCha/SHA-256/MD5/CRC32/Base64 from constants salted into
+random noise, confirms random noise stays clean, and that a below-threshold constant set is not
+flagged. `tests/test_crypto.py` pins `scan()` and, where a system crypto library is present, detects
+a real binary's primitives (libcrypto -> AES + SHA; git -> SHA-1/256 + MD5; thin wrappers like the
+`openssl` CLI correctly empty, since they dlopen libcrypto). Key/IV extraction ties into the existing
+decoder-recovery tiers and is not attempted here.
