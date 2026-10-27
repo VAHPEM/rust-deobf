@@ -141,6 +141,23 @@ pytest.
   `.example` hosts. No C2-style strings, no offensive-API enumerations.
 - **VALIDATION.md** uses numbered round sections; append the next `§N` rather than editing old ones.
 
+## Maintenance: a new rustc release does NOT mean a rewrite
+Rust ships a stable release every 6 weeks, but that is a *release* cadence, not an *architecture*
+change — most releases touch nothing this tool keys on. Do **not** update on a calendar. What is
+stable across releases: symbol mangling v0, the two-layer design, the emulation/dataflow/CFG engine,
+and binary-format parsing. What occasionally drifts (driven by LLVM upgrades, every few releases, not
+every one): codegen *idioms* — jump-table shape, stack-string construction, inlining — which can cost
+recall only in the pattern-based recoverers. The emulation path (`recover_emulate`) runs the code, so
+it survives idiom drift and backs up the brittle pattern matchers.
+- **Trust the weekly CI drift detector, act on a red signal.** The `benchmark` job runs on a weekly
+  `schedule` (`cron: "17 4 * * 1"` in `ci.yml`), does `rustup update stable`, rebuilds the benchmark
+  with *current* stable, and measures recall/precision. Green = nothing to do. Red = one engine
+  likely lost recall; patch that engine and add a `§N` round to `VALIDATION.md`. You rarely touch
+  emulation.
+- **The only periodic *data* refresh** (not code): re-run `gen_rust_versions.py` to extend the rustc
+  commit→release table `recover_rust_meta` uses for version attribution. It affects version *dating*,
+  not recovery.
+
 ## Git
 Work on branch `claude/quirky-fermi-kcvuaa`. Commit messages end with the attribution footer this
 session is configured to use. Don't add a model identifier to commits or any pushed artifact.
