@@ -206,6 +206,7 @@ def build(path) -> dict:
         "reachable_from_entry_only": len(base_reach),
         "coverage_lift": len(reachable) - len(base_reach),
         "_edges": edges, "_roots": roots, "_reachable": reachable, "_starts": starts,
+        "_import_sites": import_sites, "_indirect": indirect,
     }
 
 

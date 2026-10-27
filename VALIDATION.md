@@ -2255,3 +2255,20 @@ goes through `__libc_start_main` indirectly). `tests/test_cfg.py` pins this and,
 `dyn Trait` program and checks the dispatch edges and the coverage lift; `--selftest` pins the BFS /
 lift / dispatch-reach accounting. x86-64 and 32-bit x86 (direct + rip-relative address-taken +
 dispatch); AArch64 resolves direct `bl` edges, adrp/add address-taken is the next tier.
+
+## 54. Round 14: per-function behavior/capability map (Oct 2026)
+
+soc_triage's capability fingerprint is crate-level ("links reqwest"). `scripts/recover_behavior.py`
+moves it to function-level: reading the resolved call graph (recover_cfg), it tags each function by
+the imports it directly calls, grouped into the standard analyst/capa buckets (network, file,
+registry, process, memory, recon, crypto, sync). The result is an ATT&CK-shaped map to pivot on --
+jump to the function that networks -- plus a binary-level rollup. Direct attribution (not transitive
+closure, which blurs into `main`); a Rust std wrapper calling the import is the honest location, with
+xrefs leading to the caller.
+
+**Validated.** `--selftest` pins the import->bucket classifier and a stubbed rollup. `tests/
+test_behavior.py` checks the committed benign std binary is tagged file/memory/recon but **not
+network** (correct -- it does not network), and, with rustc, that a program which opens a TCP socket
+and reads a file is tagged **network + file** with the network tag landing on specific functions that
+carry a networking import. Covers resolved imports (libc / named dynamic); syscall-level attribution
+for static-musl builds is the next tier.
