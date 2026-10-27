@@ -95,6 +95,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_dynamic.py` / `recover_artifacts.py` | Frida runtime memory-diff recovery |
 | `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals (dynamic, runs the sample) |
 | `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub, carve write-then-executed stage-2 (no host execution; `--entry` to aim at the unpack routine) |
+| `unpack.py` | Tier 2: one unpacking command — static (unpack_emulate) first + PE-stage carve; dynamic (dump_unpacked/Frida) only as opt-in fallback behind `--i-understand-this-executes`. Nothing runs a sample by default. |
 
 ### scripts/ — Rust & Go tiers
 | Script | Role |
