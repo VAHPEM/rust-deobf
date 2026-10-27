@@ -86,6 +86,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_callsite.py` / `recover_arm64.py` | call-site dataflow string recovery (x64 / ARM64) |
 | `recover_stackstrings.py` | stack-constructed strings (x64 + ARM64) |
 | `recover_apihash.py` | resolve hash-obfuscated API imports (Tier 2) |
+| `recover_imports.py` | PE import reconstruction: IAT map + bind indirect call sites to API names; flag runtime resolution (post-unpack) |
 | `recover_crypto.py` | identify crypto primitives by their constants |
 | `recover_cfg.py` | resolved call graph + code-coverage metric (`_import_sites`/`_indirect`) |
 | `recover_behavior.py` | per-function behavior/capability map from imports |
