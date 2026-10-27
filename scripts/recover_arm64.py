@@ -311,13 +311,23 @@ def recover(path, canaries):
 
 
 def main():
+    import json
     can = [f"canary::{w}" for w in ("alpha", "bravo", "charlie", "delta", "echo")]
-    for t in sys.argv[1:]:
+    as_json = "--json" in sys.argv
+    targets = [a for a in sys.argv[1:] if a != "--json"]
+    results = []
+    for t in targets:
         r = recover(t, can)
+        r["target"] = str(t)
+        results.append(r)
+        if as_json:
+            continue
         print(f"{Path(t).name:<30} recall {r['recall']}/{r['n']}  decoders={r.get('decoders')}"
               + ("  ERR " + r['error'] if r.get('error') else ""))
         for s in r.get("recovered", []):
             print("   +", s)
+    if as_json:
+        print(json.dumps(results[0] if len(results) == 1 else results, indent=2))
 
 
 if __name__ == "__main__":

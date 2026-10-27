@@ -66,6 +66,12 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 
 ### Conventions (how everything is wired)
 - Each analysis script is **standalone**, importable, and has a `--selftest` that needs no binary.
+- **`--json` output contract:** every script with a `recover()`/`analyze()` entry point takes
+  `--json` and prints the result dict as JSON (multi-target harnesses print a JSON list, or the lone
+  dict for a single target), suppressing the human-readable output. Prefer `script --json <bin>` over
+  the prose form when an agent or the MCP server consumes the result — verbose stdout is a quiet
+  per-run token sink. Enforced by `tests/test_docs_current.py` (exceptions justified in
+  `_NO_JSON_OK`: `fuzz_recover`, `redblue_loop`, `mcp_server`, `dump_unpacked`).
 - `tests/test_selftests.py` auto-runs `--selftest` for **every `scripts/*.py`** (NOT `premium/`).
   A new `scripts/` tool with a `--selftest` is picked up automatically — no test wiring needed.
 - **`premium/` scripts are not auto-tested** — each needs its own `tests/test_*.py`.

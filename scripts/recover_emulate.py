@@ -3208,18 +3208,26 @@ def main():
     if "--selftest" in sys.argv:
         _selftest()
         return
+    as_json = "--json" in sys.argv
     man = json.loads((ROOT / "bench_src" / "manifest.json").read_text())
     can = man["canaries"]
-    targets = sys.argv[1:] or ["build/obfstr__elf__release__nostrip"]
+    targets = [a for a in sys.argv[1:] if a != "--json"] or ["build/obfstr__elf__release__nostrip"]
+    results = []
     for t in targets:
         p = Path(t) if Path(t).exists() else ROOT / t
         t0 = time.monotonic()
         r = recover(p, can, time_budget=120)
+        r["target"] = str(p)
+        results.append(r)
+        if as_json:
+            continue
         print(f"{p.name:<46} recall {r['recall']}/{r['n']}  funcs={r.get('functions_tried')}/"
               f"{r.get('functions_total')} runs={r.get('runs')}  {time.monotonic() - t0:.1f}s"
               + ("  ERR " + r['error'] if r.get('error') else ""))
         for s in r.get("recovered_texts", []):
             print("     +", s)
+    if as_json:
+        print(json.dumps(results[0] if len(results) == 1 else results, indent=2))
 
 
 if __name__ == "__main__":

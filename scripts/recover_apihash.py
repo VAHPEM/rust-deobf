@@ -220,6 +220,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("binary", nargs="?")
     ap.add_argument("--names", nargs="*", default=[], help="export-name list files")
+    ap.add_argument("--json", action="store_true", help="print the result dict as JSON")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -235,6 +236,9 @@ def main():
                     names.append(tok)
     names = sorted(set(names))
     r = recover(Path(a.binary), names)
+    if a.json:
+        import json
+        print(json.dumps(r, indent=2)); return
     print(f"{Path(a.binary).name}: {r['constants_scanned']} candidate constants vs "
           f"{r['corpus']}-name corpus")
     if not r["resolved"]:

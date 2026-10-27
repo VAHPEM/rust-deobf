@@ -204,6 +204,7 @@ def main(argv=None):
     ap.add_argument("--argv", nargs=argparse.REMAINDER, default=[], help="args to pass to the target")
     ap.add_argument("--min-len", type=int, default=8)
     ap.add_argument("--timeout", type=float, default=8.0)
+    ap.add_argument("--json", action="store_true", help="print the result as JSON")
     args = ap.parse_args(argv)
 
     path = Path(args.binary)
@@ -249,6 +250,16 @@ def main(argv=None):
     cand = [s for s in decoded
             if looks_like_text(s.encode("latin-1", "ignore")) and not is_tool_noise(s)]
     scored = sorted(((english_score(s), s) for s in cand), reverse=True)
+    if args.json:
+        import json
+        print(json.dumps({
+            "binary": str(path),
+            "static_strings": len(static),
+            "runtime_strings": len(runtime),
+            "runtime_only": len(decoded),
+            "recovered": [{"score": round(sc, 2), "string": s} for sc, s in scored],
+        }, indent=2))
+        return
     print(f"static strings: {len(static)}   runtime strings: {len(runtime)}   "
           f"runtime-only: {len(decoded)}   text-like: {len(scored)}")
     print("recovered strings (ranked; decoded secrets rank highest):")

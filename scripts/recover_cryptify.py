@@ -161,19 +161,28 @@ def main():
     import json
     if "--selftest" in sys.argv:
         _selftest(); return
-    if len(sys.argv) < 2:
+    as_json = "--json" in sys.argv
+    targets = [a for a in sys.argv[1:] if a != "--json"]
+    if not targets:
         sys.exit(__doc__)
     root = Path(__file__).resolve().parent.parent
     try:
         can = json.loads((root / "bench_src" / "manifest.json").read_text())["canaries"]
     except (OSError, ValueError, KeyError):
         can = []
-    for t in sys.argv[1:]:
+    results = []
+    for t in targets:
         r = recover(t, can)
+        r["target"] = str(t)
+        results.append(r)
+        if as_json:
+            continue
         print(f"{Path(t).name:<45} cryptify={r['cryptify']}  recall {r['recall']}/{r['n']}"
               + (f"  ({r['note']})" if r["note"] else ""))
         for s in r["recovered_texts"]:
             print("     +", s)
+    if as_json:
+        print(json.dumps(results[0] if len(results) == 1 else results, indent=2))
 
 
 if __name__ == "__main__":

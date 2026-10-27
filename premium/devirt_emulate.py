@@ -872,8 +872,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("binary")
     ap.add_argument("func_va", help="virtualized function VA, e.g. 0x1650")
+    ap.add_argument("--json", action="store_true", help="print the result dict as JSON")
     a = ap.parse_args(argv)
     r = recover(Path(a.binary), int(a.func_va, 0))
+    if a.json:
+        import json
+        print(json.dumps(r or {}, indent=2))
+        return 0 if r else 1
     if not r:
         print("could not recover")
         return 1

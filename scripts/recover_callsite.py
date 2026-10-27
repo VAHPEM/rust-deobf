@@ -613,17 +613,25 @@ def recover(path, canaries):
 
 def main():
     man = json.loads((ROOT/"bench_src"/"manifest.json").read_text()); can = man["canaries"]
-    targets = sys.argv[1:]
+    as_json = "--json" in sys.argv
+    targets = [a for a in sys.argv[1:] if a != "--json"]
     if not targets:
         targets = [f"build/xor_custom__{f}__{p}__{s}" + (".exe" if f=="pe" else "")
                    for f in ("elf","pe") for p in ("debug","release") for s in ("nostrip","strip")]
     rows=[]
     for t in targets:
-        r = recover(ROOT/t, can); r["target"]=t; rows.append(r)
+        r = recover(ROOT/t, can); r["target"]=str(t); rows.append(r)
+        if as_json:
+            continue
         print(f"{Path(t).name:<42} recall {r['recall']}/{r['n']}  decoders={r.get('decoders')}"
               + ("  ERR "+r['error'] if r.get('error') else ""))
         for s in r.get("recovered", []): print("     +", s)
-    (ROOT/"build"/"recover_callsite_results.jsonl").write_text("\n".join(json.dumps(r) for r in rows)+"\n")
+    if as_json:
+        print(json.dumps(rows[0] if len(rows) == 1 else rows, indent=2))
+        return
+    out = ROOT/"build"/"recover_callsite_results.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(json.dumps(r) for r in rows)+"\n")
 
 if __name__ == "__main__":
     main()
