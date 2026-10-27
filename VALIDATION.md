@@ -2272,3 +2272,20 @@ network** (correct -- it does not network), and, with rustc, that a program whic
 and reads a file is tagged **network + file** with the network tag landing on specific functions that
 carry a networking import. Covers resolved imports (libc / named dynamic); syscall-level attribution
 for static-musl builds is the next tier.
+
+## 55. Round 15: per-function language attribution for mixed-language binaries (Oct 2026)
+
+Real native binaries are rarely one language -- every Rust binary statically links C, FFI pulls in
+C/C++, droppers bundle Go or Swift. `scripts/recover_lang.py` labels each function's language from
+its symbol mangling (Rust v0/legacy with the `17h<hex>E` hash vs. C++ Itanium without it; MSVC;
+Swift `$s`; Objective-C `-[...]`; Go import-path/runtime symbols; plain C) and the binary's languages
+from section fingerprints (`.gopclntab`, `__swift5_*`, `__objc_*`) and linked libraries (libstdc++/
+libc++), so the Rust-specific tiers run on the Rust parts and do not mislabel the rest.
+
+**Validated.** `--selftest` pins the classifier, including Rust-vs-C++ disambiguation by the Rust
+hash and rejecting compiler-internal dotted symbols (`DW.ref.*`) as false Go. `tests/test_lang.py`
+builds real binaries and checks: a **Rust+C FFI** binary is mixed `{rust, c}` with dominant rust and
+**no false Go**; a C++ binary is detected `cpp` (via its Itanium/libstdc++ linkage even though the
+mangled symbols are imports); a Go binary is `go`-dominant (symbols + `.gopclntab`); and `/usr/bin/
+git` is plain C, not mislabelled. First tier: exact where symbols survive, section-level otherwise;
+idiom-based attribution of fully-stripped functions is the next tier.
