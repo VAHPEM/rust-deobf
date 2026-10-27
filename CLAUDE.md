@@ -92,7 +92,8 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_lang.py` | per-function source-language map (mixed-language binaries) |
 | `detect_vm.py` | flag functions hidden behind a bytecode VM |
 | `recover_dynamic.py` / `recover_artifacts.py` | Frida runtime memory-diff recovery |
-| `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals |
+| `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals (dynamic, runs the sample) |
+| `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub, carve write-then-executed stage-2 (no host execution; `--entry` to aim at the unpack routine) |
 
 ### scripts/ — Rust & Go tiers
 | Script | Role |
@@ -104,6 +105,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_cryptify.py` | static recovery for the `cryptify` crate (`encrypt_string!`) |
 | `recover_go.py` | Go function names from the pclntab (Go's metadata analog) |
 | `recover_antianalysis.py` | anti-analysis technique inventory + build provenance |
+| `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
 ### scripts/ — front ends, export, orchestration
