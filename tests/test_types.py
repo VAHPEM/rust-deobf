@@ -61,6 +61,44 @@ def test_ghidra_types_match_vtables():
         assert t["fields"][-1]["name"] == f"method_{count - 1}"
 
 
+def test_rtti_demangle():
+    assert RT.demangle_rtti("3Dog") == "Dog"
+    assert RT.demangle_rtti("N3foo3BarE") == "foo::Bar"
+    assert RT.demangle_rtti("weird") == "weird"
+
+
+def test_no_cpp_vtables_in_rust_binary():
+    # the C++ scan (offset-to-top + typeinfo + methods) must not fire on Rust vtables
+    assert RT.recover(FIXTURE)["cpp_vtables"] == []
+
+
+@pytest.mark.skipif(not __import__("shutil").which("clang++"), reason="clang++ not available")
+def test_cpp_vtables_and_rtti(tmp_path):
+    import subprocess
+    src = tmp_path / "v.cpp"
+    src.write_text(
+        "struct Animal{virtual int sound()const{return 1;}virtual int legs()const{return 4;}virtual ~Animal(){}};\n"
+        "struct Dog:Animal{int sound()const override{return 2;}int legs()const override{return 4;}};\n"
+        "struct Bird:Animal{int sound()const override{return 3;}int legs()const override{return 2;}};\n"
+        "extern \"C\" int pick(int n){Animal*a=(n&1)?(Animal*)new Dog():(Animal*)new Bird();"
+        "int r=a->sound()+a->legs();delete a;return r;}\n"
+        "int main(){return pick(1);}\n")
+    binp = tmp_path / "v"
+    r = subprocess.run(["clang++", "-O1", "-fno-inline", str(src), "-o", str(binp)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip("clang++ failed: " + r.stderr.strip()[-200:])
+    res = RT.recover(binp)
+    types = {vt["type"] for vt in res["cpp_vtables"]}
+    assert {"Animal", "Dog", "Bird"} <= types, types
+    for vt in res["cpp_vtables"]:
+        assert vt["method_count"] >= 1
+        import recover_emulate as E
+        img = E.Image(str(binp))
+        for m in vt["methods"]:
+            assert img.text_va <= m < img.text_end
+
+
 def test_metadata_sections_not_scanned():
     """The scan must ignore .dynsym/.rela/.gnu.hash etc. (pointer-shaped metadata) -- only the data
     sections hold vtables. Precision regression guard: those sections yielded 150+ false vtables."""

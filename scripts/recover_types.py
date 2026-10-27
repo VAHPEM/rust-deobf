@@ -89,6 +89,95 @@ def _exec(img, va):
     return img.text_va <= va < img.text_end or any(lo <= va < hi for lo, hi in img.exec_ranges)
 
 
+def _read_cstr(img, va, maxlen=256):
+    """A NUL-terminated string at VA from any section (for RTTI type names), or None."""
+    if va is None:
+        return None
+    for s in img.binary.sections:
+        raw = bytes(s.content)
+        o = va - s.virtual_address
+        if 0 <= o < len(raw):
+            end = raw.find(b"\x00", o, o + maxlen)
+            chunk = raw[o:end if end != -1 else o + maxlen]
+            try:
+                return chunk.decode("ascii")
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
+def demangle_rtti(name: str) -> str:
+    """A minimal Itanium RTTI type-name demangle: `3Dog`->Dog, `N3foo3BarE`->foo::Bar, `1A`->A.
+    Not a full demangler; good enough to label a C++ class. Returns the raw name if it cannot parse."""
+    if not name:
+        return name
+    s = name
+    nested = s.startswith("N")
+    if nested:
+        s = s[1:]
+    parts, i, n = [], 0, len(s)
+    while i < n and s[i].isdigit():
+        j = i
+        while j < n and s[j].isdigit():
+            j += 1
+        ln = int(s[i:j])
+        comp = s[j:j + ln]
+        if not comp:
+            break
+        parts.append(comp)
+        i = j + ln
+    if parts:
+        return "::".join(parts)
+    return name
+
+
+def recover_cpp_vtables(img, read):
+    """C++ (Itanium ABI) vtables: `[offset_to_top, typeinfo_ptr, fn0, fn1, ...]`, where the object's
+    vptr points at fn0 and typeinfo_ptr -> an RTTI whose name_ptr (second word) is the class name.
+    Distinct from a Rust vtable (code ptr / size / align), so the two scans do not overlap."""
+    ptr = img.ptr
+    out, claimed = [], []
+    data_lo = img.text_end  # typeinfo must point into data, not code
+    for s in img.binary.sections:
+        va0 = s.virtual_address
+        if not va0 or img._exec_sec(s):
+            continue
+        raw = bytes(s.content)
+        for i in range(len(raw) // ptr):
+            va = va0 + i * ptr
+            if any(lo <= va < hi for lo, hi in claimed):
+                continue
+            o2t = read(va)                       # offset-to-top: small signed value (0 for a primary)
+            ti = read(va + ptr)                  # typeinfo pointer -> RTTI in data
+            if o2t is None or ti is None:
+                continue
+            signed = o2t - (1 << (8 * ptr)) if o2t >= (1 << (8 * ptr - 1)) else o2t
+            if abs(signed) > 0x100000 or _exec(img, o2t):
+                continue
+            if _exec(img, ti) or ti == 0:
+                continue
+            name_ptr = read(ti + ptr)            # type_info.__name
+            nm = _read_cstr(img, name_ptr)
+            if not nm or not (nm[0].isdigit() or nm[0] in "NPKR"):
+                continue
+            m0 = read(va + 2 * ptr)
+            if not _exec(img, m0):
+                continue
+            methods = []
+            k = 2
+            while k < 2 + _MAX_METHODS:
+                p = read(va + k * ptr)
+                if not _exec(img, p):
+                    break
+                methods.append(p)
+                k += 1
+            out.append({"vptr": va + 2 * ptr, "offset_to_top": signed, "typeinfo": ti,
+                        "mangled": nm, "type": demangle_rtti(nm),
+                        "methods": methods, "method_count": len(methods)})
+            claimed.append((va, va + (2 + len(methods)) * ptr))
+    return out
+
+
 def recover(path) -> dict:
     """Recover vtables and the type facts they carry. Returns {arch, format, vtables, ghidra_types}."""
     import recover_emulate
@@ -131,8 +220,10 @@ def recover(path) -> dict:
             vtables.append(vt)
             claimed.append((va, va + (3 + len(methods)) * ptr))
 
+    cpp_vtables = recover_cpp_vtables(img, read)
     return {"format": img.fmt, "arch": ("aarch64" if img.arm else ("x86" if img.x32 else "x86_64")),
-            "ptr": ptr, "vtables": vtables, "ghidra_types": _ghidra_types(vtables, ptr)}
+            "ptr": ptr, "vtables": vtables, "cpp_vtables": cpp_vtables,
+            "ghidra_types": _ghidra_types(vtables, ptr)}
 
 
 def _ghidra_types(vtables, ptr: int) -> list:
@@ -163,6 +254,10 @@ def _print(res: dict) -> None:
         more = f" (+{vt['method_count'] - 6} more)" if vt["method_count"] > 6 else ""
         print(f"  vtable 0x{vt['va']:x}  drop=0x{vt['drop_in_place']:x}  size={vt['size']} "
               f"align={vt['align']}  {vt['method_count']} method(s): {ms}{more}")
+    for vt in sorted(res.get("cpp_vtables", []), key=lambda v: v["vptr"]):
+        ms = " ".join(f"0x{m:x}" for m in vt["methods"][:6])
+        print(f"  C++ vtable {vt['type']!r}  vptr 0x{vt['vptr']:x}  typeinfo 0x{vt['typeinfo']:x}  "
+              f"{vt['method_count']} method(s): {ms}")
     if res["ghidra_types"]:
         print("ghidra datatypes:")
         for t in res["ghidra_types"]:
@@ -243,8 +338,14 @@ def _selftest():
     assert t2["size"] == 5 * ptr and t2["fields"][0] == {"offset": 0, "name": "drop_in_place", "type": "pointer"}
     assert t2["fields"][1]["name"] == "size" and t2["fields"][1]["offset"] == ptr
     assert t2["fields"][-1] == {"offset": 4 * ptr, "name": "method_1", "type": "pointer"}
+    # --- C++ RTTI name demangling ---
+    assert demangle_rtti("3Dog") == "Dog"
+    assert demangle_rtti("6Animal") == "Animal"
+    assert demangle_rtti("N3foo3BarE") == "foo::Bar"
+    assert demangle_rtti("1A") == "A"
+    assert demangle_rtti("") == "" and demangle_rtti("weird") == "weird"
     print("selftest OK: vtable recovery ([drop,size,align,methods]) rejects 3 decoy shapes, "
-          "handles a ZST vtable, and emits a Ghidra struct per method-count")
+          "handles a ZST vtable, emits a Ghidra struct per method-count, and demangles C++ RTTI names")
 
 
 def main(argv=None) -> int:

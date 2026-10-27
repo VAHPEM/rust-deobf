@@ -2308,3 +2308,20 @@ an older magic. `tests/test_go.py` builds a real Go binary, **strips it**, and c
 a `//go:noinline` `main.beacon`, and `runtime.*` names plus the `go1.x` version are still recovered;
 and that the committed Rust binary is not misreported as Go. Older 1.2-1.17 pclntab parsing is the
 next tier.
+
+## 57. Round 17: C++ vtable + RTTI recovery (Oct 2026)
+
+Extends the type tier (Round 10) to the most common FFI partner. A C++ (Itanium ABI) vtable is
+`[offset_to_top, typeinfo_ptr, fn0, fn1, ...]` -- the object's vptr points at `fn0`, and
+`typeinfo_ptr` is an RTTI record whose second word is the mangled class name. `recover_types.
+recover_cpp_vtables` recognises that shape (small offset-to-top, a typeinfo pointer into data whose
+name is a valid Itanium type name, method pointers into code), reads the RTTI name and demangles it
+(`demangle_rtti`: `3Dog`->Dog, `N3foo3BarE`->foo::Bar), giving the class name behind each vtable and
+its virtual methods. The shape is disjoint from a Rust vtable (code ptr / size / align), so the two
+scans never collide.
+
+**Validated.** `--selftest` pins the RTTI demangler. `tests/test_types.py` builds a C++ program with
+polymorphic `Animal`/`Dog`/`Bird`, recovers all three vtables with their demangled class names and
+in-`.text` virtual methods, and confirms the committed Rust binary yields **0** C++ vtables (and the
+C++ one yields its C++ vtables without Rust false positives) -- the two type systems do not
+cross-contaminate.
