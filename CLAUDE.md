@@ -113,7 +113,9 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 `floss_export.py` / `export_rules.py` (FLOSS / capa+YARA output) · `mcp_server.py` (MCP over stdio) ·
 `ghidra_annotate.py` + `ghidra_run.sh` / `ghidra_dump_annotations.py` (Ghidra) ·
 `redblue_loop.py` (RustCloak hide ↔ rust-deobf recover regression) · `fuzz_recover.py` (fuzz our own
-analysis path on malformed binaries).
+analysis path on malformed binaries) · `recover_blobs.py` (triage pipeline: carve blobs via
+recover_embedded → keyless recovery = decompression + magic-anchored single-byte-XOR → annotate with
+recover_crypto's candidate primitives; honest that encrypted blobs need a key).
 Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `heldout_eval.py`,
 `measure_fp.py`, `measure_rust_meta.py`, `run_floss.py`, `parse_gallery.py`, `disasm.py`.
 
