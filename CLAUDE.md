@@ -18,14 +18,36 @@ edit. Instead:
 
 | When | Command | Cost |
 |------|---------|------|
-| After editing any `scripts/*.py` | `python3 -m pytest tests/test_selftests.py -q` | **~8s, 22 tests** |
+| After editing any `scripts/*.py` | `./scripts/check.sh` (selftests + doc-drift guard) | **~8s, 26 tests** |
 | Just one module | `python3 scripts/<name>.py --selftest` (prints `selftest OK`) | <1s |
 | One module's full test | `python3 -m pytest tests/test_<name>.py -q` | seconds |
 | Before committing/pushing | the fast CI subset (below) | ~3.5 min |
 | Never locally | `benchmark`/`precision` jobs (need a Rust build) | CI only |
 
-`scripts/check.sh` wraps these: `./scripts/check.sh` = the 8s gate; `./scripts/check.sh full` = the
-fast CI subset; `./scripts/check.sh <name>` = that module's selftest + test file.
+`scripts/check.sh` wraps these: `./scripts/check.sh` = the 8s gate; `./scripts/check.sh changed` =
+only the scripts you touched vs `origin/master` (narrow-first); `./scripts/check.sh full` = the fast
+CI subset; `./scripts/check.sh <name>` = that module's selftest + test file.
+
+**Narrow before broad** — run the cheapest thing that can fail first, widen only if it passes:
+`./scripts/check.sh <name>` → `./scripts/check.sh changed` → `./scripts/check.sh` → `full`. Within
+pytest: `-k <expr>` to pick tests by name, `-x` to stop at the first failure, `--lf` to rerun only
+last-failed, `--tb=line` to keep tracebacks (and token cost) short. Don't cat a whole test log;
+`... -q | tail -20`.
+
+### Keep this map and the gate current (enforced, not optional)
+`tests/test_docs_current.py` runs in the 8s gate and **fails** if a script with a `--selftest`, or any
+`premium/` module, is missing from this file, or if `check.sh full` and the CI selftest job disagree
+on the ignore list. So when you add or rename a tool, or change the CI test split, update the table
+below / `check.sh` in the same change — the gate will tell you if you forget.
+
+### Delegate to sub-agents to keep the main context small
+A fresh sub-agent's tool output (file dumps, long test logs) stays in *its* context; only its
+conclusion returns to yours. Worth it for: a broad "which module/where is X" sweep across many files
+(use the `Explore` agent), independent work that can run in parallel (e.g. fuzzing or selftesting
+several modules at once — send them in one message), and an unanchored review. Not worth it for a
+lookup this file already answers, or a couple of tool calls you'd do inline — a fresh agent re-reads
+context and costs more than it looks. Brief it with the goal + the exact files/entry points (from the
+tables below) so it doesn't re-explore. Don't delegate and also do the work yourself.
 
 The fast CI subset (what the `selftest` job in `.github/workflows/ci.yml` runs — no Rust build):
 ```
