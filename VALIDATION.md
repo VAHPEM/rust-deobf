@@ -2325,3 +2325,23 @@ polymorphic `Animal`/`Dog`/`Bird`, recovers all three vtables with their demangl
 in-`.text` virtual methods, and confirms the committed Rust binary yields **0** C++ vtables (and the
 C++ one yields its C++ vtables without Rust false positives) -- the two type systems do not
 cross-contaminate.
+
+## 58. Round 18: anti-analysis inventory + build provenance (Oct 2026)
+
+`scripts/recover_antianalysis.py` answers an analyst's first questions defensively: will the sample
+behave differently under a debugger / sandbox / emulator, and how was it built. Evasion evidence is
+detection-only -- the presence of a technique, not how to use it: `rdtsc`/`rdtscp` timing
+instructions, `cpuid` probes, and the inline system-call instruction (`syscall`/`int 0x80`/`svc`),
+flagged as *direct syscalls* only in a dynamically-linked binary (where reaching the kernel without
+libc is an import-table-evasion signal; a static musl build inlines syscalls normally), plus
+anti-debug/timing/sandbox APIs and artifacts by name (ptrace, IsDebuggerPresent,
+QueryPerformanceCounter, the TracerPid line, VM vendor strings). Provenance reports format, arch/
+bits, PIE, stripped, NX, RELRO, static/dynamic, source languages (recover_lang), and the Rust
+toolchain (recover_rust_meta); function->source:line is already covered by the metadata tier's panic
+locations.
+
+**Validated.** `--selftest` counts rdtsc/cpuid/syscall/int-0x80 on hand-assembled bytes and confirms
+a clean stream has none. `tests/test_antianalysis.py` checks provenance on the committed binary
+(PIE/stripped/NX, Rust 1.97.0), that it shows no evasion, and -- with clang -- that a program using
+`cpuid`+`__rdtsc` is flagged `cpuid probe` + `timing-check`. The direct-syscall flag is gated on
+dynamic linking so static-musl Rust binaries are not false-flagged.
