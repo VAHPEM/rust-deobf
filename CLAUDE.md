@@ -107,6 +107,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_cryptify.py` | static recovery for the `cryptify` crate (`encrypt_string!`) |
 | `recover_go.py` | Go function names from the pclntab (Go's metadata analog) |
 | `recover_antianalysis.py` | anti-analysis technique inventory + build provenance |
+| `recover_enums.py` | enum discriminant/niche layout; variant names via DWARF (pyelftools, optional) else a capstone dispatch-site heuristic |
 | `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
@@ -132,7 +133,7 @@ unrolled loops; x86 + AArch64).
 rustc 1.97 stable + nightly-2024-06-15 (LLVM 18.1.7); targets incl. `aarch64-unknown-linux-musl`;
 clang/clang++/g++/cmake/llvm-18-dev; go1.24.7. libRustCloak.so built at
 `/home/user/rustcloak/build/`. Python deps: lief≥0.16, capstone≥5&lt;6, unicorn≥2.1&lt;3, z3-solver,
-pytest.
+pyelftools (optional; DWARF enum/niche names in recover_enums.py), pytest.
 
 ## Gotchas (each cost a debugging round once — don't repeat them)
 - **capstone is pinned `>=5,<6`** — the code uses `CS_ARCH_ARM64` (renamed in capstone 6). Don't bump.

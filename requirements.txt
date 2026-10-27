@@ -5,4 +5,7 @@ capstone>=5.0,<6   # capstone 6 renames the ARM64 architecture (AArch64), which 
 unicorn>=2.1,<3
 # expression / opaque-predicate analysis (deobf_expr.py)
 z3-solver>=4.12
+# DWARF enum/niche layout + variant names (recover_enums.py); optional — a guarded import, the
+# stripped-binary heuristic path needs only capstone
+pyelftools>=0.31
 # dynamic recovery (recover_dynamic.py, sandbox only) is optional: pip install frida frida-tools
