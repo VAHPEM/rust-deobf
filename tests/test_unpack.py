@@ -15,10 +15,26 @@ pytest.importorskip("unicorn")
 import unpack_emulate as U  # noqa: E402
 
 BENIGN = ROOT / "tests" / "fixtures" / "vm" / "benign_rust_std.x64"
+# a real, benign, freestanding packed ELF (built from fixtures/pack/packed_xor.s): entry is an
+# in-place XOR unpack stub that decodes a 24-byte stage-2 (NOP sled + ret) and jumps to it.
+PACKED = ROOT / "tests" / "fixtures" / "pack" / "packed_xor.elf64"
 
 
 def test_selftest():
     U._selftest()
+
+
+@pytest.mark.skipif(not PACKED.is_file(), reason="packed fixture missing")
+def test_positive_on_real_packed_elf():
+    res = U.recover(PACKED)
+    assert res["arch"] == "x86_64"
+    assert res["stopped"] == "ret"               # stage-2 ret pops the sentinel: a clean finish
+    assert res["unpacked_detected"] is True
+    execd = [r for r in res["unpacked"] if r["executed"]]
+    assert execd, res["unpacked"]
+    # the carved stage-2 is exactly the 24-byte NOP sled + ret the stub decodes
+    carved = [r for r in res["_regions"] if r["executed"]][0]["_bytes"]
+    assert carved == b"\x90" * 23 + b"\xc3", carved.hex()
 
 
 def test_entropy_and_printable():
