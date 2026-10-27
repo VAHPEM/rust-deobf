@@ -2235,3 +2235,23 @@ flagged. `tests/test_crypto.py` pins `scan()` and, where a system crypto library
 a real binary's primitives (libcrypto -> AES + SHA; git -> SHA-1/256 + MD5; thin wrappers like the
 `openssl` CLI correctly empty, since they dlopen libcrypto). Key/IV extraction ties into the existing
 decoder-recovery tiers and is not attempted here.
+
+## 53. Round 13: resolved call graph + code-coverage metric (Oct 2026)
+
+The headline numbers are about strings; this measures and raises *code* coverage. `scripts/
+recover_cfg.py` builds the call graph and resolves the indirect control flow that normally leaves it
+full of holes: direct calls become internal/import edges; a function whose address is loaded
+(`lea reg,[rip+fn]`, a relocation, a vtable slot) is treated as a root -- `main` is reached this way
+(the start glue hands its address to `__libc_start_main`), and so are callbacks and vtable methods,
+which a naive reachable-from-entry sweep drops; and `dyn Trait` dispatch (`call [vtable+off]`) is
+resolved via recover_types' vtables to the methods behind the trait. It then reports functions
+reachable from the realistic root set, imports used, unresolved indirect sites, and the **lift** over
+an entry-only direct sweep.
+
+**Validated.** On the committed `benign_rust_std.x64`: 524 functions, 501 direct + 51 dynamic-
+dispatch edges from 9 vtables, 286 import call sites resolved, **98.5% reachable** from 308 roots --
+a **+515-function lift** over the entry-only baseline (which reaches 1, because the entry's real work
+goes through `__libc_start_main` indirectly). `tests/test_cfg.py` pins this and, with rustc, builds a
+`dyn Trait` program and checks the dispatch edges and the coverage lift; `--selftest` pins the BFS /
+lift / dispatch-reach accounting. x86-64 and 32-bit x86 (direct + rip-relative address-taken +
+dispatch); AArch64 resolves direct `bl` edges, adrp/add address-taken is the next tier.
