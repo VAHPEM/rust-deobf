@@ -2289,3 +2289,22 @@ builds real binaries and checks: a **Rust+C FFI** binary is mixed `{rust, c}` wi
 mangled symbols are imports); a Go binary is `go`-dominant (symbols + `.gopclntab`); and `/usr/bin/
 git` is plain C, not mislabelled. First tier: exact where symbols survive, section-level otherwise;
 idiom-based attribution of fully-stripped functions is the next tier.
+
+## 56. Round 16: Go metadata tier -- pclntab function names (Oct 2026)
+
+Go's answer to the Rust metadata tier. Go binaries carry the `pclntab`, a symbol table the runtime
+needs for panics/stack-traces, and it **survives `strip`** (stripping removes the ELF/Mach-O symbol
+table, not the pclntab). So a "stripped" Go sample still names every function. `scripts/recover_go.py`
+parses the modern self-describing pclntab (Go 1.18+ magic `0xfffffff0`, 1.20+ `0xfffffff1`) back to
+`{entry VA: function name}` -- the Go counterpart of recover_rust_meta -- and reports the toolchain
+version. It finds the table by section (`.gopclntab`/`__gopclntab`) or by magic scan (PE Go binaries
+carry it unnamed in `.rdata`), and reports Go only on strong evidence (named section, a `go1.x`
+string, or a substantial set of Go-shaped names) so a chance magic match in a non-Go binary is not
+misread.
+
+**Validated.** `--selftest` round-trips a synthetic 1.20+ pclntab ({va: name} with main/runtime/
+import-path names), rejects truncated/non-Go buffers without raising, and detects-but-does-not-parse
+an older magic. `tests/test_go.py` builds a real Go binary, **strips it**, and confirms `main.main`,
+a `//go:noinline` `main.beacon`, and `runtime.*` names plus the `go1.x` version are still recovered;
+and that the committed Rust binary is not misreported as Go. Older 1.2-1.17 pclntab parsing is the
+next tier.
