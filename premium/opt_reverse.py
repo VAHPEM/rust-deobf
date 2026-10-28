@@ -16,7 +16,8 @@ mechanical to undo:
 This is a reusable analysis, not tied to one engine: the deflattener's relooper and the VM
 devirtualizer both dispatch through jump tables, and so does ordinary optimized code a decompiler
 reads. x86-64 and 32-bit x86 (the LLVM `lea table; movsxd [table+idx*4]; add; jmp` rel32 idiom) and
-AArch64 (`adr table; adr anchor; ldrsw [table+idx*4]; add; br`).
+AArch64 (`adr|adrp+add table; adr anchor; ldrsw [table+idx*4]; add; br`, plus LLVM's compressed
+1/2-byte tables `ldrb|ldrh ...; add ..., lsl #2`).
 
     python3 premium/opt_reverse.py path/to/binary            # list recovered jump tables
     python3 premium/opt_reverse.py path/to/binary --loops    # + unrolled-loop runs
@@ -134,68 +135,113 @@ import re as _re
 _A64_LDRSW = _re.compile(r"^(\w+), \[(\w+), (\w+), lsl #2\]$")
 _A64_ADD = _re.compile(r"^(\w+), (\w+), (\w+)$")
 _A64_IMM = _re.compile(r"^(\w+), #(0x[0-9a-f]+|\d+)$")
+# general forms: an entry load `ldr{sw,b,h} Rt, [Xtbl, Ridx{, lsl|uxtw|sxtw #s}]` and the target add
+# `add Xdst, Xa, Xb{, lsl|sxtw #k}` (LLVM's *compressed* AArch64 tables scale a 1/2-byte entry by 4)
+_A64_LDX = _re.compile(r"^(\w+), \[(\w+), (\w+)(?:, (?:lsl|uxtw|sxtw) #(\d+))?\]$")
+_A64_ADDX = _re.compile(r"^(\w+), (\w+), (\w+)(?:, (?:lsl|sxtw|uxtw) #(\d+))?$")
+_A64_ADDI = _re.compile(r"^(\w+), (\w+), #(0x[0-9a-f]+|\d+)$")
+# entry width/signedness per load mnemonic, and the index scale it must use
+_A64_ENTRY = {"ldrsw": (4, True, 2), "ldr": (4, True, 2), "ldrh": (2, False, 1), "ldrb": (1, False, 0)}
 
 
-def recover_jump_tables_arm64(code, base, read_i32, text_lo, text_hi):
-    """AArch64 rel32 jump tables. LLVM lowers a dense `match`/`switch` to:
+def _xr(r):
+    """Canonical 64-bit name, so `ldrb w10` feeds `add x9, x9, x10` and `cmp w0` bounds `x0`."""
+    return "x" + r[1:] if r and r[0] == "w" and r[1:].isdigit() else r
+
+
+def recover_jump_tables_arm64(code, base, read_i32, text_lo, text_hi, read_bytes=None):
+    """AArch64 jump tables. LLVM lowers a dense `match`/`switch` to one of:
         cmp  idx, #K ; b.hi default
-        adr  Xtbl, <table>            ; table base (an array of rel32 offsets)
-        adr  Xanchor, <anchor>        ; the base the offsets are added to
-        ldrsw Xt, [Xtbl, idx, lsl #2]
-        add  Xdst, Xanchor, Xt        ; target = anchor + table[idx]
+        adr|adrp(+add) Xtbl, <table>   ; table base (adr in range, adrp+add when the table is far)
+        adr  Xanchor, <anchor>         ; the base the entries are added to
+        ldrsw Xt, [Xtbl, idx, lsl #2]  ; rel32 table            -> target = anchor + entry
+        ldrh  Wt, [Xtbl, idx, lsl #1]  ; compressed 16-bit table -> target = anchor + entry * 4
+        ldrb  Wt, [Xtbl, idx]          ; compressed 8-bit table  -> target = anchor + entry * 4
+        add  Xdst, Xanchor, Xt{, lsl #2}
         br   Xdst
-    recovered to {index: target}. capstone resolves each `adr` immediate to an absolute address."""
+    recovered to {index: target}. capstone resolves each adr/adrp immediate to an absolute address.
+    `read_bytes(va, n)` (optional) reads 1/2-byte entries; without it they are derived from
+    `read_i32` (which needs 4 readable bytes)."""
     from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
     md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
     insns = list(md.disasm(code, base))
+
+    def read_entry(va, size, signed):
+        if read_bytes is not None:
+            raw = read_bytes(va, size)
+            if raw is None or len(raw) < size:
+                return None
+            return int.from_bytes(raw[:size], "little", signed=signed)
+        v = read_i32(va)
+        if v is None:
+            return None
+        if size == 4:
+            return v if signed else v & 0xffffffff
+        v &= (1 << (8 * size)) - 1
+        if signed and v & (1 << (8 * size - 1)):
+            v -= 1 << (8 * size)
+        return v
+
     out = []
     for i, br in enumerate(insns):
         if br.mnemonic != "br":
             continue
-        dst = br.op_str.strip()
-        win = insns[max(0, i - 10):i]
-        regs = {}                       # reg -> adr-resolved absolute address seen in the window
+        dst = _xr(br.op_str.strip())
+        win = insns[max(0, i - 12):i]
+        regs = {}                   # reg -> absolute address materialized by adr / adrp(+add #imm)
         for w in win:
-            if w.mnemonic == "adr":
+            if w.mnemonic in ("adr", "adrp"):
                 m = _A64_IMM.match(w.op_str)
                 if m:
-                    regs[m.group(1)] = int(m.group(2), 0)
-        add_a = add_t = tbl_reg = idx_reg = None
+                    regs[_xr(m.group(1))] = int(m.group(2), 0)
+            elif w.mnemonic == "add":
+                m = _A64_ADDI.match(w.op_str)
+                if m and _xr(m.group(2)) in regs:
+                    regs[_xr(m.group(1))] = regs[_xr(m.group(2))] + int(m.group(3), 0)
+        add_a = add_t = tbl_reg = idx_reg = kind = None
+        shift = 0
         for w in reversed(win):
             if add_a is None and w.mnemonic == "add":
-                m = _A64_ADD.match(w.op_str)
-                if m and m.group(1) == dst:
-                    add_a, add_t = m.group(2), m.group(3)
-            elif add_t is not None and tbl_reg is None and w.mnemonic in ("ldrsw", "ldr"):
-                m = _A64_LDRSW.match(w.op_str)
-                if m and m.group(1) == add_t:
-                    tbl_reg, idx_reg = m.group(2), m.group(3)
+                m = _A64_ADDX.match(w.op_str)
+                if m and _xr(m.group(1)) == dst:
+                    a, t = _xr(m.group(2)), _xr(m.group(3))
+                    if t in regs and a not in regs:     # `add Xd, Xoff, Xanchor` operand order
+                        a, t = t, a
+                    add_a, add_t, shift = a, t, int(m.group(4) or 0)
+            elif add_t is not None and tbl_reg is None and w.mnemonic in _A64_ENTRY:
+                m = _A64_LDX.match(w.op_str)
+                if m and _xr(m.group(1)) == add_t:
+                    size, _signed, scale = _A64_ENTRY[w.mnemonic]
+                    if int(m.group(4) or 0) == scale:
+                        tbl_reg, idx_reg, kind = _xr(m.group(2)), _xr(m.group(3)), w.mnemonic
         if tbl_reg is None or add_a is None:
             continue
         table_va, anchor = regs.get(tbl_reg), regs.get(add_a)
         if table_va is None or anchor is None:
             continue
+        size, signed, _scale = _A64_ENTRY[kind]
         count = None
         for w in reversed(win):
             if w.mnemonic in ("cmp", "subs") and idx_reg:
                 m = _A64_IMM.match(w.op_str)
-                if m and m.group(1) == idx_reg:
+                if m and _xr(m.group(1)) == idx_reg:
                     count = int(m.group(2), 0) + 1
                     break
         if count is None or not (0 < count <= _MAX_CASES):
             continue
         cases = {}
         for k in range(count):
-            entry = read_i32(table_va + 4 * k)
+            entry = read_entry(table_va + size * k, size, signed)
             if entry is None:
                 break
-            target = (anchor + entry) & ((1 << 64) - 1)
+            target = (anchor + (entry << shift)) & ((1 << 64) - 1)
             if not (text_lo <= target < text_hi):
                 break
             cases[k] = target
         if len(cases) == count:
             out.append({"br_va": br.address, "table_va": table_va, "anchor": anchor,
-                        "index_reg": idx_reg, "count": count, "default": None, "cases": cases})
+                        "index_reg": idx_reg, "count": count, "default": None, "cases": cases,
+                        "entry_size": size})
     return out
 
 
@@ -261,8 +307,16 @@ def analyze(path) -> dict:
                 return struct.unpack_from("<i", raw, o)[0]
         return None
 
+    def read_bytes(va, n):
+        for sv, raw in data_sorted:
+            o = va - sv
+            if 0 <= o <= len(raw) - n:
+                return raw[o:o + n]
+        return None
+
     if img.arm:
-        jts = recover_jump_tables_arm64(img.code, img.text_va, read_i32, img.text_va, img.text_end)
+        jts = recover_jump_tables_arm64(img.code, img.text_va, read_i32, img.text_va, img.text_end,
+                                        read_bytes=read_bytes)
     else:
         jts = recover_jump_tables(img.code, img.text_va, arch, read_i32, img.text_va, img.text_end)
     loops = detect_unrolled_loops(img.code, img.text_va, arch)
@@ -344,8 +398,36 @@ def _selftest():
     assert _A64_IMM.match("x8, #0x200240").groups() == ("x8", "0x200240")
     assert _A64_IMM.match("x0, #0x13").group(2) == "0x13"
 
+    # AArch64 compressed tables, table base via adrp+add (a far table), hand-assembled:
+    #   10000 cmp x0,#2 ; 10004 nop ; 10008 adrp x8,0x11000 ; 1000c add x8,x8,#0x10
+    #   10010 adr x9,#0 (anchor) ; 10014 ldrb w10,[x8,x0] | ldrh w10,[x8,x0,lsl #1]
+    #   10018 add x9,x9,x10,lsl #2 ; 1001c br x9 ; case bodies at 10020/10028/10030
+    a_base, a_tbl = 0x10000, 0x11010
+    bodies_a = [0x10020, 0x10028, 0x10030]
+    for load, esize in ((0x3860690a, 1), (0x7860790a, 2)):
+        words = [0xf100081f, 0xd503201f, 0xb0000008, 0x91004108, 0x10000009, load,
+                 0x8b0a0929, 0xd61f0120] + [0xd65f03c0, 0xd503201f] * 3
+        a_code = struct.pack("<%dI" % len(words), *words)
+        tbl = b"".join(((b - 0x10010) // 4).to_bytes(esize, "little") for b in bodies_a)
+
+        def rb(va, n, _t=tbl):
+            o = va - a_tbl
+            return _t[o:o + n] if 0 <= o <= len(_t) - n else None
+        got = recover_jump_tables_arm64(a_code, a_base, lambda va: None, a_base,
+                                        a_base + len(a_code), read_bytes=rb)
+        assert len(got) == 1, (esize, got)
+        assert got[0]["table_va"] == a_tbl and got[0]["anchor"] == 0x10010, got[0]
+        assert got[0]["count"] == 3 and got[0]["entry_size"] == esize, got[0]
+        assert got[0]["cases"] == dict(enumerate(bodies_a)), got[0]["cases"]
+    # a wrong index scale (ldrh with no lsl #1) is not a table load -> nothing recovered
+    words = [0xf100081f, 0xd503201f, 0xb0000008, 0x91004108, 0x10000009, 0x7860690a,
+             0x8b0a0929, 0xd61f0120] + [0xd65f03c0, 0xd503201f] * 3
+    a_code = struct.pack("<%dI" % len(words), *words)
+    assert recover_jump_tables_arm64(a_code, a_base, lambda va: None, a_base, a_base + len(a_code),
+                                     read_bytes=lambda va, n: b"\x04\x00" * n) == []
+
     print("selftest OK: rel32 jump-table recovery (3-case switch -> {index: target}), rejects a "
-          "plain stream, unrolled-loop detection (4x body), and AArch64 idiom operand parsing")
+          "plain stream, unrolled-loop detection (4x body), AArch64 idiom operand parsing, and AArch64 compressed (ldrb/ldrh) tables via adrp+add")
 
 
 def main(argv=None) -> int:
@@ -373,7 +455,9 @@ def main(argv=None) -> int:
     for jt in res["jump_tables"]:
         tgts = " ".join(f"{i}->0x{t:x}" for i, t in sorted(jt["cases"].items())[:8])
         more = f" (+{jt['count'] - 8} more)" if jt["count"] > 8 else ""
-        print(f"  jmp 0x{jt['jmp_va']:x}  table 0x{jt['table_va']:x}  {jt['count']} cases: {tgts}{more}")
+        # x86 results carry `jmp_va`, AArch64 results `br_va` (the indirect branch's address)
+        kind, at = ("jmp", jt["jmp_va"]) if "jmp_va" in jt else ("br", jt["br_va"])
+        print(f"  {kind} 0x{at:x}  table 0x{jt['table_va']:x}  {jt['count']} cases: {tgts}{more}")
     if a.loops:
         for lp in res["unrolled_loops"]:
             print(f"  unrolled loop 0x{lp['start_va']:x}  {lp['count']}x body of {lp['block_insns']} "

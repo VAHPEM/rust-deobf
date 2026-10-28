@@ -131,15 +131,22 @@ class Image:
         if b is None:
             raise ValueError("unparseable")
         self.macho = b.format.name == "MACHO"
+        self.pe = b.format.name == "PE"
         text_name = "__text" if self.macho else ".text"
         self.text = next((s for s in b.sections if s.name == text_name), None)
+        # Packed / hand-built binaries often have no `.text` (UPX: UPX0/UPX1; custom section names;
+        # an ELF with its section table stripped). Fall back to the executable region holding the
+        # entry point, so the static unpacker can still emulate the stub instead of bailing out.
+        self.text_fallback = None
         if self.text is None:
-            raise ValueError("no .text")
+            self.text = self._code_fallback(b)
+            if self.text is None:
+                raise ValueError("no .text")
+            self.text_fallback = getattr(self.text, "name", "") or "segment"
         self.code = bytes(self.text.content)
         self.text_va = self.text.virtual_address
         self.text_end = self.text_va + len(self.code)
         self.fmt = b.format.name
-        self.pe = self.fmt == "PE"
         self.arm = any(t in _machine(b) for t in ("AARCH64", "ARM64"))
         self.x32 = (not self.arm) and _is_32bit(b)      # 32-bit x86 (i386)
         self.ptr = 4 if self.x32 else 8
@@ -258,6 +265,41 @@ class Image:
                 if self.text_va <= target < self.text_end:   # a real code address, not a data ptr
                     out.append(target)
         return out
+
+    def _code_fallback(self, b):
+        """The executable section (or, with no section table, the executable ELF segment) that holds
+        the entry point; else the largest executable section with content. None if there is none."""
+        try:
+            entry = b.optional_header.addressof_entrypoint if self.pe else b.entrypoint
+        except Exception:
+            entry = None
+        execs = []
+        for sec in b.sections:
+            try:
+                if sec.virtual_address and len(sec.content) and self._exec_sec(sec):
+                    execs.append(sec)
+            except Exception:
+                continue
+        if entry is not None:
+            for sec in execs:
+                if sec.virtual_address <= entry < sec.virtual_address + len(sec.content):
+                    return sec
+        if execs:
+            return max(execs, key=lambda sec: len(sec.content))
+        if b.format.name == "ELF":
+            try:
+                import lief as _lief
+                segs = [sg for sg in b.segments
+                        if sg.type == _lief.ELF.Segment.TYPE.LOAD and sg.has(_lief.ELF.Segment.FLAGS.X)
+                        and len(sg.content)]
+            except Exception:
+                segs = []
+            for sg in segs:
+                if entry is not None and sg.virtual_address <= entry < sg.virtual_address + len(sg.content):
+                    return sg
+            if segs:
+                return max(segs, key=lambda sg: len(sg.content))
+        return None
 
     def _import(self, name):
         self.tramp.append(name or "?")

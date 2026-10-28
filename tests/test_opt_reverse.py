@@ -68,11 +68,19 @@ def test_real_arm64_jump_table(tmp_path):
 
 @pytest.mark.skipif(not shutil.which("rustc"), reason="rustc not available")
 def test_real_match_jump_table(tmp_path):
+    # host rustc builds for the host: x86-64 on an x86 host, AArch64 on an ARM64 host (e.g. Kali on
+    # Apple silicon). LLVM's jump-table threshold differs per target: x86-64 tables an 8-arm match,
+    # while AArch64 lowers 8 arms to a compare tree (nothing to un-switch) and only tables a wider
+    # match -- so the arm count follows the host. Either way the table must be recovered exactly.
+    import platform
+    host = platform.machine().lower()
+    arm = host in ("aarch64", "arm64")
+    n = 20 if arm else 8
     src = tmp_path / "m.rs"
     src.write_text(
         "use std::hint::black_box;\n"
         "#[inline(never)] pub fn d(n:u64)->u64{ match n {\n"
-        + "".join(f"    {i} => black_box({10 + i}),\n" for i in range(8))
+        + "".join(f"    {i} => black_box({10 + i * 7}),\n" for i in range(n))
         + "    _ => black_box(999),\n} }\n"
         "fn main(){ println!(\"{}\", d(black_box(3))); }\n")
     binp = tmp_path / "m"
@@ -80,14 +88,14 @@ def test_real_match_jump_table(tmp_path):
     if r.returncode != 0:
         pytest.skip("rustc failed: " + r.stderr.strip()[-200:])
     res = O.analyze(binp)
-    assert res["arch"] == "x86_64"
-    # the 8-arm match must appear as a recovered jump table with exactly 8 bounded cases whose
+    assert res["arch"] == ("aarch64" if arm else "x86_64"), (res["arch"], host)
+    # the n-arm match must appear as a recovered jump table with exactly n bounded cases whose
     # targets all land in .text (an exact un-switch, not a guessed length)
     import recover_emulate as E
     img = E.Image(str(binp))
-    eights = [jt for jt in res["jump_tables"] if jt["count"] == 8]
-    assert eights, [jt["count"] for jt in res["jump_tables"]]
-    for jt in eights:
-        assert set(jt["cases"]) == set(range(8))
+    hits = [jt for jt in res["jump_tables"] if jt["count"] == n]
+    assert hits, [jt["count"] for jt in res["jump_tables"]]
+    for jt in hits:
+        assert set(jt["cases"]) == set(range(n))
         for t in jt["cases"].values():
             assert img.text_va <= t < img.text_end

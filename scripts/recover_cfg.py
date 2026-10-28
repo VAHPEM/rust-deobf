@@ -24,18 +24,65 @@ direct-edges-from-entry-only sweep.
     python3 scripts/recover_cfg.py path/to/binary --json
     python3 scripts/recover_cfg.py --selftest
 
-x86-64 and 32-bit x86 (direct calls, rip-relative address-taken, dispatch); AArch64 resolves direct
-`bl` edges (adrp/add address-taken is the next tier).
+x86-64 and 32-bit x86 (direct calls, rip-relative address-taken, dispatch) and AArch64 (direct `bl`,
+adrp+add / adrp+ldr address-taken, dispatch). Calls through a PLT / `.plt.sec` jump stub are resolved
+to the import they jump to on both architectures, and a tail call (`b` / `jmp` to another function's
+start) counts as an edge.
 """
 from __future__ import annotations
 
 import json
+import struct
 import sys
 from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+
+
+def _stub_import(img, va, cache):
+    """If `va` is an import jump stub (ELF PLT / .plt.sec entry, or a PE `jmp [slot]` thunk), return
+    the GOT/IAT slot it jumps through; else None. Static: decodes the stub bytes, no emulation.
+      AArch64:  [bti c] adrp x16, page ; ldr x17, [x16, #off] ; ... br x17
+      x86-64:   [endbr64] [bnd] jmp [rip+disp32]
+      x86-32:   jmp [abs32]
+    """
+    if va in cache:
+        return cache[va]
+    slot = None
+    try:
+        b = img.read_any(va, 16)
+        if img.arm and len(b) >= 12:
+            w = list(struct.unpack("<%dI" % (len(b) // 4), b[:len(b) // 4 * 4]))
+            if w and w[0] == 0xd503245f:            # bti c
+                w = w[1:]
+            if len(w) >= 2 and (w[0] & 0x9f00001f) == 0x90000010 \
+                    and (w[1] & 0xffc003ff) == (0xf9400000 | (16 << 5) | 17):
+                immlo, immhi = (w[0] >> 29) & 3, (w[0] >> 5) & 0x7ffff
+                imm = (immhi << 2) | immlo
+                if imm & (1 << 20):
+                    imm -= 1 << 21
+                page = (va & ~0xfff) + (imm << 12)
+                slot = page + ((w[1] >> 10) & 0xfff) * 8
+        elif not img.arm and len(b) >= 6:
+            o = 4 if b[:4] == b"\xf3\x0f\x1e\xfa" else 0     # endbr64 / endbr32
+            if b[o:o + 1] == b"\xf2":                       # bnd prefix
+                o += 1
+            if b[o:o + 2] == b"\xff\x25" and len(b) >= o + 6:
+                d = struct.unpack("<i", b[o + 2:o + 6])[0]
+                slot = (d & 0xffffffff) if img.x32 else va + o + 6 + d
+    except Exception:
+        slot = None
+    cache[va] = slot
+    return slot
+
+
+def _arm_xreg(name):
+    """Normalize an AArch64 register name so a W write invalidates the X register it aliases."""
+    if name and name[0] == "w" and name[1:].isdigit():
+        return "x" + name[1:]
+    return name
 
 
 def _disasm_calls(img, starts):
@@ -64,31 +111,111 @@ def _disasm_calls(img, starts):
         idx = (tramp_va - TRAMP) // 16
         return img.tramp[idx] if 0 <= idx < len(img.tramp) else "?"
 
+    def is_tramp(v):
+        return v is not None and TRAMP <= v < TRAMP + 16 * len(img.tramp)
+
+    stub_cache = {}
+
+    def direct_target(t, s, ed, imps, tail):
+        """Classify a direct branch target. `tail`: a b/jmp (only a jump to ANOTHER function's start
+        is an edge; jumps inside the function are ordinary control flow)."""
+        if t in startset:
+            if not tail or not (s <= t < nexts[s]):
+                ed.add(t)
+            return True
+        if is_tramp(t):
+            imps.append(import_name(t))
+            return True
+        if tail and s <= t < nexts[s]:
+            return False
+        slot = _stub_import(img, t, stub_cache)
+        if slot is not None:
+            v = img.patches.get(slot)
+            if is_tramp(v):
+                imps.append(import_name(v))
+                return True
+        return False
+
+    if arm:
+        from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG, ARM64_SFT_LSL
+    else:
+        from capstone.x86 import X86_OP_IMM as _X86_IMM, X86_OP_MEM as _X86_MEM
+        from capstone.x86 import X86_REG_RIP as _X86_RIP, X86_REG_EIP as _X86_EIP
+
     for s in starts:
         chunk = code[s - base:nexts[s] - base]
         ed, imps, ind, refs = set(), [], 0, set()
+        pages = {}          # AArch64: x-register -> address materialized by adrp/adr/add
         try:
             for insn in md.disasm(chunk, s):
                 if arm:
-                    if insn.mnemonic == "bl" and insn.op_str.startswith("#"):
-                        t = _imm(insn.op_str)
-                        if t in startset:
-                            ed.add(t)
-                        elif TRAMP <= t < TRAMP + 16 * len(img.tramp):
-                            imps.append(import_name(t))
-                    elif insn.mnemonic == "blr":
+                    m = insn.mnemonic
+                    ops = insn.operands
+                    keep = None
+                    if m in ("bl", "b") and insn.op_str.startswith("#"):
+                        direct_target(_imm(insn.op_str), s, ed, imps, tail=(m == "b"))
+                    elif m == "blr":
                         ind += 1
+                    elif m in ("adrp", "adr") and len(ops) == 2 and ops[1].type == ARM64_OP_IMM:
+                        r = _arm_xreg(insn.reg_name(ops[0].reg))
+                        pages[r] = ops[1].imm
+                        keep = r
+                        if m == "adr":
+                            t = ops[1].imm
+                            (taken.add(t) if t in startset else refs.add(t))
+                    elif m == "add" and len(ops) == 3 and ops[1].type == ARM64_OP_REG \
+                            and ops[2].type == ARM64_OP_IMM:
+                        src = _arm_xreg(insn.reg_name(ops[1].reg))
+                        if src in pages:
+                            imm = ops[2].imm
+                            if ops[2].shift.type == ARM64_SFT_LSL:
+                                imm <<= ops[2].shift.value
+                            t = pages[src] + imm
+                            (taken.add(t) if t in startset else refs.add(t))
+                            r = _arm_xreg(insn.reg_name(ops[0].reg))
+                            pages[r] = t
+                            keep = r
+                    elif m == "ldr" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM \
+                            and ops[1].mem.index == 0:
+                        src = _arm_xreg(insn.reg_name(ops[1].mem.base))
+                        if src in pages:
+                            v = img.patches.get(pages[src] + ops[1].mem.disp)   # a GOT slot
+                            if v is not None and v in startset:
+                                taken.add(v)
+                    # any other register write invalidates what we knew about that register
+                    try:
+                        _, written = insn.regs_access()
+                        for w in written:
+                            r = _arm_xreg(insn.reg_name(w))
+                            if r != keep:
+                                pages.pop(r, None)
+                    except Exception:
+                        kept = pages.get(keep) if keep else None
+                        pages.clear()
+                        if kept is not None:
+                            pages[keep] = kept
                     continue
                 m = insn.mnemonic
+                if m == "jmp" and insn.operands:
+                    op = insn.operands[0]
+                    if op.type == _X86_IMM:
+                        direct_target(op.imm & 0xffffffffffffffff, s, ed, imps, tail=True)
+                    elif op.type == _X86_MEM and op.mem.index == 0:
+                        # tail call through a GOT/IAT slot: jmp [rip+slot] (x86-64) / jmp [abs] (x86)
+                        if op.mem.base in (_X86_RIP, _X86_EIP):
+                            slot = insn.address + insn.size + op.mem.disp
+                        elif op.mem.base == 0 and img.x32:
+                            slot = op.mem.disp & 0xffffffff
+                        else:
+                            slot = None
+                        if slot is not None and is_tramp(img.patches.get(slot)):
+                            imps.append(import_name(img.patches[slot]))
+                    continue
                 if m == "call":
                     op = insn.operands[0]
                     from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_RIP, X86_REG_EIP
                     if op.type == X86_OP_IMM:
-                        t = op.imm & 0xffffffffffffffff
-                        if t in startset:
-                            ed.add(t)
-                        elif TRAMP <= t < TRAMP + 16 * len(img.tramp):
-                            imps.append(import_name(t))
+                        direct_target(op.imm & 0xffffffffffffffff, s, ed, imps, tail=False)
                     elif op.type == X86_OP_MEM and op.mem.base in (X86_REG_RIP, X86_REG_EIP) \
                             and op.mem.index == 0:
                         slot = insn.address + insn.size + op.mem.disp
@@ -251,8 +378,42 @@ def _selftest():
     assert 7 in _bfs({1}, e2)
     # _imm parses aarch64 branch operands
     assert _imm("#0x1234") == 0x1234 and _imm("#4660") == 4660
+
+    # import jump stubs decode to the GOT/IAT slot they jump through (both architectures)
+    class _Img:
+        def __init__(self, arm, x32, mem):
+            self.arm, self.x32, self.mem = arm, x32, mem
+
+        def read_any(self, va, n):
+            for base, blob in self.mem.items():
+                if base <= va < base + len(blob):
+                    return blob[va - base:va - base + n]
+            return b""
+    # the real AArch64 PLT entry rustc/ld emits: adrp x16,#0x5f000; ldr x17,[x16,#0xcc0]; add; br x17
+    plt = struct.pack("<4I", 0x900002f0, 0xf9466211, 0x91330210, 0xd61f0220)
+    assert _stub_import(_Img(True, False, {0x3d70: plt}), 0x3d70, {}) == 0x5fcc0
+    # with a leading `bti c` (BTI-enabled PLT)
+    bti = struct.pack("<I", 0xd503245f) + struct.pack("<3I", 0x900002f0, 0xf9466211, 0xd61f0220)
+    assert _stub_import(_Img(True, False, {0x3d6c: bti}), 0x3d6c, {}) == 0x5fcc0
+    # adrp to a page BELOW the stub (negative immhi) -- the sign extension matters
+    neg = struct.pack("<2I", 0xf0fffff0, 0xf9400211) + b"\0" * 8
+    assert _stub_import(_Img(True, False, {0x10000: neg}), 0x10000, {}) == 0x10000 - 0x1000
+    # not a stub (adrp to x0, not x16) -> None
+    assert _stub_import(_Img(True, False, {0x3d70: struct.pack("<4I", 0x90000000, 0, 0, 0)}),
+                        0x3d70, {}) is None
+    # x86-64 .plt.sec: endbr64; bnd jmp [rip+0x100]  -> slot = va + 11 + 0x100
+    sec = b"\xf3\x0f\x1e\xfa\xf2\xff\x25" + struct.pack("<i", 0x100) + b"\x90" * 5
+    assert _stub_import(_Img(False, False, {0x1000: sec}), 0x1000, {}) == 0x1000 + 11 + 0x100
+    # PE thunk: jmp [rip-0x20] -> slot = va + 6 - 0x20
+    th = b"\xff\x25" + struct.pack("<i", -0x20) + b"\xcc" * 10
+    assert _stub_import(_Img(False, False, {0x2000: th}), 0x2000, {}) == 0x2000 + 6 - 0x20
+    # x86-32: jmp [abs32]
+    th32 = b"\xff\x25" + struct.pack("<I", 0x40a000) + b"\xcc" * 10
+    assert _stub_import(_Img(False, True, {0x401000: th32}), 0x401000, {}) == 0x40a000
+    # a W write invalidates the X register it aliases
+    assert _arm_xreg("w5") == "x5" and _arm_xreg("x5") == "x5" and _arm_xreg("wzr") == "wzr"
     print("selftest OK: reachability BFS, address-taken root coverage-lift, dispatch-edge reach, "
-          "branch-immediate parse")
+          "branch-immediate parse, PLT/.plt.sec/IAT stub decode (AArch64 + x86)")
 
 
 def main(argv=None) -> int:
