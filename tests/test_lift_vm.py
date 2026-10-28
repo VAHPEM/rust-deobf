@@ -6,7 +6,6 @@ This pins that the committed virtualized fixture lifts to the expected shapes: a
 decodes to its arithmetic sequence, the loop function decodes WITH control flow, and an ordinary
 build lifts to nothing (the detector gates the decode).
 """
-import platform
 
 import pytest
 from conftest import ROOT
@@ -16,9 +15,9 @@ import lift_vm
 VMFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm.x64"
 PLAIN = ROOT / "tests" / "fixtures" / "vm" / "plain.x64"
 CALLFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_call.x64"
-_X64 = platform.machine() in ("x86_64", "AMD64")
 
-pytestmark = pytest.mark.skipif(not _X64, reason="x86-64 fixtures")
+# x86-64 FIXTURES, analysed statically / by emulation: they run on any host (ARM64 Kali,
+# Windows-on-ARM x64 Python -- which reports platform.machine() == "ARM64" -- included)
 
 
 def _mnemonics(fn):

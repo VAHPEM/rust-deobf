@@ -11,15 +11,13 @@ Pins two things: it devirtualizes a branchless function the *static* lifter cann
 unguarded dense switch defeats the static patterns), and it never emits unverified output -- the
 loop/memory functions, which this branchless core does not model, come back as None, not wrong C.
 """
-import platform
 import sys
 from pathlib import Path
 
 import pytest
 from conftest import ROOT
 
-pytestmark = pytest.mark.skipif(platform.machine() not in ("x86_64", "AMD64"),
-                                reason="x86-64 fixtures")
+# x86-64 fixtures, emulated: no host-arch gate (they run on ARM64 hosts too)
 
 unicorn = pytest.importorskip("unicorn")
 sys.path.insert(0, str(ROOT / "premium"))
@@ -32,9 +30,12 @@ PEFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm_pe.exe"
 
 
 def _syms(fix):
-    import subprocess
-    out = subprocess.check_output(["nm", str(fix)]).decode().splitlines()
-    return {p[2]: int(p[0], 16) for p in (l.split() for l in out) if len(p) == 3 and p[1] == "T"}
+    """Function symbols -> address, via LIEF (portable: no `nm` on Windows, and an ARM64 host's
+    binutils need not read an x86-64 ELF)."""
+    import lief
+    b = lief.parse(str(fix))            # keep a reference while iterating its symbols
+    return {s.name: s.value for s in b.symbols
+            if s.value and s.name and getattr(s, "is_function", False)}
 
 
 @pytest.mark.skipif(not CALLFIX.is_file(), reason="fixture missing")
@@ -161,9 +162,7 @@ def test_emulation_recovers_nested_loops_and_structures_the_inner_while():
     import devirt_emulate
 
     def syms():
-        import subprocess
-        out = subprocess.check_output(["nm", str(NESTFIX)]).decode().splitlines()
-        return {p[2]: int(p[0], 16) for p in (l.split() for l in out) if len(p) == 3 and p[1] == "T"}
+        return _syms(NESTFIX)
 
     import re
     s = syms()

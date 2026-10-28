@@ -11,11 +11,9 @@ later run -- which makes the key correct again. This pins both halves on a commi
 binary: statically the secret is absent; emulation WITHOUT priming fails to recover it; emulation
 WITH priming (the shipped default) recovers it.
 
-x86-64 fixture (built on an x86-64 host, so the test is arch-guarded):
+x86-64 fixture (built on an x86-64 host; analysed by emulation, so it runs on any host):
     RUSTCLOAK_ANTIEMU=1 clang-18 -O1 -fpass-plugin=build/libRustCloak.so test/demo.c -o out
 """
-import platform
-
 import pytest
 from conftest import ROOT
 
@@ -23,7 +21,6 @@ import recover
 
 FIX = ROOT / "tests" / "fixtures" / "antiemu" / "rustcloak_antiemu.x64"
 SECRET = "flatten-demo"
-_X64 = platform.machine() in ("x86_64", "AMD64")
 
 
 @pytest.mark.skipif(not FIX.is_file(), reason="anti-emu fixture missing")
@@ -32,7 +29,7 @@ def test_antiemu_secret_absent_statically():
     assert SECRET.encode() not in FIX.read_bytes(), "anti-emu secret leaked in static bytes"
 
 
-@pytest.mark.skipif(not (FIX.is_file() and _X64), reason="anti-emu fixture / x86-64 host required")
+@pytest.mark.skipif(not FIX.is_file(), reason="anti-emu fixture missing")
 def test_antiemu_defeated_by_constructor_priming():
     # the shipped pipeline primes constructors -> the marker is set -> the key is correct
     r = recover.run(FIX)
@@ -40,7 +37,7 @@ def test_antiemu_defeated_by_constructor_priming():
     assert any(SECRET in s for s in decoded), f"priming did not recover the anti-emu secret: {decoded}"
 
 
-@pytest.mark.skipif(not (FIX.is_file() and _X64), reason="anti-emu fixture / x86-64 host required")
+@pytest.mark.skipif(not FIX.is_file(), reason="anti-emu fixture missing")
 def test_antiemu_beats_emulation_without_priming():
     # the RED half: with the constructors NOT replayed, the marker stays 0 and the sweep recovers
     # nothing; replaying them flips the same engine to success. Both directions on one binary.

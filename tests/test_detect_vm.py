@@ -10,7 +10,6 @@ This pins: the detector fires on a committed virtualized binary and stays quiet 
 of the same program, and the threaded-dispatch discriminator keeps ordinary switch/parse code from
 matching.
 """
-import platform
 
 import pytest
 from conftest import ROOT
@@ -20,9 +19,9 @@ import detect_vm
 VMFIX = ROOT / "tests" / "fixtures" / "vm" / "rustcloak_vm.x64"
 PLAIN = ROOT / "tests" / "fixtures" / "vm" / "plain.x64"
 BENIGN = ROOT / "tests" / "fixtures" / "vm" / "benign_rust_std.x64"
-_X64 = platform.machine() in ("x86_64", "AMD64")
 
-pytestmark = pytest.mark.skipif(not _X64, reason="x86-64 fixtures")
+# x86-64 FIXTURES, analysed statically / by emulation: they run on any host (ARM64 Kali,
+# Windows-on-ARM x64 Python -- which reports platform.machine() == "ARM64" -- included)
 
 
 @pytest.mark.skipif(not VMFIX.is_file(), reason="vm fixture missing")
