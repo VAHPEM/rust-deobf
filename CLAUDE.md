@@ -111,7 +111,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_antianalysis.py` | anti-analysis technique inventory + build provenance |
 | `recover_enums.py` | enum discriminant/niche layout; variant names via DWARF (pyelftools, optional) else a capstone dispatch-site heuristic (x86-64 + ARM64) |
 | `recover_embedded.py` | embedded artifacts: nested exes/archives (magic; LZ4/aPLib/BriefLZ containers header-validated), high-entropy blobs, base64 payloads (file offsets) |
-| `decompress.py` | strict pure-Python LZ4 (frame/legacy/block), aPLib (raw/AP32), BriefLZ (raw/blzpack), LZNT1 decoders: output-capped, linear, never raise; headerless decodes need full consumption + expansion + "interesting" output (validated magic / text / literal-entropy drop). Encoders for tests in `tests/_compress.py` |
+| `decompress.py` | strict pure-Python LZ4 (frame/legacy/block), aPLib (raw/AP32), BriefLZ (raw/blzpack), LZNT1 decoders: output-capped, linear, never raise; headerless decodes need an encoder signature (no literal runs/zero literals a compressor never emits), full consumption, expansion (waived for magic / >= 64 B text) and "interesting" output (validated magic / text / literal-entropy drop / repetitive). Test encoders in `tests/_compress.py`; reference vectors (jibsen BriefLZ, apultra, lz4_flex) in `tests/fixtures/compress/` |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
 ### scripts/ — front ends, export, orchestration
@@ -122,7 +122,10 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 evaluable, e.g. every build failed or the plugin hid nothing) · `fuzz_recover.py` (fuzz our own
 analysis path on malformed binaries; findings grouped by root cause, seed always printed) · `recover_blobs.py` (triage pipeline: carve blobs via
 recover_embedded → keyless recovery = decompression (zlib family + `decompress.py`) + magic-anchored
-single-byte-XOR, also at exact starts: container magics and the PE/ELF overlay → annotate with
+single-byte-XOR (incl. XOR hiding a gzip/zlib/bz2/container stream), chained through up to 3
+compressed layers on one MAX_OUT budget (+ containers nested in an output); also at exact starts:
+container magics, the PE/ELF overlay, and a bounded second-pass search for headerless streams
+(EOF tail, ends of zero padding, around >= 6.0-bit regions; <= 8192 starts/file) → annotate with
 recover_crypto's candidate primitives; honest that encrypted blobs need a key).
 Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `heldout_eval.py`,
 `measure_fp.py`, `measure_rust_meta.py`, `run_floss.py`, `parse_gallery.py`, `disasm.py`.

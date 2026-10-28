@@ -171,9 +171,9 @@ def test_dropper_overlay_every_format(tmp_path):
 def test_headerless_overlay_carved_at_eof(tmp_path):
     """No executable header at all: a high-entropy headerless stream flush with EOF is carved whole
     by recover_embedded's final window and decoded from the carve (evidence: the MZ stub).
-    Only for streams the entropy carve sees: literal-heavy BriefLZ/LZNT1 interleave a 0x0000 flag
-    word/byte every 16/8 literals, which pulls 512-byte windows under the 7.2 bits/byte threshold
-    (measured 7.53 overall, no window >= 7.2) -- those need an exact anchor (host overlay, magic)."""
+    Literal-heavy BriefLZ/LZNT1 interleave a 0x0000 flag word/byte every 16/8 literals, which pulls
+    512-byte windows under the 7.2 bits/byte carve threshold (measured 7.53 overall, no window
+    >= 7.2): the entropy carve misses them, the second-pass search (anchor "search") finds them."""
     rng = _rng(31)
     noise = rng.randbytes(2500)
     plain = _stub_pe(noise + noise)              # incompressible half + one long match
@@ -186,6 +186,15 @@ def test_headerless_overlay_carved_at_eof(tmp_path):
         k = res["blobs"][0]["keyless"]
         assert k and k["method"] == fmt and k["out_size"] == len(plain) and k["evidence"] == "magic:pe", (fmt, k)
         assert res["streams"] == []                  # no host header -> no overlay anchor
+    for fmt in ("brieflz", "lznt1"):
+        z = _compressors()[fmt](plain)
+        p = tmp_path / f"tail_{fmt}.bin"
+        p.write_bytes(b"\x00" * 4096 + z)
+        res = B.recover(p)
+        assert all(b["keyless"] is None for b in res["blobs"]), (fmt, res["blobs"])  # carve misses ...
+        hits = [s for s in res["streams"] if s["anchor"] == "search"]
+        assert [(s["offset"], s["keyless"]["method"], s["keyless"]["out_size"]) for s in hits] == \
+            [(4096, fmt, len(plain))], (fmt, res["streams"])    # ... found by the search
 
 
 def test_overlay_offset_parses_elf_and_pe():
@@ -220,3 +229,103 @@ def test_container_magic_in_code_is_not_a_stream(tmp_path):
     p.write_bytes(b"\x90" * 100 + b"\x3d\x04\x22\x4d\x18\x75\x10" + b"\x90" * 100 + b"AP32" + bytes(40))
     res = B.recover(p)
     assert res["streams"] == [] and res["embedded"] == []
+
+
+# ------------------------------------------------------------------------------- chained layers
+def test_chain_three_layers_and_depth_limit():
+    import zlib
+    import _compress as C
+    pe = _stub_pe(_CONFIG)
+    k = B._keyless(zlib.compress(C.lz4_frame(C.aplib_ap32(pe))))
+    assert k["method"] == "zlib" and [s["method"] for s in k["chain"]] == ["lz4_frame", "aplib_ap32"]
+    assert k["final"] == {"out_size": len(pe), "out_magic": "pe"}
+    # a 4th layer is not followed (depth limit 3): the AP32 header is the last thing reported
+    k = B._keyless(zlib.compress(gzip.compress(C.lz4_frame(C.aplib_ap32(pe)))))
+    assert [s["method"] for s in k["chain"]] == ["gzip", "lz4_frame"] and k["final"]["out_magic"] == "aplib"
+
+
+def test_chain_shares_one_output_budget(monkeypatch):
+    import zlib
+    import _compress as C
+    monkeypatch.setattr(B, "MAX_OUT", 1 << 20)
+    inner = C.lz4_frame(b"\x00" * (3 << 20))                   # 3 MiB of output behind ~12 KB
+    k = B._keyless(zlib.compress(inner))
+    total = k["out_size"] + sum(s["out_size"] for s in k.get("chain", []))
+    assert k["method"] == "zlib" and k["chain"][0]["method"] == "lz4_frame"
+    assert total == 1 << 20 and k["chain"][0]["truncated_at"] == (1 << 20) - k["out_size"]
+
+
+def test_xor_reveals_a_compressed_stream():
+    import bz2
+    import zlib
+    import _compress as C
+    pe = _stub_pe(_CONFIG)
+    cases = {"gzip": gzip.compress(pe), "zlib": zlib.compress(pe), "bz2": bz2.compress(pe),
+             "lz4_frame": C.lz4_frame(pe), "aplib_ap32": C.aplib_ap32(pe), "brieflz_blzpack": C.blzpack(pe)}
+    for key, (fmt, stream) in zip((0x11, 0x5a, 0x77, 0xc3, 0x29, 0x80), cases.items()):
+        k = B._keyless(bytes(b ^ key for b in stream))
+        assert k and k["method"] == "xor8" and k["key"] == key, (fmt, k)
+        assert k["chain"][0]["method"] == fmt and k["final"]["out_magic"] == "pe", (fmt, k)
+
+
+def test_xor_stream_reveal_stays_precise():
+    rng = _rng(33)
+    budget = [B.MAX_OUT]
+    assert sum(1 for _ in range(2000) if B._xor1_stream(rng.randbytes(1024), budget)) == 0
+    assert all(B._keyless(rng.randbytes(2048)) is None for _ in range(200))
+
+
+def test_nested_container_inside_a_decompressed_output():
+    import _compress as C
+    pe = _stub_pe(_CONFIG)
+    outer = gzip.compress(b"header text " * 50 + C.lz4_frame(pe) + b" trailer" * 20)
+    k = B._keyless(outer)
+    assert k["method"] == "gzip" and len(k["nested"]) == 1
+    n = k["nested"][0]
+    assert n["method"] == "lz4_frame" and n["offset"] == 600 and n["out_magic"] == "pe"
+
+
+# ---------------------------------------------------------------- second pass: candidate search
+_FX = ROOT / "tests" / "fixtures" / "compress"
+
+
+def _ref(name):
+    p = _FX / name
+    if not p.is_file():
+        pytest.skip(f"reference vector {name} not present")
+    return p.read_bytes()
+
+
+def test_search_finds_off_grid_tiny_and_literal_heavy_streams(tmp_path):
+    """Recall cases the entropy carve misses (all from REFERENCE encoders where available): a
+    133-byte config (does not even expand), repeated patterns, README text after other text, a
+    literal-heavy LZNT1 stream -- off the 256-byte grid, after zero padding / random data / text."""
+    import _compress as C
+    rng = _rng(34)
+    cases = [
+        ("brieflz", _ref("config.l10.blz"), _ref("config.plain"), b"\x01" * 997 + b"\x00" * 77, b"\x00" * 50),
+        ("aplib", _ref("config.apl"), _ref("config.plain"), rng.randbytes(3001), b""),
+        ("brieflz", _ref("runs.l1.blz"), _ref("runs.plain"), b"\x02" * 501 + b"\x00" * 9, b"\x00" * 9 + b"\x03" * 99),
+        ("aplib", _ref("text.apl"), _ref("text.plain"), b"just text, no padding\n" * 90, b"\x00" * 33),
+        ("lznt1", C.lznt1(_ref("text.plain")), _ref("text.plain"), rng.randbytes(1234), b"\x00" * 12),
+    ]
+    for i, (fmt, z, plain, before, after) in enumerate(cases):
+        p = tmp_path / f"s{i}.bin"
+        p.write_bytes(before + z + after)
+        res = B.recover(p)
+        hits = [(s["offset"], s["keyless"]["method"], s["keyless"]["out_size"])
+                for s in res["streams"] if s["anchor"] == "search"]
+        assert hits == [(len(before), fmt, len(plain))], (i, fmt, hits, res["blobs"])
+
+
+def test_search_finds_nothing_in_benign_binaries():
+    """Precision: the second pass over real benign binaries (code, data, zero padding, Mach-O
+    tables) and random files recovers nothing."""
+    for f in ("vm/benign_rust_std.x64", "vm/rustcloak_vm_pe.exe", "macho/litcrypt.arm64",
+              "emu/tls2.c"):
+        p = ROOT / "tests" / "fixtures" / f
+        if p.is_file():
+            assert B._search(p.read_bytes(), []) == [], f
+    rng = _rng(35)
+    for _ in range(5):
+        assert B._search(rng.randbytes(20000) + bytes(64) + rng.randbytes(5000), []) == []

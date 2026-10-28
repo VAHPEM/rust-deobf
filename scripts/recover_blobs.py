@@ -8,14 +8,21 @@ decompression (zlib/gzip/bz2/lzma, then decompress.py's strict LZ4 frame/legacy/
 BriefLZ and LZNT1 decoders) and single-byte-XOR brute (the classic keyless config obfuscation) --
 and recover_crypto.py lists the cipher/hash primitives present as *candidates*. Exact stream starts
 the 256-byte entropy grid cannot give are tried as `streams`: each validated compressed-container
-magic (LZ4 frame/legacy, aPLib 'AP32', BriefLZ blzpack) and a PE/ELF overlay (droppers append a
-compressed core/config at EOF, often headerless).
+magic (LZ4 frame/legacy, aPLib 'AP32', BriefLZ blzpack), a PE/ELF overlay (droppers append a
+compressed core/config at EOF, often headerless), and a bounded second-pass search for headerless
+streams off the grid or under the carve's entropy threshold (_search). Every recovery is followed
+down through further compressed layers (`chain`, <= 3 layers, one shared MAX_OUT output budget),
+including a stream an XOR key revealed, and containers inside an output are decoded (`nested`).
 
 Honest about limits: a blob encrypted with a real cipher cannot be decrypted without its key, which
 a static tool does not have. This surfaces the keyless wins and names the candidate algorithms for
 an analyst; it does not claim to break encryption.
 """
+import bisect
+import math
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -48,12 +55,14 @@ def _known_magic(b: bytes):
 _validated_magic = decompress.validated_magic
 
 
-def _inflate(make, blob: bytes):
-    """Run a streaming decompressor with the MAX_OUT output cap. Returns (out, truncated) only for a
-    stream that either completed (eof) or was cut by the cap; an error or an incomplete stream (a
-    random blob that merely parsed for a while) is None, as zlib.decompress & co. would raise."""
+def _inflate(make, blob: bytes, max_out=None):
+    """Run a streaming decompressor with an output cap (MAX_OUT unless given). Returns
+    (out, truncated) only for a stream that either completed (eof) or was cut by the cap; an error
+    or an incomplete stream (a random blob that merely parsed for a while) is None, as
+    zlib.decompress & co. would raise."""
+    cap = MAX_OUT if max_out is None else max_out
     d = make()
-    out = d.decompress(blob, MAX_OUT)
+    out = d.decompress(blob, cap)
     if getattr(d, "eof", False):
         # a completed stream must account for the blob: random bytes parse as a tiny raw-deflate
         # stream ~1 time in 1000 (consuming 10-60 bytes, the rest left as unused_data). A real
@@ -62,22 +71,16 @@ def _inflate(make, blob: bytes):
         if consumed < min(_MIN_STREAM, len(blob)):
             return None
         return out, False
-    if len(out) >= MAX_OUT:
+    if len(out) >= cap:
         return out, True
     return None
 
 
-def _try_decompress(blob: bytes):
-    """Keyless: a compressed payload decompresses with no key. Try the common codecs, each capped at
-    MAX_OUT bytes of output (a zip bomb is reported truncated, not inflated): zlib/gzip/bz2/lzma,
-    then decompress.py's strict LZ4 / aPLib / BriefLZ / LZNT1 decoders (containers first; the
-    headerless formats only with full consumption + expansion + an "interesting" output, see
-    decompress.py). Returns (name, out, truncated, extra) or (None, None, False, {}); `extra` carries
-    `consumed` and, for a headerless format, the `evidence` that made the decode believable."""
+def _stdlib_codecs():
     import bz2
     import lzma
     import zlib
-    attempts = [
+    return [
         ("zlib", lambda: zlib.decompressobj(15)),
         ("zlib_raw", lambda: zlib.decompressobj(-15)),
         ("gzip", lambda: zlib.decompressobj(16 + 15)),
@@ -85,9 +88,24 @@ def _try_decompress(blob: bytes):
         # memlimit: an xz/lzma header can declare a ~1.5 GiB dictionary; real presets need <= ~65 MiB
         ("lzma", lambda: lzma.LZMADecompressor(memlimit=128 << 20)),
     ]
-    for name, make in attempts:
+
+
+def _try_decompress(blob: bytes, max_out=None, only=None):
+    """Keyless: a compressed payload decompresses with no key. Try the common codecs, each capped at
+    `max_out` (default MAX_OUT) bytes of output (a zip bomb is reported truncated, not inflated):
+    zlib/gzip/bz2/lzma, then decompress.py's strict LZ4 / aPLib / BriefLZ / LZNT1 decoders
+    (containers first; the headerless formats only with full consumption + expansion + an
+    "interesting" output, see decompress.py). `only` restricts the formats tried (a header already
+    named the format). Returns (name, out, truncated, extra) or (None, None, False, {}); `extra`
+    carries `consumed` and, for a headerless format, the `evidence` that made the decode believable."""
+    cap = MAX_OUT if max_out is None else max_out
+    if cap <= 0:
+        return None, None, False, {}
+    for name, make in _stdlib_codecs():
+        if only is not None and name not in only:
+            continue
         try:
-            r = _inflate(make, blob)
+            r = _inflate(make, blob, cap)
         except Exception:
             continue
         if r is None:
@@ -95,13 +113,105 @@ def _try_decompress(blob: bytes):
         out, truncated = r
         if out and len(out) >= 8:
             return name, out, truncated, {}
-    d = decompress.try_all(blob, MAX_OUT)
+    fmts = None if only is None else [f for f in decompress.FORMATS if f in only]
+    if fmts == []:
+        return None, None, False, {}
+    d = decompress.try_all(blob, cap, formats=fmts)
     if d is not None:
         extra = {"consumed": d["consumed"]}
         if d.get("evidence"):
             extra["evidence"] = d["evidence"]
         return d["format"], d["out"], d["truncated"], extra
     return None, None, False, {}
+
+
+def _stream_formats(b) -> list:
+    """Compressed-stream formats whose HEADER sits at b[0] (what a chain step may decode): gzip,
+    zlib (CMF/FLG check), bzip2, xz, and decompress.py's validated containers (LZ4 frame / legacy,
+    aPLib AP32, BriefLZ blzpack). A header only nominates a format; the strict decode (gzip CRC,
+    zlib Adler-32, container checksums) is what proves it."""
+    fmts = []
+    if b[:3] == b"\x1f\x8b\x08":
+        fmts.append("gzip")
+    if len(b) >= 2 and b[0] & 0x0F == 8 and b[0] >> 4 <= 7 and not b[1] & 0x20 \
+            and ((b[0] << 8) | b[1]) % 31 == 0:
+        fmts.append("zlib")
+    if b[:3] == b"BZh" and b[3:4].isdigit() and b[4:10] == b"\x31\x41\x59\x26\x53\x59":
+        fmts.append("bz2")
+    if b[:6] == b"\xfd7zXZ\x00":
+        fmts.append("lzma")
+    sigs = {name: sig for name, sig, _need in recover_embedded._MAGICS}
+    for kind, fmt in decompress.CONTAINER_KINDS.items():
+        if b[:4] == sigs[kind] and decompress.header_ok(kind, b, 0):
+            fmts.append(fmt)
+    return fmts
+
+
+_CHAIN_DEPTH = 3         # decompression layers per blob (zlib -> LZ4 frame -> aPLib ... stops here)
+_MAX_NESTED = 8          # containers found INSIDE a decompressed output that are decoded too
+
+
+def _step(name, out, truncated, extra, cap):
+    r = {"method": name, "out_size": len(out), "out_magic": _known_magic(out),
+         "preview": out[:48].decode("latin-1", "replace"), **extra}
+    if truncated:
+        r["truncated_at"] = cap          # output cap hit: out_size is a floor, not the real size
+    return r
+
+
+def _chain(data, depth, budget):
+    """Follow compressed layers: while `data` starts with a compressed-stream header (and fewer than
+    _CHAIN_DEPTH layers were decoded), decompress it. Every layer draws on one shared output
+    budget (budget[0] bytes, MAX_OUT per blob in total), so a nested bomb cannot multiply the
+    cap. Returns (steps, final_bytes)."""
+    steps = []
+    while depth < _CHAIN_DEPTH and budget[0] > 0:
+        fmts = _stream_formats(data)
+        if not fmts:
+            break
+        name, out, truncated, extra = _try_decompress(data, budget[0], only=fmts)
+        if out is None:
+            break
+        steps.append(_step(name, out, truncated, extra, budget[0]))
+        budget[0] -= len(out)
+        data, depth = out, depth + 1
+    return steps, data
+
+
+def _nested(data, depth, budget):
+    """Validated compressed containers INSIDE a decompressed output (not at its start): decoded
+    from their magic, each followed through its own chain."""
+    found = []
+    if depth >= _CHAIN_DEPTH:
+        return found
+    for h in recover_embedded._find_magics(data, 1):
+        fmt = decompress.CONTAINER_KINDS.get(h["kind"])
+        if not fmt or len(found) >= _MAX_NESTED or budget[0] <= 0:
+            continue
+        name, out, truncated, extra = _try_decompress(memoryview(data)[h["offset"]:], budget[0],
+                                                      only=[fmt])
+        if out is None:
+            continue
+        st = _step(name, out, truncated, extra, budget[0])
+        budget[0] -= len(out)
+        more, _final = _chain(out, depth + 1, budget)
+        if more:
+            st["chain"] = more
+        found.append({"offset": h["offset"], **st})
+    return found
+
+
+def _with_chain(r, out, depth, budget):
+    """Attach the layers below a recovered output to its record: `chain` (streams starting at
+    offset 0, in order) and `nested` (containers inside the final output)."""
+    steps, final = _chain(out, depth, budget)
+    if steps:
+        r["chain"] = r.get("chain", []) + steps
+        r["final"] = {"out_size": steps[-1]["out_size"], "out_magic": steps[-1]["out_magic"]}
+    inner = _nested(final, depth + len(steps), budget)
+    if inner:
+        r["nested"] = inner
+    return r
 
 
 def _xor1_break(blob: bytes):
@@ -124,24 +234,57 @@ def _xor1_break(blob: bytes):
     return None
 
 
+def _xor1_stream(blob: bytes, budget):
+    """Single-byte XOR that reveals a compressed STREAM without a >= 4-byte validated magic (gzip's
+    3-byte 1f8b08, zlib's 2-byte CMF/FLG, bzip2's "BZh"): a key is accepted only when the revealed
+    stream then DEcompresses strictly (gzip CRC-32 / zlib Adler-32 / bzip2 CRC over the whole
+    stream). Returns (key, format, out, truncated, extra) or None."""
+    if len(blob) < 16:
+        return None
+    head = blob[:16]
+    for k in range(1, 256):
+        fmts = [f for f in _stream_formats(head.translate(_XOR_TABLES[k]))
+                if f in ("gzip", "zlib", "bz2")]
+        if not fmts:
+            continue
+        name, out, truncated, extra = _try_decompress(blob.translate(_XOR_TABLES[k]), budget[0],
+                                                      only=fmts)
+        if out is not None:
+            return k, name, out, truncated, extra
+    return None
+
+
 _XOR_TABLES = [bytes(b ^ k for b in range(256)) for k in range(256)]
 
 
 def _keyless(blob: bytes):
-    """What can be recovered from `blob` with no key: decompression first, then XOR-1 brute."""
-    name, out, truncated, extra = _try_decompress(blob)
+    """What can be recovered from `blob` with no key: decompression first, then XOR-1 brute -- and,
+    below either, every further compressed layer (`chain`, depth <= _CHAIN_DEPTH, one shared
+    MAX_OUT output budget) and containers inside the result (`nested`)."""
+    blob = bytes(blob)
+    budget = [MAX_OUT]
+    name, out, truncated, extra = _try_decompress(blob, budget[0])
     if out is not None:
-        r = {"method": name, "out_size": len(out), "out_magic": _known_magic(out),
-             "preview": out[:48].decode("latin-1", "replace"), **extra}
-        if truncated:
-            r["truncated_at"] = MAX_OUT      # output cap hit: out_size is a floor, not the real size
-        return r
+        r = _step(name, out, truncated, extra, budget[0])
+        budget[0] -= len(out)
+        return _with_chain(r, out, 1, budget)
     plain = _validated_magic(blob[:_XOR_SAMPLE])
     if plain:
         return {"method": "plain", "magic": plain}  # not encoded at all (the XOR key-0 identity)
     x = _xor1_break(blob)
     if x is not None:
-        return {"method": "xor8", **x}
+        # the revealed bytes may be a compressed container (LZ4 frame, AP32, blzpack, xz) or
+        # carry one: follow it like any decompressed output
+        return _with_chain({"method": "xor8", **x}, blob.translate(_XOR_TABLES[x["key"]]), 0, budget)
+    s = _xor1_stream(blob, budget)
+    if s is not None:
+        k, name, out, truncated, extra = s
+        r = {"method": "xor8", "key": k, "magic": name,
+             "chain": [_step(name, out, truncated, extra, budget[0])]}
+        budget[0] -= len(out)
+        _with_chain(r, out, 1, budget)                    # appends further layers to r["chain"]
+        r["final"] = {"out_size": r["chain"][-1]["out_size"], "out_magic": r["chain"][-1]["out_magic"]}
+        return r
     return None
 
 
@@ -218,15 +361,14 @@ def _streams(data: bytes, emb: dict, blobs: list):
             continue
         if len(out) >= _MAX_STREAMS:
             break
-        r = decompress.try_all(view[h["offset"]:], MAX_OUT, formats=[fmt])
+        budget = [MAX_OUT]
+        name, o, truncated, extra = _try_decompress(view[h["offset"]:], budget[0], only=[fmt])
         k = None
-        if r is not None:
-            o = r["out"]
-            k = {"method": fmt, "consumed": r["consumed"], "out_size": len(o),
-                 "out_magic": _known_magic(o), "preview": o[:48].decode("latin-1", "replace")}
-            if r["truncated"]:
-                k["truncated_at"] = MAX_OUT
-        out.append({"offset": h["offset"], "size": r["consumed"] if r else None,
+        if o is not None:
+            k = _step(name, o, truncated, extra, budget[0])
+            budget[0] -= len(o)
+            _with_chain(k, o, 1, budget)
+        out.append({"offset": h["offset"], "size": extra.get("consumed") if k else None,
                     "anchor": f"magic:{h['kind']}", "keyless": k})
     ov = _overlay_offset(data)
     if ov is not None:
@@ -236,6 +378,147 @@ def _streams(data: bytes, emb: dict, blobs: list):
             out.append({"offset": ov, "size": len(data) - ov, "anchor": "overlay",
                         "keyless": _keyless(data[ov:])})
     return out
+
+
+# ---- second pass: decompression-candidate search (exact starts the 256-byte carve grid misses) ----
+_SEARCH_ENT = 6.0          # candidate-region window entropy (the blob carve needs 7.2: literal-heavy
+                           # BriefLZ/LZNT1 interleave zero flag bytes and sit at ~6.5-7.1)
+_SEARCH_WIN = 256          # candidate-region window (stride _SEARCH_WIN // 2)
+_SEARCH_RADIUS = 256       # starts tried, step 1, either side of a candidate region's start
+_SEARCH_TAIL = 4096        # starts tried, step 1, in the file's last bytes (payload flush with EOF)
+_SEARCH_MAX_STARTS = 8192  # start offsets per file (deterministic budget, priority order below)
+_SEARCH_MAX_LEN = 4 << 20  # longest stream a search attempt decodes
+_PAD_RE = re.compile(rb"\x00{8,}")
+_HEADERLESS = [name for name, _fn, headerless, _end in decompress.DECODERS if headerless]
+_NO_END_MARKER = [name for name, _fn, headerless, end in decompress.DECODERS if headerless and not end]
+_END_MARKED = [name for name, _fn, headerless, end in decompress.DECODERS if headerless and end]
+
+
+_CLOGC = [0.0] + [c * math.log2(c) for c in range(1, _SEARCH_WIN + 1)]
+
+
+def _fast_entropy(b) -> float:
+    """Order-0 entropy of a <= _SEARCH_WIN-byte window: H = log2 n - sum(c log2 c) / n."""
+    n = len(b)
+    if not n:
+        return 0.0
+    return math.log2(n) - sum(_CLOGC[c] for c in Counter(b).values()) / n
+
+
+def _region_starts(data: bytes):
+    """Starts of regions whose _SEARCH_WIN windows reach _SEARCH_ENT bits/byte (lazily: the
+    caller stops pulling once its start budget is spent, so a huge file is not scanned whole)."""
+    inside = False
+    step = _SEARCH_WIN // 2
+    for off in range(0, max(1, len(data) - _SEARCH_WIN + 1), step):
+        hot = _fast_entropy(data[off:off + _SEARCH_WIN]) >= _SEARCH_ENT
+        if hot and not inside:
+            yield off
+        inside = hot
+
+
+def _search_starts(data: bytes, pads):
+    """Candidate start offsets in priority order, de-duplicated, at most _SEARCH_MAX_STARTS."""
+    n = len(data)
+
+    def gen():
+        yield from range(max(0, n - _SEARCH_TAIL), n)
+        yield from (e for _a, e in pads if e < n)
+        for lo in _region_starts(data):
+            yield from range(max(0, lo - _SEARCH_RADIUS), min(n, lo + _SEARCH_RADIUS))
+    seen, starts = set(), []
+    for c in gen():
+        if c not in seen:
+            seen.add(c)
+            starts.append(c)
+            if len(starts) >= _SEARCH_MAX_STARTS:
+                break
+    return starts
+
+
+def _end_marked(view, st, e):
+    """aPLib / LZNT1 at [st, e): the stream stops at its own end marker; when only zero bytes
+    follow it (the padding that delimited the candidate), judge it on exactly the bytes it used."""
+    for fmt in _END_MARKED:
+        r = decompress.decode(fmt, view[st:e], MAX_OUT)
+        if r is None:
+            continue
+        c = r["consumed"]
+        blob = view[st:st + c] if not r["truncated"] and not any(view[st + c:e]) else view[st:e]
+        a = decompress.accept(fmt, blob, r)
+        if a is not None:
+            a["format"] = fmt
+            return a
+    return None
+
+
+def _search(data: bytes, taken):
+    """Second pass for headerless streams (raw LZ4 block, aPLib, BriefLZ, LZNT1) the entropy carve
+    cannot pin down: a stream whose start is off the 256-byte grid, a literal-heavy BriefLZ/LZNT1
+    stream under the 7.2 bits/byte carve threshold, a tiny config. Start offsets, in priority order
+    and capped at _SEARCH_MAX_STARTS per file: (1) every offset of the last _SEARCH_TAIL bytes (a
+    payload appended at EOF), (2) the end of every run of >= 8 zero bytes (alignment padding before
+    an embedded payload), (3) +-256 bytes, step 1, around the start of every region of >= 6.0-bit
+    windows. A hit moves forward to the latest start within 16 bytes that also decodes (junk just
+    before a stream can parse into it; a start inside a stream does not). The stream must END where
+    the next zero run starts (+0..3: aPLib's end byte, LZNT1's terminator) or at EOF -- streams
+    followed directly by other non-zero data are not found (a no-end-marker format has no exact end
+    to find). Precision rests on decompress.py's strict decoders + acceptance policy (full
+    consumption, expansion, evidence, encoder-signature veto); `taken` ranges (already recovered)
+    are skipped. Returns stream records (anchor "search")."""
+    n = len(data)
+    pads = [(m.start(), m.end()) for m in _PAD_RE.finditer(data)]
+    pad_starts = [a for a, _b in pads]
+    starts = _search_starts(data, pads)
+    view = memoryview(data)
+    found = []
+    spans = sorted(taken)
+    for st in starts:
+        if any(a <= st < b for a, b in spans):
+            continue
+        r = _try_at(view, st, pad_starts)
+        if r is None:
+            continue
+        # junk right before a real stream can parse as a few literals and fall back into step with
+        # it (measured: 6 of 156 embedded streams had such a start within 16 bytes before them);
+        # a start INSIDE a real stream essentially never resynchronises (0 of 156). So a later
+        # start that also decodes is the better one: move forward while one exists.
+        moved = True
+        while moved:
+            moved = False
+            for s2 in range(st + 1, min(n, st + 17)):
+                r2 = _try_at(view, s2, pad_starts)
+                if r2 is not None:
+                    st, r, moved = s2, r2, True
+                    break
+        budget = [MAX_OUT]
+        extra = {"consumed": r["consumed"], "evidence": r["evidence"]}
+        rec = _step(r["format"], r["out"], r["truncated"], extra, budget[0])
+        budget[0] -= len(r["out"])
+        _with_chain(rec, r["out"], 1, budget)
+        found.append({"offset": st, "size": r["consumed"], "anchor": "search", "keyless": rec})
+        spans.append((st, st + r["consumed"]))
+    return found
+
+
+def _try_at(view, st, pad_starts):
+    """A headerless stream starting at `st` and ending where the next zero run begins (+0..3) or
+    at EOF: the accepted decode, or None."""
+    n = len(view)
+    k = bisect.bisect_right(pad_starts, st)
+    ends = [e for e in range(pad_starts[k], pad_starts[k] + 4) if e <= n] if k < len(pad_starts) else [n]
+    # formats without an end marker need the exact end: nearest candidate first (a farther one
+    # would append padding zeros as literals); end-marked formats find their own end, so they
+    # are tried once, at the farthest candidate
+    for e in sorted(ends):
+        if 16 <= e - st <= _SEARCH_MAX_LEN:
+            r = decompress.try_all(view[st:e], MAX_OUT, formats=_NO_END_MARKER)
+            if r is not None:
+                return r
+    e = max(ends)
+    if 16 <= e - st <= _SEARCH_MAX_LEN:
+        return _end_marked(view, st, e)
+    return None
 
 
 def recover(path) -> dict:
@@ -254,6 +537,9 @@ def recover(path) -> dict:
         blobs.append({"offset": h["offset"], "size": h["size"], "entropy": h["entropy"],
                       "sha256": h["sha256"], "keyless": _keyless(b)})
     streams = _streams(data, emb, blobs)
+    taken = [(x["offset"], x["offset"] + (x["size"] or 0)) for x in blobs + streams
+             if x["keyless"] and x["keyless"]["method"] != "plain"]
+    streams += _search(data, taken)
     # "plain" is a blob that needed no recovery (its bytes already carry a magic), not a recovery
     recovered = sum(1 for x in blobs + streams if x["keyless"] and x["keyless"]["method"] != "plain")
     return {
@@ -275,11 +561,18 @@ def _describe(k) -> str:
     if k["method"] == "plain":
         return f"plain {k['magic']} (not encoded)"
     if k["method"] == "xor8":
-        return f"single-byte XOR key=0x{k['key']:02x} reveals {k['magic']}"
-    cut = f" (truncated at the {k['truncated_at']}B cap)" if k.get("truncated_at") else ""
-    ev = f" evidence={k['evidence']}" if k.get("evidence") else ""
-    return (f"decompressed via {k['method']} -> {k['out_size']}B{cut} magic={k['out_magic']}{ev} "
-            f"{k['preview']!r}")
+        head = f"single-byte XOR key=0x{k['key']:02x} reveals {k['magic']}"
+    else:
+        cut = f" (truncated at the {k['truncated_at']}B cap)" if k.get("truncated_at") else ""
+        ev = f" evidence={k['evidence']}" if k.get("evidence") else ""
+        head = (f"decompressed via {k['method']} -> {k['out_size']}B{cut} magic={k['out_magic']}{ev} "
+                f"{k['preview']!r}")
+    for st in k.get("chain", []):
+        head += f" | then {st['method']} -> {st['out_size']}B magic={st['out_magic']}"
+    if k.get("nested"):
+        head += " | inside: " + ", ".join(f"{x['method']}@0x{x['offset']:x}->{x['out_size']}B"
+                                          for x in k["nested"])
+    return head
 
 
 def _print(res):

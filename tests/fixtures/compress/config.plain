@@ -1,0 +1,5 @@
+[agent]
+endpoint = https://telemetry.northwind.example/api/v3/status
+fallback = 192.0.2.17:8443
+mutex = Global\NW-5c1e9a
+sleep = 300

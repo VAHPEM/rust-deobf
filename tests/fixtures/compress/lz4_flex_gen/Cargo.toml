@@ -1,0 +1,7 @@
+[package]
+name = "lz4flexgen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lz4_flex = "=0.11.6"

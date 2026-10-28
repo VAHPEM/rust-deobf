@@ -91,7 +91,7 @@ def test_brieflz_reference_error_vectors():
     for n, size, data in cases:
         r = None
         try:
-            lits = bytearray()
+            lits = D._Lits()
             r = D._brieflz_core(data[:n], 0, n, 1 << 20, lits, size)
         except D._Bad:
             pass
@@ -238,12 +238,12 @@ def test_aplib_rep_match_short_match_and_nibble_paths_exercised():
     r = D.decode("aplib_ap32", C.aplib_ap32(data))
     assert r["out"] == data and r["declared_size"] == len(data)
     # 110 + 0x00 is the end marker; 0x01 (offset 0, length bit set) is not an end encoders emit
-    out, pos, cut = D._aplib_core(b"A\xc0\x00", 0, 3, 1 << 20, bytearray())
+    out, pos, cut = D._aplib_core(b"A\xc0\x00", 0, 3, 1 << 20, D._Lits())
     assert bytes(out) == b"A" and pos == 3 and not cut
     with pytest.raises(D._Bad):
-        D._aplib_core(b"A\xc0\x01", 0, 3, 1 << 20, bytearray())
+        D._aplib_core(b"A\xc0\x01", 0, 3, 1 << 20, D._Lits())
     with pytest.raises(D._Bad):                     # non-zero padding bits after the end marker
-        D._aplib_core(b"A\xc1\x00", 0, 3, 1 << 20, bytearray())
+        D._aplib_core(b"A\xc1\x00", 0, 3, 1 << 20, D._Lits())
 
 
 # --------------------------------------------------------------------------------- caps and bounds
@@ -366,3 +366,192 @@ def test_cli_json(tmp_path):
     d = res["decoded"][0]
     assert d["out_size"] == len(data) and d["out_magic"] == "elf" and d["evidence"] == "magic:elf"
     assert d["out_sha256"] == hashlib.sha256(data).hexdigest() and res["tried"] == list(D.FORMATS)
+
+
+# ------------------------------------------- independent reference vectors (tests/fixtures/compress)
+FX = ROOT / "tests" / "fixtures" / "compress"
+_REF_FMT = {"blz": "brieflz", "apl": "aplib", "blzpack": "brieflz_blzpack"}
+
+
+def _ref_pairs():
+    """(vector, format, plaintext) for every `<name>.<anything>.{blz,apl,blzpack}` with a
+    `<name>.plain` beside it (README.md there gives the reference encoders and commits)."""
+    pairs = []
+    for p in sorted(FX.glob("*")):
+        fmt = _REF_FMT.get(p.suffix.lstrip("."))
+        plain = FX / (p.name.split(".")[0] + ".plain")
+        if fmt and plain.is_file():
+            pairs.append((p, fmt, plain.read_bytes()))
+    return pairs
+
+
+def test_reference_vectors_round_trip_exactly():
+    pairs = _ref_pairs()
+    if not pairs:
+        pytest.skip("no reference vectors in tests/fixtures/compress")
+    for p, fmt, plain in pairs:
+        r = D.decode(fmt, p.read_bytes())
+        assert r and r["out"] == plain and r["consumed"] == p.stat().st_size, p.name
+        if fmt != "brieflz_blzpack":                    # raw streams: also with the size known
+            r = D.decode(fmt, p.read_bytes(), size=len(plain))
+            assert r and r["out"] == plain, p.name
+
+
+def test_reference_vectors_acceptance():
+    """What the headerless policy makes of each reference vector: code -> its ELF magic, README text
+    and the 133-byte config -> text (the config does NOT expand: 130-151 B -> 133 B, the text waiver),
+    repeated patterns -> repetitive, random (stream expands) -> rejected."""
+    want = {"code": "magic:elf", "text": "text", "config": "text", "runs": "repetitive", "random": None}
+    seen = set()
+    for p, fmt, plain in _ref_pairs():
+        name = p.name.split(".")[0]
+        r = D.try_all(p.read_bytes())
+        if fmt == "brieflz_blzpack":
+            assert r and r["format"] == fmt and r["out"] == plain
+            continue
+        if want[name] is None:
+            assert r is None, p.name
+        else:
+            assert r and r["format"] == fmt and r["out"] == plain and r["evidence"] == want[name], (p.name, r and r.get("evidence"))
+        seen.add(name)
+    if not seen:
+        pytest.skip("no reference vectors")
+
+
+def _lz4_flex_plain(name):
+    """The plaintexts of tests/fixtures/compress/lz4_flex_gen/src/main.rs, regenerated."""
+    text = b"".join(b"cfg host=192.0.2.%d port=%d name=node%d.example\n" % (i % 250, 8000 + i, i)
+                    for i in range(300))
+    x, binr = 12345, bytearray()
+    for i in range(5000):
+        x = (x * 1103515245 + 12345) & 0xFFFFFFFF
+        binr.append(((x >> 16) & 0xFF) & (0xFF if i % 3 == 0 else 0x07))
+    plains = {"text": text, "bin": bytes(binr), "rep": (bytes(binr[:400]) * 8)[:3000],
+              "run": b"\x41" * 70000, "tiny": b"abcdefghijklm", "short12": b"a" * 12,
+              "big": (text * 300)[:300000]}
+    return plains[name]
+
+
+def test_lz4_flex_vectors():
+    """Real lz4_flex 0.11.6 output (block::compress, compress_prepend_size, FrameEncoder default
+    and with checksums/content size/linked blocks): every vector decodes exactly under our STRICT
+    rules, end-of-block conditions included."""
+    doc = json.loads((FX / "lz4_flex_0.11.6.json").read_text())
+    kinds = {"block": "lz4_block", "block_sized": "lz4_block_sized", "frame": "lz4_frame",
+             "frame_linked_sums": "lz4_frame"}
+    assert len(doc["vectors"]) >= 20
+    for v in doc["vectors"]:
+        plain = _lz4_flex_plain(v["name"])
+        assert hashlib.sha256(plain).hexdigest() == v["plain_sha256"], v["name"]
+        z = bytes.fromhex(v["hex"])
+        r = D.decode(kinds[v["kind"]], z, size=len(plain) if v["kind"] == "block" else None)
+        assert r and r["out"] == plain and r["consumed"] == len(z), (v["name"], v["kind"])
+
+
+# ------------------------------------------------------------- encoder signature / stored / waiver
+def _blz_literals(data):
+    """A BriefLZ stream that codes every byte as a literal (what a parse of raw data looks like)."""
+    out = bytearray(data[:1])
+    w = C._TagWriter(out, 2)
+    for b in data[1:]:
+        w.bit(0)
+        out.append(b)
+    w.flush()
+    return bytes(out)
+
+
+def test_encoder_signature_veto():
+    base = b"[cfg]\nhost=192.0.2.5\nname=a.example\n" * 3
+    # BriefLZ: 4 equal literals in a row is possible for blz_pack (its last 3 bytes), 5 is not
+    ok = _blz_literals(base[:40] + b"zzzz" + base[40:])
+    assert D.decode("brieflz", ok) is not None
+    bad = _blz_literals(base[:40] + b"zzzzz" + base[40:])
+    assert D.decode("brieflz", bad) is None
+    # aPLib: literal 0x00 is never emitted (111+0000 is cheaper): one is tolerated, two reject
+    def apl_lits(data):
+        out = bytearray(data[:1])
+        w = C._TagWriter(out, 1)
+        for b in data[1:]:
+            w.bit(0)
+            out.append(b)
+        w.bit(1), w.bit(1), w.bit(0)
+        out.append(0)
+        w.flush()
+        return bytes(out)
+    assert D.decode("aplib", apl_lits(base + b"\x00" + base)) is not None
+    assert D.decode("aplib", apl_lits(base + b"\x00x\x00" + base)) is None
+    # LZ4 is exempt: high acceleration leaves runs as literals, and those streams stay accepted
+    lz4b = pytest.importorskip("lz4.block")
+    raw = BENIGN.read_bytes()
+    hits = 0
+    for off in range(20000, 30000, 3000):
+        z = lz4b.compress(raw[off:off + 8000], store_size=False, mode="fast", acceleration=16)
+        r = D.decode("lz4_block", z)
+        assert r["out"] == raw[off:off + 8000]
+        if r["lit_run"] >= 16:
+            hits += D.accept("lz4_block", z, r) is not None
+    assert hits >= 1
+
+
+def test_stored_streams_are_not_recoveries():
+    text = _shapes()["text"][:3000]
+    # an all-literal LZ4 block / an LZNT1 stream of raw chunks is the plaintext behind a length
+    assert D.decode("lz4_block", bytes([0xF0]) + C._lz4_len(len(text) - 15) + text)["out"] == text
+    assert D.try_all(bytes([0xF0]) + C._lz4_len(len(text) - 15) + text) is None
+    stored = (0x3000 | (len(text) - 1)).to_bytes(2, "little") + text
+    assert D.decode("lznt1", stored)["out"] == text and D.try_all(stored) is None
+
+
+def test_text_waiver_for_small_configs():
+    cfg = b"[agent]\nendpoint = https://telemetry.example/api\nfallback = 192.0.2.17:8443\nsleep = 300\n"
+    z = C.brieflz(cfg)
+    assert len(z) >= len(cfg) / 1.1                         # does not expand: no ratio pass
+    r = D.try_all(z)
+    assert r and r["format"] == "brieflz" and r["evidence"] == "text" and r["out"] == cfg
+    tiny = b"host=192.0.2.1 port=80\nname=x\n"[:40]            # < 64 B of text: no waiver
+    assert D.try_all(C.brieflz(tiny)) is None
+
+
+def test_repetitive_evidence_both_directions():
+    rng = _rng(40)
+    table = b"".join(i.to_bytes(4, "little") + bytes([i % 7, 0xAA, 0x55, i & 0xFF]) for i in range(64)) * 30
+    z = C.aplib(table)
+    r = D.try_all(z)
+    assert r and r["evidence"] in ("repetitive", "entropy_drop") and r["out"] == table
+    # mostly single-byte runs (what a parse of padding gives) is not "repetitive"
+    pad = (b"\xfe" * 200 + rng.randbytes(8)) * 20
+    assert D.evidence(pad, rng.randbytes(64), rng.randbytes(len(pad) // 20)) is None
+
+
+def test_xxh32_lane_packed_matches_plain_loop():
+    P1, P2, P3, P4, P5, M = 2654435761, 2246822519, 3266489917, 668265263, 374761393, 0xFFFFFFFF
+    rotl = lambda v, r: ((v << r) | (v >> (32 - r))) & M          # noqa: E731
+
+    def ref(data, seed):
+        n, i = len(data), 0
+        if n >= 16:
+            v = [(seed + P1 + P2) & M, (seed + P2) & M, seed, (seed - P1) & M]
+            while i + 16 <= n:
+                for k in range(4):
+                    v[k] = rotl((v[k] + int.from_bytes(data[i + 4 * k:i + 4 * k + 4], "little") * P2) & M, 13) * P1 & M
+                i += 16
+            h = (rotl(v[0], 1) + rotl(v[1], 7) + rotl(v[2], 12) + rotl(v[3], 18)) & M
+        else:
+            h = (seed + P5) & M
+        h = (h + n) & M
+        while i + 4 <= n:
+            h = rotl((h + int.from_bytes(data[i:i + 4], "little") * P3) & M, 17) * P4 & M
+            i += 4
+        while i < n:
+            h = rotl((h + data[i] * P5) & M, 11) * P1 & M
+            i += 1
+        h ^= h >> 15
+        h = h * P2 & M
+        h ^= h >> 13
+        h = h * P3 & M
+        return h ^ (h >> 16)
+    rng = _rng(41)
+    for n in list(range(0, 70)) + [255, 256, 1000, 4099]:
+        d = rng.randbytes(n)
+        for seed in (0, 1, 0xFFFFFFFF):
+            assert D.xxh32(d, seed) == ref(d, seed), (n, seed)

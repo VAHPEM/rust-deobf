@@ -1,0 +1,69 @@
+<div align="center">
+
+<img src="assets/hero.png" alt="rust-deobf: strings finds 0 indicators in an obfuscated Rust binary; recover.py recovers all 8 (IP, path, user agent, flag, registry key, mutex, URL, identifier)" width="100%">
+
+**`strings` sees nothing. FLOSS sees nothing. rust-deobf sees the C2.**
+
+rust-deobf recovers what obfuscated Rust binaries hide — C2 addresses, file paths, mutexes, registry
+keys, config — **without ever running the sample**.
+
+[![CI](https://github.com/VAHPEM/rust-deobf/actions/workflows/ci.yml/badge.svg)](https://github.com/VAHPEM/rust-deobf/actions/workflows/ci.yml)
+![core license](https://img.shields.io/badge/core-Apache--2.0-blue)
+![formats](https://img.shields.io/badge/formats-ELF%20%7C%20PE%20%7C%20Mach--O-informational)
+![arch](https://img.shields.io/badge/arch-x86--64%20%7C%20ARM64%20%7C%20x86-informational)
+![python](https://img.shields.io/badge/python-3.12-blue)
+
+[Demo](#-30-second-demo) · [Use it from an AI agent](#-use-it-from-an-ai-agent) ·
+[Quick start](#-quick-start) · [Results](#-results) · [Real malware](#-real-malware) ·
+[Limitations](#-honest-limitations)
+
+</div>
+
+---
+
+## ⚡ 30-second demo
+
+A stripped Rust program built the way malware ships (`opt-level="z"`, fat LTO, `panic=abort`),
+with its eight indicators encrypted by [`obfstr`](https://crates.io/crates/obfstr) — the strings
+sit in a struct, `match` arms, comparisons, and a branch that never runs. None is ever printed.
+
+<p align="center">
+  <img src="assets/demo.gif" alt="Terminal: strings | grep finds 0 matches; python3 scripts/recover.py sample recovers 8 decoded strings tagged ip, path, registry, mutex and url" width="100%">
+</p>
+
+<sub>Rendered from the captured output of a real run (Linux x86-64, rustc 1.97): the text is
+verbatim, the colours and typing animation are added, the ~8 s emulation wait is sped up, and the
+output is trimmed to the decoded strings. The plain-text output below is the same run.</sub>
+
+<details>
+<summary><b>Plain-text output (copyable)</b></summary>
+
+**What the file shows you:**
+
+```console
+$ B=build/scatter_obfstr__elf__size-lto__strip
+$ strings $B | grep -ciE 'northwind|10\.66|NW-5c1e9a|skip-update'
+0
+```
+
+**What rust-deobf recovers** (static + Unicorn emulation; the binary is never executed):
+
+```console
+$ python3 scripts/recover.py $B
+binary: scatter_obfstr__elf__size-lto__strip   format=ELF   arch=x86_64
+  static x86-64 (recover_callsite): 0 strings  decoders=9  seconds=0.2
+  emulation (recover_emulate): 8 strings  functions=416/416  timed_out=False  workers=1  seconds=6.8
+
+== decoded strings ==
+  10.66.12.7:8443   [ip]
+      function 0xf20c  (emulation)
+  C:\ProgramData\NorthwindSvc\state.db   [path]
+      function 0xf20c  (emulation)
+  Mozilla/5.0 (Windows NT 10.0; Win64; x64) NorthwindAgent/2.1
+      function 0xf20c  (emulation)
+  --skip-update-check
+      function 0xf443  (emulation)
+  Software\Northwind\Agent\Settings   [registry]
+      function 0xf51b  (emulation)
+  Global\NW-5c1e9a   [mutex]
+   

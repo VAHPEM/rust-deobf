@@ -27,15 +27,26 @@ and the stream must end exactly where the format says it ends.
 
 The headerless formats (lz4_block, aplib, brieflz, lznt1 and, more weakly, lz4_block_sized) have
 no magic. Random bytes die in the strict decoders (0 of 40,000 random 512 B / 4 KiB blobs decode
-in any format), but zero-heavy UNcompressed data does not: a run of 0x00 is a valid all-literal
+in any format), but structured UNcompressed data does not: a run of 0x00 is a valid all-literal
 BriefLZ/aPLib/LZNT1 stream (1,647 of 14,328 windows of the repo's benign fixture binaries decoded
 as one of them). So, beyond strict decoding, a headerless decode is accepted only when
+  (0) it looks ENCODER-MADE: no compressor spends literals on a run of one byte value where a match
+      at offset 1 is cheaper -- BriefLZ never emits >= 5 equal literals in a row (blz_pack takes
+      every >= 4-byte match before its last 3 bytes), LZNT1 >= 6, aPLib >= 4, and aPLib never codes
+      0x00 as a literal (111+0000 is 7 bits vs 9; apultra: 0 literal zeros in every reference
+      vector), so >= 2 literal zeros reject it. Parses of padding/tables hit these at once (the
+      headerless decoders abort there, which also keeps a parse of zero-heavy data short). Not for
+      LZ4: high acceleration leaves runs as literals. A "stream" that is only STORED -- LZNT1 with
+      no compressed chunk, an LZ4 block with no match -- is plaintext behind a length field:
+      rejected (it is visible in the file anyway, and any text parses that way); and
   (1) it consumes the WHOLE input -- or, for the formats with an explicit end (aPLib's end-of-data
       marker, LZNT1's 0x0000 terminator), at least min(128 bytes, the whole input), the same rule
       recover_blobs applies to raw deflate; and
-  (2) it EXPANDS: output >= 1.1x the bytes consumed, unless the output carries a validated magic
-      (on real binaries, zero-heavy code/data read as BriefLZ/aPLib/LZNT1 parses as near-identity
-      all-literal streams that pass (1); real compression of anything worth triage expands); and
+  (2) it EXPANDS: output >= 1.1x the bytes consumed (zero-heavy code/data read as BriefLZ/aPLib/
+      LZNT1 parses as near-identity all-literal streams that pass (1)), unless the output carries a
+      validated magic, or is >= 64 bytes of "text" (a 100-200 byte key=value config barely
+      compresses -- the reference BriefLZ/apultra vectors of a 133-byte config are 130-151 bytes --
+      yet is exactly what a malware config looks like); and
   (3) its output is INTERESTING (evidence()), judged on the bytes that came out:
       - "magic:<kind>"  a validated file magic at offset 0 (recover_embedded's _find_magics: PE
                         needs e_lfanew -> PE\\0\\0, ELF a sane e_ident; only signatures of >= 4
@@ -48,13 +59,17 @@ as one of them). So, beyond strict decoding, a headerless decode is accepted onl
                         is biased low for short samples); the LITERALS' entropy is >= 0.2 below
                         their own uniform expectation (>= 3.7 sigma at 256 literals, >= 50 sigma
                         at 4 KiB); and the output is >= 0.25 bit/byte below the input (a
-                        constant/low-entropy input "decoding" to itself is no decompression).
+                        constant/low-entropy input "decoding" to itself is no decompression);
+      - "repetitive"    long-range repetition (tables, repeated records): >= 1024 output bytes,
+                        >= 8x expansion, output >= 2 bits/byte below uniform and >= 0.25 below
+                        the input, >= 4 distinct values, and < 50% of it in single-byte runs (a
+                        parse of padding is runs).
       The literal criteria matter: a decoder run over random input copies random literals, and a
       long match replicates a few of them, so the OUTPUT can look low-entropy or printable (a run
       of 'A's) while the LITERALS -- the bytes taken straight from the input -- stay random. Real
       compressed text or code keeps some of the payload's skew in its literals (measured on x86-64
       code: 0.24-1.2 bits below uniform for aPLib, ~1 bit for LZ4/BriefLZ/LZNT1). A payload
-      without magic, not text, and with < 256 literals (tiny, or almost all matches) is missed.
+      without magic, not text, not repetitive, and with < 256 literals is missed.
 Container formats (magic + checksums or exact sizes) need neither rule; trailing bytes after a
 self-delimiting container are allowed (a carve can overshoot) and reported via `consumed`.
 
@@ -66,6 +81,7 @@ semantics, not adapted.
 """
 import hashlib
 import math
+import re
 import struct
 import sys
 import zlib
@@ -81,11 +97,39 @@ _MIN_STREAM = 128       # an end-marked headerless stream shorter than the blob 
 _SAMPLE = 64 << 10      # bytes of output / literals the evidence gate looks at
 _GAMMA_MAX = 1 << 26    # a gamma code above this cannot be a valid length/offset under the cap
 _MIN_OUT = 8            # outputs shorter than this are never reported (nothing to triage)
-_MIN_RATIO = 1.1        # a headerless decode must expand its input at least this much
+_MIN_RATIO = 1.1        # a headerless decode must expand its input at least this much ...
+_TEXT_WAIVE = 64        # ... unless it is >= this many bytes of text (or carries a validated magic)
+_REP_MIN_OUT = 1024     # "repetitive" evidence: output size floor ...
+_REP_RATIO = 8          # ... and expansion floor
 
 
 class _Bad(Exception):
     """Invalid stream (internal; never escapes a public decoder)."""
+
+
+_LIT_RUN = 16           # LZ4 literal stretches are only checked for runs this long (cheap regex)
+_RUN_RE = re.compile(rb"(.)\1{%d}" % (_LIT_RUN - 1), re.S)
+# equal-literal run (bytes adjacent in the output, all emitted as literals) that vetoes a headerless
+# decode as "not made by an encoder" -- see accept(); measured maxima on reference/our encoders:
+# BriefLZ 4 (jibsen l1/l10: 3), LZNT1 3, aPLib 1 (apultra: 0)
+_LIT_RUN_VETO = {"brieflz": 5, "lznt1": 6, "aplib": 4}
+_APLIB_ZERO_VETO = 2    # literal 0x00 bytes in a headerless aPLib stream (apultra/aPLib emit none)
+# (the headerless decoders abort as soon as a veto is reached -- a parse of zero-heavy data dies in
+# a few bytes instead of running to the end; decode() therefore rejects those streams outright)
+
+
+class _Lits(bytearray):
+    """The literal-byte sample (first _SAMPLE literals) plus `run`: the longest stretch of equal
+    bytes the stream emitted as consecutive LITERALS (adjacent in the output, no match between)."""
+    run = 0
+    matches = 0      # LZ4 back-references decoded (an all-literal LZ4 block is stored plaintext)
+    zeros = 0        # literal 0x00 bytes (aPLib codes a zero in 7 bits as 111+0000, never as a literal)
+    veto = zveto = 1 << 30   # headerless decoders abort early at the accept() vetoes (_LIT_RUN_VETO)
+
+    def note_slice(self, b):
+        """A literal run copied as one slice (LZ4 / LZNT1 literal stretch)."""
+        if self.run < _LIT_RUN and len(b) >= _LIT_RUN and _RUN_RE.search(b):
+            self.run = _LIT_RUN
 
 
 def _copy(out, off, n):
@@ -102,6 +146,7 @@ def _copy(out, off, n):
 # ---------------------------------------------------------------------------------------- xxHash32
 _P1, _P2, _P3, _P4, _P5 = 2654435761, 2246822519, 3266489917, 668265263, 374761393
 _M32 = 0xFFFFFFFF
+_MASK4 = sum(_M32 << (64 * k) for k in range(4))
 try:                                   # optional C implementation (not a dependency)
     import xxhash as _xxhash
 except ImportError:
@@ -110,24 +155,28 @@ except ImportError:
 
 def xxh32(data, seed=0) -> int:
     """xxHash32 (the LZ4 frame checksum). Uses the `xxhash` package when importable, else pure
-    Python (~2 MB/s: a 16 MiB frame with content + block checksums costs ~16 s to verify;
+    Python (~5 MB/s, lane-packed; a 16 MiB frame with content + block checksums costs ~6 s;
     `pip install xxhash` makes it C speed)."""
     if _xxhash is not None:
         return _xxhash.xxh32_intdigest(bytes(data), seed)
     n = len(data)
     i = 0
     if n >= 16:
-        v1, v2, v3, v4 = (seed + _P1 + _P2) & _M32, (seed + _P2) & _M32, seed & _M32, (seed - _P1) & _M32
+        # the 4 independent lanes ride in one 256-bit int (a 64-bit slot each): a lane product
+        # (< 2^64) cannot carry into its neighbour, and masking every slot to 32 bits after each
+        # step keeps them apart -- one big-int op does 4 lane ops (2.2x the per-lane loop)
         stop = n - n % 16
-        for a, b, c, d in struct.iter_unpack("<4I", memoryview(data)[:stop]):
-            v1 = (v1 + a * _P2) & _M32
-            v1 = (((v1 << 13) | (v1 >> 19)) & _M32) * _P1 & _M32
-            v2 = (v2 + b * _P2) & _M32
-            v2 = (((v2 << 13) | (v2 >> 19)) & _M32) * _P1 & _M32
-            v3 = (v3 + c * _P2) & _M32
-            v3 = (((v3 << 13) | (v3 >> 19)) & _M32) * _P1 & _M32
-            v4 = (v4 + d * _P2) & _M32
-            v4 = (((v4 << 13) | (v4 >> 19)) & _M32) * _P1 & _M32
+        sp = bytearray(2 * stop)                          # each u32 widened to a u64 slot
+        for j in range(4):
+            sp[j::8] = data[j:stop:4]
+        mp, p1, p2, fb, mv = _MASK4, _P1, _P2, int.from_bytes, memoryview(sp)
+        V = sum(v << (64 * k) for k, v in enumerate(
+            ((seed + _P1 + _P2) & _M32, (seed + _P2) & _M32, seed & _M32, (seed - _P1) & _M32)))
+        for s in range(0, 2 * stop, 32):
+            V = (V + fb(mv[s:s + 32], "little") * p2) & mp
+            V = ((V << 13) & mp | (V >> 19) & mp) * p1 & mp
+        del mv
+        v1, v2, v3, v4 = ((V >> (64 * k)) & _M32 for k in range(4))
         i = stop
         h = (((v1 << 1) | (v1 >> 31)) + ((v2 << 7) | (v2 >> 25))
              + ((v3 << 12) | (v3 >> 20)) + ((v4 << 18) | (v4 >> 14))) & _M32
@@ -189,6 +238,7 @@ def _lz4_block(src, i, end, out, base, max_out, lits):
             out += src[i:i + take]
             if len(lits) < _SAMPLE:
                 lits += src[i:i + min(take, _SAMPLE - len(lits))]
+            lits.note_slice(src[i:i + take])
             if take < lit:
                 return True
             i += lit
@@ -213,6 +263,7 @@ def _lz4_block(src, i, end, out, base, max_out, lits):
                 if b != 255:
                     break
         ml += 4
+        lits.matches += 1
         last_match = len(out) - blk
         room = max_out - len(out)
         if ml > room:
@@ -222,13 +273,15 @@ def _lz4_block(src, i, end, out, base, max_out, lits):
 
 
 def _res(out, consumed, truncated, lits, **kw):
-    r = {"out": bytes(out), "consumed": consumed, "truncated": truncated, "literals": bytes(lits)}
+    r = {"out": bytes(out), "consumed": consumed, "truncated": truncated, "literals": bytes(lits),
+         "lit_run": getattr(lits, "run", 0), "lit_zeros": getattr(lits, "zeros", 0),
+         "matches": getattr(lits, "matches", 0)}
     r.update(kw)
     return r
 
 
 def _lz4_block_dec(data, max_out, size=None):
-    out, lits = bytearray(), bytearray()
+    out, lits = bytearray(), _Lits()
     cut = _lz4_block(data, 0, len(data), out, 0, max_out, lits)
     if size is not None and not cut and len(out) != size:
         raise _Bad("decoded size differs from the declared size")
@@ -242,7 +295,7 @@ def _lz4_block_sized_dec(data, max_out):
     # LZ4 expands at most ~255x (a 15+255*k length per byte): a larger claim is not a size field
     if not 0 < size <= (len(data) - 4) * 255 + 16:
         raise _Bad("implausible size prefix")
-    out, lits = bytearray(), bytearray()
+    out, lits = bytearray(), _Lits()
     cut = _lz4_block(data, 4, len(data), out, 0, max_out, lits)
     if not cut and len(out) != size:
         raise _Bad("decoded size differs from the size prefix")
@@ -312,7 +365,7 @@ def _lz4_frame_one(data, i, out, max_out, lits):
 def _lz4_frame_dec(data, max_out):
     if int.from_bytes(data[:4], "little") != _LZ4_MAGIC:
         raise _Bad("no LZ4 frame magic")
-    out, lits = bytearray(), bytearray()
+    out, lits = bytearray(), _Lits()
     i, cut = _lz4_frame_one(data, 0, out, max_out, lits)
     frames = 1
     while not cut and i + 4 <= len(data):              # concatenated frames / skippable frames
@@ -339,7 +392,7 @@ def _lz4_frame_dec(data, max_out):
 def _lz4_legacy_dec(data, max_out):
     if int.from_bytes(data[:4], "little") != _LZ4_LEGACY_MAGIC:
         raise _Bad("no legacy LZ4 magic")
-    out, lits = bytearray(), bytearray()
+    out, lits = bytearray(), _Lits()
     i, n, blocks = 4, len(data), 0
     while i + 4 <= n:
         bs = int.from_bytes(data[i:i + 4], "little")
@@ -409,6 +462,7 @@ def _aplib_core(src, i, end, max_out, lits):
 
     lwm = 0          # 1 right after a match: the next match cannot be a rep-match
     r0 = 0           # last match offset (0 = none yet)
+    lr, lb = 1, src[i]   # current run of equal, output-adjacent literal bytes (see _Lits)
     while True:
         if len(out) > max_out:                          # an item overshoots the cap by <= 3 bytes
             del out[max_out:]
@@ -416,12 +470,26 @@ def _aplib_core(src, i, end, max_out, lits):
         if not bit():                                   # 0: literal
             if pos >= end:
                 raise _Bad("out of input reading a literal")
-            out.append(src[pos])
+            b = src[pos]
+            out.append(b)
+            if not b:
+                lits.zeros += 1
+                if lits.zeros >= lits.zveto:
+                    raise _Bad("literal zeros no aPLib encoder emits")
             if len(lits) < _SAMPLE:
-                lits.append(src[pos])
+                lits.append(b)
+            if b == lb and lr:
+                lr += 1
+                if lr > lits.run:
+                    lits.run = lr
+                    if lr >= lits.veto:
+                        raise _Bad("literal run no encoder emits")
+            else:
+                lr, lb = 1, b
             pos += 1
             lwm = 0
             continue
+        lr = 0
         if not bit():                                   # 10: match
             g = gamma()
             if not lwm and g == 2:                      # rep-match: reuse the last offset
@@ -481,7 +549,8 @@ def _aplib_core(src, i, end, max_out, lits):
 
 
 def _aplib_dec(data, max_out, size=None):
-    lits = bytearray()
+    lits = _Lits()
+    lits.veto, lits.zveto = _LIT_RUN_VETO["aplib"], _APLIB_ZERO_VETO
     out, pos, cut = _aplib_core(data, 0, len(data), max_out, lits)
     if size is not None and not cut and len(out) != size:
         raise _Bad("decoded size differs from the declared size")
@@ -497,7 +566,7 @@ def _aplib_ap32_dec(data, max_out):
     packed = data[hs:hs + psize]
     if zlib.crc32(packed) != pcrc:
         raise _Bad("packed CRC-32 mismatch")
-    lits = bytearray()
+    lits = _Lits()
     out, pos, cut = _aplib_core(packed, 0, psize, max_out, lits)
     if not cut:
         if pos != psize or len(out) != osize or zlib.crc32(out) != ocrc:
@@ -522,6 +591,7 @@ def _brieflz_core(src, i, end, max_out, lits, size=None):
     out.append(src[i])
     lits.append(src[i])
     pos = i + 1
+    lr, lb = 1, src[i]   # current run of equal, output-adjacent literal bytes (see _Lits)
     tag = 0
     nb = 0
 
@@ -576,11 +646,21 @@ def _brieflz_core(src, i, end, max_out, lits, size=None):
         if not bit():
             if pos >= end:
                 raise _Bad("out of input reading a literal")
-            out.append(src[pos])
+            b = src[pos]
+            out.append(b)
             if len(lits) < _SAMPLE:
-                lits.append(src[pos])
+                lits.append(b)
+            if b == lb and lr:
+                lr += 1
+                if lr > lits.run:
+                    lits.run = lr
+                    if lr >= lits.veto:
+                        raise _Bad("literal run no encoder emits")
+            else:
+                lr, lb = 1, b
             pos += 1
             continue
+        lr = 0
         ln = gamma() + 2
         g = gamma()
         if pos >= end:
@@ -595,7 +675,8 @@ def _brieflz_core(src, i, end, max_out, lits, size=None):
 
 
 def _brieflz_dec(data, max_out, size=None):
-    lits = bytearray()
+    lits = _Lits()
+    lits.veto = _LIT_RUN_VETO["brieflz"]
     out, pos, cut = _brieflz_core(data, 0, len(data), max_out, lits, size)
     return _res(out, pos, cut, lits)
 
@@ -609,7 +690,7 @@ def _brieflz_blzpack_dec(data, max_out):
     BriefLZ stream."""
     if data[:4] != _BLZ_MAGIC:
         raise _Bad("no blzpack magic")
-    out, lits = bytearray(), bytearray()
+    out, lits = bytearray(), _Lits()
     i, n, blocks = 0, len(data), 0
     while i + 24 <= n and data[i:i + 4] == _BLZ_MAGIC:
         ver, psize, pcrc, dsize, dcrc = struct.unpack_from(">5I", data, i + 4)
@@ -647,11 +728,13 @@ def _lznt1_dec(data, max_out):
     Every chunk but the last decodes to exactly 4096 bytes; matches stay inside their chunk; unused
     flag bits after the last item are zero. The stream ends at the input's end or a 0x0000 header."""
     n = len(data)
-    out, lits = bytearray(), bytearray()
+    out, lits = bytearray(), _Lits()
+    lits.veto = _LIT_RUN_VETO["lznt1"]
     i = 0
     chunks = 0
     last_len = 4096
     terminated = False
+    packed = 0                                          # chunks actually stored compressed
     while i + 2 <= n:
         h = data[i] | (data[i + 1] << 8)
         if h == 0:
@@ -668,7 +751,9 @@ def _lznt1_dec(data, max_out):
         c = data[i + 2:i + 2 + csz]
         chunk = bytearray()
         if h & 0x8000:
+            packed += 1
             j = 0
+            lr, lb = 0, -1
             while j < csz:
                 flags = c[j]
                 j += 1
@@ -680,9 +765,19 @@ def _lznt1_dec(data, max_out):
                             raise _Bad("flag bits set past the chunk end")
                         break
                     if not (flags >> k) & 1:
-                        chunk.append(c[j])
+                        b = c[j]
+                        chunk.append(b)
                         j += 1
+                        if b == lb and lr:
+                            lr += 1
+                            if lr > lits.run:
+                                lits.run = lr
+                                if lr >= lits.veto:
+                                    raise _Bad("literal run no encoder emits")
+                        else:
+                            lr, lb = 1, b
                         continue
+                    lr = 0
                     if j + 2 > csz:
                         raise _Bad("truncated token")
                     tok = c[j] | (c[j + 1] << 8)
@@ -707,7 +802,7 @@ def _lznt1_dec(data, max_out):
         room = max_out - len(out)
         if len(chunk) > room:
             out += chunk[:room]
-            return _res(out, i, True, lits, chunks=chunks + 1)
+            return _res(out, i, True, lits, chunks=chunks + 1, packed_chunks=packed)
         out += chunk
         last_len = len(chunk)
         chunks += 1
@@ -716,7 +811,7 @@ def _lznt1_dec(data, max_out):
         raise _Bad("no chunk")
     if not terminated and i != n:
         raise _Bad("odd trailing byte")
-    return _res(out, i, False, lits, chunks=chunks, terminated=terminated)
+    return _res(out, i, False, lits, chunks=chunks, terminated=terminated, packed_chunks=packed)
 
 
 def _lznt1_literals(c, limit):
@@ -776,6 +871,13 @@ def _h_uniform(n: int) -> float:
     return _H_UNIFORM[n]
 
 
+def _run_fraction(b) -> float:
+    """Share of `b` that sits in runs of >= 16 equal bytes."""
+    if not b:
+        return 0.0
+    return sum(m.end() - m.start() for m in _RUN_RE.finditer(bytes(b))) / len(b)
+
+
 def validated_magic(b):
     """A file magic at offset 0 strong enough to prove a decode: recover_embedded's validated hit
     (PE needs e_lfanew -> PE\\0\\0, ELF a sane e_ident) for any signature of >= 4 bytes, or the
@@ -805,6 +907,17 @@ def evidence(out, lits, inp=None):
                 and _entropy(lits) <= _h_uniform(len(lits)) - 0.2
                 and _entropy(inp[:_SAMPLE]) - h_out >= 0.25):
             return "entropy_drop"
+    # long-range repetition: a payload of repeated records/patterns (tables, padding-filled
+    # structures) is mostly matches, so its literals are few and need not look like anything; the
+    # decode itself is the evidence when it expands >= 8x into output >= 2 bits/byte below
+    # uniform (and below the stream that produced it) -- and is not mostly single-byte runs
+    # (>= 16 equal bytes), which is what a parse of padding produces (a run of one value is no
+    # payload)
+    if inp is not None and len(out) >= _REP_MIN_OUT and len(out) >= _REP_RATIO * len(inp) \
+            and len(set(head)) >= 4 and _run_fraction(head) < 0.5:
+        h_out = _entropy(head)
+        if h_out <= _h_uniform(len(head)) - 2.0 and h_out <= _entropy(inp[:_SAMPLE]) - 0.25:
+            return "repetitive"
     return None
 
 
@@ -859,13 +972,35 @@ def accept(fmt, data, r):
                 return None
         elif r["consumed"] != n:
             return None
+    # Encoder signature: a compressor does not spend literals on a run of one byte value when a
+    # match at offset 1 is cheaper; a strict parse of UNcompressed data (zero padding, tables of
+    # small integers) does it constantly. Per format, from the reference encoders: BriefLZ matches
+    # any run of >= 4 equal bytes before its last 3 (blz_pack: len >= 4 at offs 0 always taken),
+    # LZNT1 any run of >= 3 (+ a little slack: ours/Windows-style greedy), aPLib codes a byte equal
+    # to one <= 15 back -- and every 0x00 -- as a 7-bit 111+nibble item, never a 9-bit literal
+    # (apultra: no literal zero in any reference vector). Not used for LZ4: high acceleration skips
+    # positions and can leave runs as literals (measured: 16-byte runs at acceleration 16).
+    # stored, not compressed: an LZNT1 stream of only raw chunks, or an LZ4 block with no match,
+    # is the plaintext behind a length field -- already visible in the file, nothing to recover
+    # (and any text region can parse that way)
+    if (fmt == "lznt1" and not r.get("packed_chunks")) or (fmt.startswith("lz4_block") and not r.get("matches")):
+        return None
+    lim = _LIT_RUN_VETO.get(fmt)
+    if lim is not None and r.get("lit_run", 0) >= lim:
+        return None
+    if fmt == "aplib" and r.get("lit_zeros", 0) >= _APLIB_ZERO_VETO:
+        return None
     ev = evidence(r["out"], r["literals"], data[:r["consumed"]])
     if ev is None:
         return None
     # decompression expands: a decode that is not >= 1.1x its input is a near-identity parse of
     # uncompressed bytes (low-entropy code/data read as all-literal items), not a payload. A
     # validated magic is proof enough on its own (a compressed, already-packed PE may not expand).
-    if not ev.startswith("magic:") and not r["truncated"] and len(r["out"]) < _MIN_RATIO * r["consumed"]:
+    # Text of >= _TEXT_WAIVE bytes waives it too: a short config (100-200 B of key=value lines)
+    # barely compresses, yet is exactly what a malware config looks like; printable output AND
+    # printable literals from a stream that decoded strictly and completely is evidence enough.
+    waive = ev.startswith("magic:") or (ev == "text" and len(r["out"]) >= _TEXT_WAIVE)
+    if not waive and not r["truncated"] and len(r["out"]) < _MIN_RATIO * r["consumed"]:
         return None
     r["evidence"] = ev
     return r
