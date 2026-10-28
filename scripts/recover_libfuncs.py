@@ -342,9 +342,11 @@ def _cs_md(arch: str):
 def _call_graph(code: bytes, base: int, starts: list[int], arch: str):
     """{start: {"calls": set(target_starts), "tail": target_or_None, "size": bytes, "insns": n}}.
 
-    Direct calls/branches only (E8/E9/EB on x86, bl/b on arm64); indirect calls are left out. A
-    function spans from its start to the next start. `tail` is the single direct unconditional jump
-    a forwarder thunk is, when that is the function's only control flow."""
+    Direct calls/branches only (E8/E9/EB on x86, bl/b on arm64) go into `calls`; indirect calls,
+    conditional branches and direct calls to a target that is not a known start (a PLT/import stub)
+    count as `other_flow` -- they are real control flow even though they name no labelled function.
+    A function spans from its start to the next start. `tail` is the single direct unconditional
+    jump a forwarder thunk is, when that is the function's only control flow."""
     md = _cs_md(arch)
     startset = set(starts)
     nexts = {s: n for s, n in zip(starts, starts[1:] + [base + len(code)])}
@@ -368,10 +370,13 @@ def _call_graph(code: bytes, base: int, starts: list[int], arch: str):
                         t = _imm(insn.op_str)
                         if t in startset:
                             calls.add(t)
+                        else:
+                            other_flow += 1   # a call to a PLT/import stub or mid-function: not
+                            #                   a known start, but still control flow
                     elif m == "b" and insn.op_str.startswith("#"):
                         t = _imm(insn.op_str)
-                        if t in startset and not calls and insns <= 4:
-                            tail = t     # forwarder: short, no calls, tail-branch to a known fn
+                        if t in startset and not calls and not other_flow and insns <= 4:
+                            tail = t     # forwarder: short, straight-line, tail-branch to a known fn
                         other_flow += 1
                         stop = True                       # unconditional branch ends the block
                     elif m == "ret":
@@ -385,10 +390,12 @@ def _call_graph(code: bytes, base: int, starts: list[int], arch: str):
                         t = _rel_target(insn)
                         if t in startset:
                             calls.add(t)
+                        else:
+                            other_flow += 1   # PLT/import stub or non-start target: other flow
                     elif b0 in (_JMP32_X86, _JMP8_X86):
                         t = _rel_target(insn)
-                        if t in startset and not calls and insns <= 4:
-                            tail = t     # forwarder: short, no calls, tail-jump to a known fn
+                        if t in startset and not calls and not other_flow and insns <= 4:
+                            tail = t     # forwarder: short, straight-line, tail-jump to a known fn
                         other_flow += 1
                         stop = True                       # unconditional jump ends the block
                     elif b0 in _RET_X86:
@@ -521,7 +528,16 @@ def _selftest():
     code[0x50:0x5b] = (b"\xe8" + rel32(0x1050, 0x1030).to_bytes(4, "little")  # D1: call DP; call DA; ret
                        + b"\xe8" + rel32(0x1055, 0x1040).to_bytes(4, "little") + b"\xc3")
     code[0x60:0x66] = b"\xe8" + rel32(0x1060, 0x1050).to_bytes(4, "little") + b"\xc3"   # D2: call D1; ret
-    starts = [0x1000, 0x1010, 0x1020, 0x1030, 0x1040, 0x1050, 0x1060]
+    # N1  @0x1070: call F; call 0x5000(PLT); ret    -> NOT a thunk (a second, unlabelled call)
+    # N2  @0x1080: test rdi,rdi; je +0; jmp F       -> NOT a thunk (conditional flow first)
+    # N3  @0x1090: call DP; call 0x5000(PLT); ret   -> NOT drop glue (calls something unknown)
+    code[0x70:0x7b] = (b"\xe8" + rel32(0x1070, 0x1000).to_bytes(4, "little")
+                       + b"\xe8" + rel32(0x1075, 0x5000).to_bytes(4, "little") + b"\xc3")
+    code[0x80:0x8a] = (b"\x48\x85\xff" + b"\x74\x00"
+                       + b"\xe9" + rel32(0x1085, 0x1000).to_bytes(4, "little"))
+    code[0x90:0x9b] = (b"\xe8" + rel32(0x1090, 0x1030).to_bytes(4, "little")
+                       + b"\xe8" + rel32(0x1095, 0x5000).to_bytes(4, "little") + b"\xc3")
+    starts = [0x1000, 0x1010, 0x1020, 0x1030, 0x1040, 0x1050, 0x1060, 0x1070, 0x1080, 0x1090]
     graph = _call_graph(bytes(code), base, starts, "x86_64")
     assert graph[0x1010]["tail"] == 0x1000, graph[0x1010]
     assert graph[0x1020]["calls"] == {0x1000} and graph[0x1020]["ends_ret"], graph[0x1020]
@@ -535,8 +551,10 @@ def _selftest():
     assert prop[0x1020]["name"] == "thunk.std::foo", prop.get(0x1020)
     assert prop[0x1050]["via"] == "drop-glue" and prop[0x1060]["via"] == "drop-glue", prop
     assert 0x1000 not in prop and 0x1030 not in prop          # already labelled, not re-emitted
+    assert graph[0x1070]["other_flow"] == 1 and graph[0x1080]["tail"] is None
+    assert not ({0x1070, 0x1080, 0x1090} & set(prop)), {hex(k): v for k, v in prop.items()}
     print("selftest OK: v0 paths, base62, library classification, call-graph propagation "
-          "(2 thunks + 2 drop-glue to a fixed point)")
+          "(2 thunks + 2 drop-glue to a fixed point; PLT calls / guarded jumps not propagated)")
 
 
 def main():
