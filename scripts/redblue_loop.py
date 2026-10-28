@@ -26,8 +26,14 @@ Prerequisites to actually run a round (the loop detects them and explains what i
     python3 scripts/redblue_loop.py --rounds 50 --seed 1 --out build/redblue   # reproducible
     python3 scripts/redblue_loop.py --selftest                        # logic only, no toolchain
 
+A planted string RustCloak did not actually hide (still present as plaintext UTF-8 / UTF-16LE in
+the built binary) is reported as `not_hidden` and excluded from the recall figures: finding it says
+nothing about rust-deobf. A round in which nothing was hidden is skipped ("plugin had no effect"),
+as is a round whose build failed; skipped rounds are counted and reported.
+
 Exit codes: 0 all planted strings recovered in every round, 1 at least one miss (fixtures saved),
-2 usage / prerequisites not met.
+2 usage / prerequisites not met, 3 no round was evaluable (every build failed or the plugin hid
+nothing -- a broken toolchain, not a clean bill of health).
 """
 from __future__ import annotations
 
@@ -45,7 +51,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-EXIT_OK, EXIT_MISS, EXIT_USAGE = 0, 1, 2
+EXIT_OK, EXIT_MISS, EXIT_USAGE, EXIT_NO_ROUNDS = 0, 1, 2, 3
 
 
 # --------------------------------------------------------------------------------------------
@@ -214,14 +220,51 @@ def build(src: str, cfg: dict, nightly: str, plugin: Path, out: Path) -> tuple[b
         except Exception as e:
             return False, f"compile error: {type(e).__name__}: {e}"
         if r.returncode != 0 or not out.is_file():
-            return False, "rustc failed: " + (r.stderr.strip().splitlines() or ["?"])[-1]
+            return False, "rustc failed: " + _first_error_line(r.stderr)
         return True, "ok"
+
+
+def _first_error_line(stderr: str) -> str:
+    """The line that says what went wrong. rustc's LAST line is the generic "error: aborting due to
+    N previous errors", so report the first line that starts with `error` (e.g. `error[E0425]: ...`
+    or a plugin load failure), else the first line mentioning "error", else the last line."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    if not lines:
+        return "?"
+    for ln in lines:
+        if ln.lower().startswith("error"):
+            return ln
+    for ln in lines:
+        if "error" in ln.lower():
+            return ln
+    return lines[-1]
+
+
+def not_hidden(data: bytes, planted: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Planted strings still present verbatim in the binary (UTF-8 or UTF-16LE): the obfuscator
+    did not hide them, so recovering them is not evidence about rust-deobf either way."""
+    return [(tag, s) for tag, s in planted
+            if s.encode("utf-8") in data or s.encode("utf-16-le") in data]
 
 
 def evaluate(binary: Path, planted: list[tuple[str, str]], time_budget: float,
              recover_fn=None) -> dict:
     """Run recovery on `binary` and diff against the planted strings. `recover_fn(path)` is
-    injectable for testing; by default it is recover.run with emulation on."""
+    injectable for testing; by default it is recover.run with emulation on.
+
+    Only strings the obfuscator actually hid count: those left in plaintext are reported under
+    `not_hidden` and excluded from `planted` / `recovered` / `missed`. If nothing was hidden the
+    result carries `skipped` and recovery is not run at all."""
+    try:
+        data = Path(binary).read_bytes()
+    except OSError:
+        data = b""
+    plain = not_hidden(data, planted)
+    hidden = [p for p in planted if p not in plain]
+    if not hidden:
+        return {"planted": 0, "planted_total": len(planted), "recovered": 0, "missed": [],
+                "not_hidden": plain, "found_tags": [], "extra": [],
+                "skipped": "plugin had no effect"}
     if recover_fn is None:
         import recover
 
@@ -234,11 +277,12 @@ def evaluate(binary: Path, planted: list[tuple[str, str]], time_budget: float,
     def hit(s):
         return s in recovered or any(s in r for r in recovered)
 
-    missed = [(tag, s) for tag, s in planted if not hit(s)]
-    found = [(tag, s) for tag, s in planted if hit(s)]
+    missed = [(tag, s) for tag, s in hidden if not hit(s)]
+    found = [(tag, s) for tag, s in hidden if hit(s)]
     extra = sorted(r for r in recovered if not any(s in r or r in s for _t, s in planted))
-    return {"planted": len(planted), "recovered": len(found), "missed": missed,
-            "found_tags": sorted({t for t, _s in found}), "extra": extra}
+    return {"planted": len(hidden), "planted_total": len(planted), "recovered": len(found),
+            "missed": missed, "not_hidden": plain, "found_tags": sorted({t for t, _s in found}),
+            "extra": extra}
 
 
 # --------------------------------------------------------------------------------------------
@@ -250,6 +294,8 @@ def run_loop(rounds: int, rng: random.Random, nightly: str, plugin: Path, out_di
     fixtures = out_dir / "fixtures"
     report = out_dir / "redblue_results.jsonl"
     rows, total_planted, total_recovered, miss_rounds = [], 0, 0, 0
+    skipped: dict[str, int] = {}            # reason -> rounds
+    total_not_hidden = 0
     with report.open("w", encoding="utf-8") as sink:
         for i in range(rounds):
             iocs = gen_iocs(rng, n_iocs)
@@ -260,12 +306,23 @@ def run_loop(rounds: int, rng: random.Random, nightly: str, plugin: Path, out_di
                 binary = Path(d) / "hardened"
                 ok, msg = build(src, cfg, nightly, plugin, binary)
                 if not ok:
-                    row = {"round": i, "config": label, "build": msg, "skipped": True}
+                    row = {"round": i, "config": label, "build": msg, "skipped": "build failed"}
                     sink.write(json.dumps(row) + "\n")
+                    skipped["build failed"] = skipped.get("build failed", 0) + 1
                     if verbose:
-                        print(f"  round {i}: build skipped ({msg})")
+                        print(f"  round {i} [{label}]: skipped, build failed ({msg})")
                     continue
                 ev = evaluate(binary, iocs, time_budget)
+                total_not_hidden += len(ev["not_hidden"])
+                if ev.get("skipped"):
+                    row = {"round": i, "config": label, "skipped": ev["skipped"],
+                           "not_hidden": ev["not_hidden"]}
+                    sink.write(json.dumps(row) + "\n")
+                    skipped[ev["skipped"]] = skipped.get(ev["skipped"], 0) + 1
+                    if verbose:
+                        print(f"  round {i} [{label}]: skipped, {ev['skipped']} "
+                              f"({len(ev['not_hidden'])} planted string(s) left in plaintext)")
+                    continue
                 total_planted += ev["planted"]
                 total_recovered += ev["recovered"]
                 saved = None
@@ -276,15 +333,18 @@ def run_loop(rounds: int, rng: random.Random, nightly: str, plugin: Path, out_di
                     shutil.copy(binary, saved)
                 row = {"round": i, "config": label, "planted": ev["planted"],
                        "recovered": ev["recovered"], "missed": ev["missed"],
+                       "not_hidden": ev["not_hidden"],
                        "extra_count": len(ev["extra"]), "fixture": str(saved) if saved else None}
                 sink.write(json.dumps(row) + "\n")
                 rows.append(row)
                 if verbose or ev["missed"]:
                     status = "OK" if not ev["missed"] else f"MISS {len(ev['missed'])}"
                     print(f"  round {i} [{label}]: {ev['recovered']}/{ev['planted']} {status}"
+                          + (f" ({len(ev['not_hidden'])} not hidden)" if ev["not_hidden"] else "")
                           + (f" -> {saved.name}" if saved else ""))
     return {"rounds": len(rows), "planted": total_planted, "recovered": total_recovered,
-            "miss_rounds": miss_rounds, "report": str(report)}
+            "miss_rounds": miss_rounds, "skipped": sum(skipped.values()),
+            "skip_reasons": skipped, "not_hidden": total_not_hidden, "report": str(report)}
 
 
 def _selftest():
@@ -330,15 +390,38 @@ def _selftest():
                             {"string": "https://abc.example/x/y"},         # exact -> hit
                             {"string": "garbage-std-fragment"}],           # extra
                 "stack": []}
-    ev = evaluate(Path("/dev/null"), planted, 1.0, recover_fn=stub)
-    assert ev["recovered"] == 2 and [t for t, _s in ev["missed"]] == ["path"]
-    assert "garbage-std-fragment" in ev["extra"]
+    with tempfile.TemporaryDirectory() as d:
+        hidden_bin = Path(d) / "hidden.bin"
+        hidden_bin.write_bytes(b"\x7fELF" + bytes(64))           # nothing planted in plaintext
+        ev = evaluate(hidden_bin, planted, 1.0, recover_fn=stub)
+        assert ev["recovered"] == 2 and [t for t, _s in ev["missed"]] == ["path"]
+        assert "garbage-std-fragment" in ev["extra"] and ev["not_hidden"] == []
+
+        # 4b. a string the obfuscator left in plaintext (UTF-8 or UTF-16LE) is not_hidden: it is
+        #     neither a rust-deobf hit nor a miss; if nothing was hidden the round is skipped
+        leaky = Path(d) / "leaky.bin"
+        leaky.write_bytes(b"..." + "/var/tmp/.q/w.dat".encode("utf-16-le") + b"...")
+        ev = evaluate(leaky, planted, 1.0, recover_fn=stub)
+        assert ev["not_hidden"] == [("path", "/var/tmp/.q/w.dat")] and ev["missed"] == []
+        assert ev["planted"] == 2 and ev["recovered"] == 2
+        plain = Path(d) / "plain.bin"
+        plain.write_bytes(b"\x00".join(s.encode() for _t, s in planted))
+        ev = evaluate(plain, planted, 1.0,
+                      recover_fn=lambda _p: (_ for _ in ()).throw(AssertionError("ran")))
+        assert ev["skipped"] == "plugin had no effect" and ev["planted"] == 0
+
+    # 4c. a failed build reports rustc's first error line, not the generic last "aborting" line
+    assert _first_error_line("warning: x\nerror[E0425]: cannot find value `q`\n --> a.rs:1\n"
+                             "error: aborting due to 1 previous error\n") == \
+        "error[E0425]: cannot find value `q`"
+    assert _first_error_line("") == "?"
 
     # 5. prerequisite detection returns None cleanly when nothing is configured
     assert find_plugin(Path("/no/such/rustcloak")) is None or True   # tolerant: may find a real one
 
     print("selftest OK: IOC/program generation (4 placements, documentation placeholders only), "
-          "config space, recovery diff (hit/miss/extra), prerequisite detection")
+          "config space, recovery diff (hit/miss/extra/not-hidden/skip), first-error-line, "
+          "prerequisite detection")
 
 
 def main(argv=None) -> int:
@@ -385,10 +468,18 @@ def main(argv=None) -> int:
     dt = time.monotonic() - t0
     rec = summary["recovered"]
     pl = summary["planted"] or 1
-    print(f"\n{summary['rounds']} rounds built, {rec}/{summary['planted']} planted strings recovered "
-          f"({100 * rec // pl}%), {summary['miss_rounds']} round(s) with a miss, {dt:.0f}s")
+    reasons = ", ".join(f"{n} {why}" for why, n in sorted(summary["skip_reasons"].items()))
+    print(f"\n{summary['rounds']} round(s) evaluated, {summary['skipped']} skipped"
+          + (f" ({reasons})" if reasons else "")
+          + f"; {rec}/{summary['planted']} hidden strings recovered ({100 * rec // pl}%), "
+          f"{summary['not_hidden']} planted string(s) left in plaintext (not counted), "
+          f"{summary['miss_rounds']} round(s) with a miss, {dt:.0f}s")
     print(f"report: {summary['report']}" + (f"  (miss fixtures in {a.out}/fixtures/)"
                                             if summary["miss_rounds"] else ""))
+    if summary["rounds"] == 0:
+        print(f"redblue_loop: no round was evaluable ({reasons or 'no rounds requested'}); see the "
+              "report for the build errors -- this is not a pass", file=sys.stderr)
+        return EXIT_NO_ROUNDS
     return EXIT_MISS if summary["miss_rounds"] else EXIT_OK
 
 
