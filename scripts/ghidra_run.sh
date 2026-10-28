@@ -20,6 +20,9 @@ set -euo pipefail
 
 BIN="${1:?usage: ghidra_run.sh <binary> [recovered.json] [project_dir]}"
 JSON="${2:-}"
+# a relative name starting with '-' would be read as an option (by basename, and by tools that
+# do not take `--`): anchor it to the current directory. The python tools also get `--` below.
+case "$BIN" in -*) BIN="./$BIN" ;; esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
 
@@ -56,7 +59,7 @@ if [ -z "$JSON" ]; then
   trap 'rm -f "$JSON"' EXIT
   echo "ghidra_run: recovering strings -> $JSON" >&2
   rc=0
-  python3 "$REPO/scripts/recover.py" "$BIN" --json > "$JSON" || rc=$?
+  python3 "$REPO/scripts/recover.py" --json -- "$BIN" > "$JSON" || rc=$?
   case "$rc" in
     0) ;;
     4) echo "ghidra_run: warning: an engine failed (see the notes in the JSON); annotating what was recovered" >&2 ;;
@@ -66,7 +69,7 @@ if [ -z "$JSON" ]; then
   # vtable structs and names the method functions behind the trait (best-effort; never fatal)
   TYPES="$(mktemp "${TMPDIR:-/tmp}/rd-types.XXXXXX")"
   trap 'rm -f "$JSON" "$TYPES"' EXIT
-  if python3 "$REPO/scripts/recover_types.py" "$BIN" --json > "$TYPES" 2>/dev/null; then
+  if python3 "$REPO/scripts/recover_types.py" --json -- "$BIN" > "$TYPES" 2>/dev/null; then
     python3 - "$JSON" "$TYPES" <<'PY' || true
 import json, sys
 j, t = sys.argv[1], sys.argv[2]
@@ -82,7 +85,7 @@ fi
 # --- fresh project, import + analyze + annotate ---------------------------------------------
 PROJ="${3:-$(mktemp -d)}"
 mkdir -p "$PROJ"
-NAME="$(basename "$BIN")"
+NAME="$(basename -- "$BIN")"
 echo "ghidra_run: importing $NAME into $PROJ and annotating from $JSON" >&2
 # -overwrite: re-running into the same project dir replaces the earlier import instead of failing
 python3 -m pyghidra.ghidra_launch ghidra.app.util.headless.AnalyzeHeadless \
