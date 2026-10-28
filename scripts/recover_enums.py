@@ -115,6 +115,33 @@ def _dispatch_sites(code: bytes, base: int, limit=256):
     return out
 
 
+def _dispatch_sites_arm64(code: bytes, base: int, limit=256):
+    """AArch64 analog: a small int loaded with ldrb/ldrh/ldr from [reg+disp] then matched against
+    >=2 cmp immediates. Heuristic."""
+    from capstone import CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, Cs
+    from capstone import arm64 as A
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    md.detail = True
+    sites = {}
+    for insn in md.disasm(code, base):
+        ops = insn.operands
+        if insn.mnemonic in ("ldrb", "ldrh", "ldr", "ldrsb", "ldrsh", "ldrsw") and len(ops) >= 2 and \
+                ops[0].type == A.ARM64_OP_REG and ops[1].type == A.ARM64_OP_MEM and \
+                ops[1].mem.index == 0 and 0 <= ops[1].mem.disp < 0x1000:
+            sites[ops[0].reg] = {"site": insn.address, "disp": ops[1].mem.disp, "values": set()}
+        elif insn.mnemonic == "cmp" and len(ops) == 2 and ops[0].type == A.ARM64_OP_REG and \
+                ops[1].type == A.ARM64_OP_IMM and ops[0].reg in sites:
+            if 0 <= ops[1].imm < 0x10000:
+                sites[ops[0].reg]["values"].add(ops[1].imm)
+    out = []
+    for st in sites.values():
+        if len(st["values"]) >= 2:
+            out.append({"site": st["site"], "field_offset": st["disp"], "values": sorted(st["values"])})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def recover(path) -> dict:
     """Recover enum layout for the ELF at `path`. DWARF when present (named), else a heuristic.
 
@@ -142,10 +169,14 @@ def recover(path) -> dict:
                 text = (sec.data(), sec["sh_addr"])
         except Exception:
             pass
+    machine = int.from_bytes(data[18:20], "little")   # e_machine: 0x3e x86-64, 0xb7 AArch64
     sites = []
     if not enums and text is not None:        # only bother with the heuristic when DWARF gave nothing
         try:
-            sites = _dispatch_sites(text[0], text[1])
+            if machine == 0xb7:
+                sites = _dispatch_sites_arm64(text[0], text[1])
+            elif machine == 0x3e:
+                sites = _dispatch_sites(text[0], text[1])
         except Exception:
             sites = []
     named = sum(1 for e in enums for v in e["variants"] if v["name"])
@@ -187,6 +218,11 @@ def _selftest():
 
     # a single compare is NOT a dispatch (need >= 2 distinct tag values)
     assert _dispatch_sites(bytes.fromhex("0fb607" "83f800"), 0x1000) == []
+
+    # AArch64: ldrb w0,[x0]; cmp w0,#0/1/2 (b.eq each) -> a 3-value dispatch on field offset 0
+    a64 = bytes.fromhex("00004039" "1f000071" "40000054" "1f040071" "40000054" "1f080071" "40000054")
+    asites = _dispatch_sites_arm64(a64, 0x2000)
+    assert asites and asites[0]["field_offset"] == 0 and asites[0]["values"] == [0, 1, 2], asites
 
     # DWARF parse, only if pyelftools + the committed fixture are present (else skip quietly)
     try:

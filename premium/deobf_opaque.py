@@ -23,8 +23,9 @@ dead direction.
     python3 premium/deobf_opaque.py path/to/binary            # opaque branches found
     python3 premium/deobf_opaque.py --selftest
 
-x86-64 (and 32-bit x86). A block that touches memory or calls out is abandoned (conservative); a
-richer lifter (memory, cross-block) is the next tier.
+x86-64, 32-bit x86, and AArch64 (cmp/cmn/tst + b.<cond>, and the reg-direct cbz/cbnz/tbz/tbnz). A
+block that touches memory or calls out is abandoned (conservative); a richer lifter (memory,
+cross-block) is the next tier.
 """
 from __future__ import annotations
 
@@ -148,11 +149,176 @@ def _lift_block(insns, nbits=64):
     return regs, pending, term
 
 
+# AArch64 condition code -> (taken) condition from a prior `cmp`/`cmn` (flag-setting). b.mi/pl/vs/vc
+# depend on N/V in ways a simple compare does not model, so they are omitted (abandon).
+_ARM_COND = {
+    "eq": lambda a, b: a == b, "ne": lambda a, b: a != b,
+    "cs": lambda a, b: z3.UGE(a, b), "hs": lambda a, b: z3.UGE(a, b),
+    "cc": lambda a, b: z3.ULT(a, b), "lo": lambda a, b: z3.ULT(a, b),
+    "hi": lambda a, b: z3.UGT(a, b), "ls": lambda a, b: z3.ULE(a, b),
+    "ge": lambda a, b: a >= b, "lt": lambda a, b: a < b,
+    "gt": lambda a, b: a > b, "le": lambda a, b: a <= b,
+}
+
+
+def _acanon(nm):
+    if nm in ("wzr", "xzr"):
+        return "xzr"
+    return ("x" + nm[1:]) if nm and nm[0] == "w" else nm
+
+
+def _lift_block_arm64(insns):
+    """AArch64 analog of _lift_block: symbolically execute a straight-line integer block over 64-bit
+    register BVs (w-registers masked to 32), tracking the last cmp/cmn/tst and the terminating branch
+    (b.<cond> / cbz / cbnz / tbz / tbnz). ABANDON on memory, calls, or any unmodelled instruction, so
+    it never lifts a wrong expression. Returns (regs, pending, term); pending is (kind, a, b, width)."""
+    from capstone.arm64 import (ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG,
+                                ARM64_SFT_ASR, ARM64_SFT_LSL, ARM64_SFT_LSR)
+    regs = {}
+    pending = None
+    term = None
+
+    def wof(nm):
+        return 32 if nm and nm[0] == "w" else 64
+
+    def opval(op, insn):
+        if op.type == ARM64_OP_IMM:
+            v = z3.BitVecVal(op.imm & ((1 << 64) - 1), 64)
+        elif op.type == ARM64_OP_REG:
+            nm = insn.reg_name(op.reg)
+            c = _acanon(nm)
+            v = z3.BitVecVal(0, 64) if c == "xzr" else regs.setdefault(c, z3.BitVec("in_" + c, 64))
+            if wof(nm) == 32:
+                v = z3.ZeroExt(32, z3.Extract(31, 0, v))
+        else:
+            raise _Abandon("operand")
+        sh = getattr(op, "shift", None)
+        if sh is not None and getattr(sh, "type", 0):
+            if sh.type == ARM64_SFT_LSL:
+                v = v << sh.value
+            elif sh.type == ARM64_SFT_LSR:
+                v = z3.LShR(v, sh.value)
+            elif sh.type == ARM64_SFT_ASR:
+                v = v >> sh.value
+            else:
+                raise _Abandon("operand shift")
+        if getattr(op, "ext", 0):
+            raise _Abandon("operand extend")
+        return v
+
+    def setreg(op, insn, expr):
+        if op.type != ARM64_OP_REG:
+            raise _Abandon("write non-reg")
+        nm = insn.reg_name(op.reg)
+        c = _acanon(nm)
+        if c == "xzr":
+            return
+        regs[c] = z3.ZeroExt(32, z3.Extract(31, 0, expr)) if wof(nm) == 32 else expr
+
+    def pwidth(op, insn):
+        return wof(insn.reg_name(op.reg)) if op.type == ARM64_OP_REG else 64
+
+    for insn in insns:
+        m = insn.mnemonic
+        ops = insn.operands
+        if m == "nop":
+            continue
+        if m in ("ret", "bl", "blr", "br", "svc", "hlt", "brk", "smc", "hvc", "movk"):
+            raise _Abandon(m)
+        if any(o.type == ARM64_OP_MEM for o in ops):
+            raise _Abandon("memory")
+        if m == "b" or m.startswith("b.") or m in ("cbz", "cbnz", "tbz", "tbnz"):
+            term = insn
+            break
+        if m in ("mov", "movz"):
+            setreg(ops[0], insn, opval(ops[1], insn))
+        elif m in ("movn", "mvn"):
+            setreg(ops[0], insn, ~opval(ops[1], insn))
+        elif m == "neg":
+            setreg(ops[0], insn, -opval(ops[1], insn))
+        elif m in ("add", "sub", "and", "orr", "eor", "orn", "eon", "bic", "mul"):
+            a, b = opval(ops[1], insn), opval(ops[2], insn)
+            r = {"add": a + b, "sub": a - b, "and": a & b, "orr": a | b, "eor": a ^ b,
+                 "orn": a | ~b, "eon": a ^ ~b, "bic": a & ~b, "mul": a * b}[m]
+            setreg(ops[0], insn, r)
+        elif m in ("lsl", "lsr", "asr"):
+            a, b = opval(ops[1], insn), opval(ops[2], insn)
+            setreg(ops[0], insn, {"lsl": a << b, "lsr": z3.LShR(a, b), "asr": a >> b}[m])
+        elif m in ("sxtb", "sxth", "sxtw", "uxtb", "uxth", "uxtw"):
+            bits = {"b": 8, "h": 16, "w": 32}[m[-1]]
+            low = z3.Extract(bits - 1, 0, opval(ops[1], insn))
+            setreg(ops[0], insn,
+                   z3.SignExt(64 - bits, low) if m[0] == "s" else z3.ZeroExt(64 - bits, low))
+        elif m == "cmp":
+            pending = ("cmp", opval(ops[0], insn), opval(ops[1], insn), pwidth(ops[0], insn))
+        elif m == "cmn":
+            pending = ("cmp", opval(ops[0], insn), -opval(ops[1], insn), pwidth(ops[0], insn))
+        elif m == "tst":
+            pending = ("tst", opval(ops[0], insn), opval(ops[1], insn), pwidth(ops[0], insn))
+        else:
+            raise _Abandon(m)
+    return regs, pending, term
+
+
+def _classify_arm64(code, va):
+    from capstone import CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, Cs
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    md.detail = True
+    try:
+        regs, pending, term = _lift_block_arm64(list(md.disasm(code, va)))
+    except _Abandon:
+        return None
+    if term is None:
+        return None
+    tm = term.mnemonic
+
+    def regview(op):
+        nm = term.reg_name(op.reg)
+        c = _acanon(nm)
+        full = z3.BitVecVal(0, 64) if c == "xzr" else regs.get(c, z3.BitVec("in_" + c, 64))
+        return z3.Extract(31, 0, full) if (nm and nm[0] == "w") else full
+
+    if tm in ("cbz", "cbnz"):
+        v = regview(term.operands[0])
+        zero = v == z3.BitVecVal(0, v.size())
+        cond = zero if tm == "cbz" else z3.Not(zero)
+    elif tm in ("tbz", "tbnz"):
+        v = regview(term.operands[0])
+        one = z3.BitVecVal(1, v.size())
+        setb = (z3.LShR(v, term.operands[1].imm) & one) == one
+        cond = z3.Not(setb) if tm == "tbz" else setb
+    elif tm.startswith("b.") and pending is not None:
+        cc = tm[2:]
+        if cc not in _ARM_COND:
+            return None
+        kind, a, b, w = pending
+        if w == 32:
+            a, b = z3.Extract(31, 0, a), z3.Extract(31, 0, b)
+        if kind == "cmp":
+            cond = _ARM_COND[cc](a, b)
+        else:   # tst a,b: ZF=(a&b)==0; b.eq taken iff zero
+            z = (a & b) == z3.BitVecVal(0, a.size())
+            cond = z if cc == "eq" else (z3.Not(z) if cc == "ne" else None)
+        if cond is None:
+            return None
+    else:
+        return None
+    s = z3.Solver(); s.add(z3.Not(cond)); always_true = s.check() == z3.unsat
+    s = z3.Solver(); s.add(cond); always_false = s.check() == z3.unsat
+    if not (always_true or always_false):
+        return None
+    return {"branch_va": term.address, "jcc": tm,
+            "result": "always-taken" if always_true else "never-taken",
+            "dead_direction": "fall-through" if always_true else "target"}
+
+
 def classify_block(code: bytes, va: int, arch: str = "x86_64"):
     """Lift the block at `va` and classify its terminating branch. Returns a dict or None (abandoned
     / not a conditional branch / input-dependent)."""
     if z3 is None:
         return None
+    if arch == "aarch64":
+        return _classify_arm64(code, va)
     from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
     md = Cs(CS_ARCH_X86, CS_MODE_32 if arch == "x86" else CS_MODE_64)
     md.detail = True
@@ -191,9 +357,7 @@ def recover(path) -> dict:
     import recover_emulate
     import gen_runtime_sigs
     img = recover_emulate.Image(path)
-    arch = "x86" if img.x32 else "x86_64"
-    if img.arm:
-        return {"arch": "aarch64", "opaque_branches": [], "note": "AArch64 opaque detection is next tier"}
+    arch = "aarch64" if img.arm else ("x86" if img.x32 else "x86_64")
     starts = sorted(a for a in gen_runtime_sigs.function_starts(img.binary)
                     if img.text_va <= a < img.text_end)
     nexts = {s: n for s, n in zip(starts, starts[1:] + [img.text_end])}
@@ -240,8 +404,29 @@ def _selftest():
     # 4. a block that touches memory is abandoned (no false claim): mov rax,[rdi]; cmp rax,0; je
     mem = _asm_block("488b07" "4883f800" "7400")   # mov rax,[rdi]; cmp rax,0; je
     assert classify_block(mem, 0x4000, "x86_64") is None
-    print("selftest OK: opaque predicate (x|1)!=0 -> always-taken, (x&0)==1 -> never-taken, "
-          "input-dependent branch not flagged, memory block abandoned (sound)")
+
+    # --- AArch64 parity (hand-assembled with llvm-mc; no toolchain needed at test time) ---
+    # (x1|1)!=0 is always true: orr x0,x1,#1; cmp x0,#0; b.ne -> always-taken
+    a = classify_block(_asm_block("e00301aa" "000040b2" "1f0000f1" "41000054"), 0x1000, "aarch64")
+    assert a and a["result"] == "always-taken" and a["jcc"] == "b.ne", a
+    # (x1&0)==1 never: and x0,x1,xzr; cmp x0,#1; b.eq -> never-taken
+    b = classify_block(_asm_block("20001f8a" "1f0400f1" "40000054"), 0x2000, "aarch64")
+    assert b and b["result"] == "never-taken", b
+    # tst: (x1|1)&1 != 0 always: orr x0,x1,#1; tst x0,#1; b.ne -> always-taken
+    t = classify_block(_asm_block("200040b2" "1f0040f2" "41000054"), 0x2100, "aarch64")
+    assert t and t["result"] == "always-taken", t
+    # cbz on (x1|1), which is never 0 -> never-taken
+    c = classify_block(_asm_block("200040b2" "400000b4"), 0x2200, "aarch64")
+    assert c and c["result"] == "never-taken" and c["jcc"] == "cbz", c
+    # tbz bit0 of (x1|1) (bit0 always set) -> never-taken
+    tb = classify_block(_asm_block("200040b2" "40000036"), 0x2300, "aarch64")
+    assert tb and tb["result"] == "never-taken" and tb["jcc"] == "tbz", tb
+    # input-dependent signed 32-bit branch must NOT be flagged: cmp w0,#5; b.lt
+    assert classify_block(_asm_block("1f140071" "4b000054"), 0x3000, "aarch64") is None
+    # a memory load aarch64 block is abandoned: ldr x0,[x1]; cmp x0,#0; b.eq
+    assert classify_block(_asm_block("200040f9" "1f0000f1" "40000054"), 0x4000, "aarch64") is None
+    print("selftest OK: x86-64 + AArch64 opaque predicates classified (always/never-taken via "
+          "cmp/tst/cbz/tbz); input-dependent and memory blocks not flagged (sound on both arches)")
 
 
 def main(argv=None) -> int:

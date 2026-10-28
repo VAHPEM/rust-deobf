@@ -47,3 +47,27 @@ def test_precision_on_committed_binary():
     res = O.recover(ROOT / "tests" / "fixtures" / "vm" / "benign_rust_std.x64")
     assert res["arch"] == "x86_64"
     assert res["opaque_branches"] == []
+
+
+# --- AArch64 parity (hand-assembled with llvm-mc; deterministic, no toolchain at test time) ---
+def test_opaque_arm64_always_taken():
+    # orr x0,x1,#1; cmp x0,#0; b.ne  ->  (x1|1)!=0 is always true
+    r = O.classify_block(_b("e00301aa 000040b2 1f0000f1 41000054"), 0x1000, "aarch64")
+    assert r and r["result"] == "always-taken" and r["jcc"] == "b.ne"
+    assert r["dead_direction"] == "fall-through"
+
+
+def test_opaque_arm64_cbz_never_taken():
+    # orr x0,x1,#1; cbz x0  ->  x0 never zero, so the branch is never taken
+    r = O.classify_block(_b("200040b2 400000b4"), 0x2000, "aarch64")
+    assert r and r["result"] == "never-taken" and r["jcc"] == "cbz"
+
+
+def test_arm64_real_branch_not_flagged():
+    # cmp w0,#5; b.lt  ->  input-dependent signed 32-bit branch, must NOT be flagged
+    assert O.classify_block(_b("1f140071 4b000054"), 0x3000, "aarch64") is None
+
+
+def test_arm64_memory_block_abandoned():
+    # ldr x0,[x1]; cmp x0,#0; b.eq  ->  touches memory: abandoned (no unsound claim)
+    assert O.classify_block(_b("200040f9 1f0000f1 40000054"), 0x4000, "aarch64") is None

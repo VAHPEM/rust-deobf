@@ -29,6 +29,13 @@ def test_dispatch_heuristic():
     assert E._dispatch_sites(bytes.fromhex("0fb607" "83f800"), 0x1000) == []
 
 
+def test_dispatch_heuristic_arm64():
+    # ldrb w0,[x0]; cmp w0,#0/1/2 (b.eq each): a 3-value dispatch on field offset 0
+    a64 = bytes.fromhex("00004039" "1f000071" "40000054" "1f040071" "40000054" "1f080071" "40000054")
+    sites = E._dispatch_sites_arm64(a64, 0x2000)
+    assert sites and sites[0]["field_offset"] == 0 and sites[0]["values"] == [0, 1, 2]
+
+
 @pytest.mark.skipif(not DBG.is_file(), reason="debuginfo fixture missing")
 def test_dwarf_named_variants_and_niche():
     pytest.importorskip("elftools")

@@ -107,7 +107,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_cryptify.py` | static recovery for the `cryptify` crate (`encrypt_string!`) |
 | `recover_go.py` | Go function names from the pclntab (Go's metadata analog) |
 | `recover_antianalysis.py` | anti-analysis technique inventory + build provenance |
-| `recover_enums.py` | enum discriminant/niche layout; variant names via DWARF (pyelftools, optional) else a capstone dispatch-site heuristic |
+| `recover_enums.py` | enum discriminant/niche layout; variant names via DWARF (pyelftools, optional) else a capstone dispatch-site heuristic (x86-64 + ARM64) |
 | `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
