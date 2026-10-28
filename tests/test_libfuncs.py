@@ -64,3 +64,67 @@ def test_cross_binary_identification(ref, tgt, fmt, ext):
     assert not wrong, f"misidentified: {wrong[:5]}"
     assert no_truth == 0, f"{no_truth} matches at addresses with no function in the target"
     assert correct >= 30, f"only {correct} library functions identified (expected many)"
+
+
+# --- per-binary DB (gen_sigdb.py) end to end: needs cargo + the host toolchain, no network ---------
+import os
+import shutil
+import subprocess
+
+TINY = r'''
+use std::collections::HashMap;
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut m: HashMap<String, usize> = HashMap::new();
+    for a in &args { *m.entry(a.clone()).or_default() += a.len(); }
+    let hay = args.get(1).map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+    let hit = DEP;
+    let v: Vec<u32> = args.iter().map(|s| s.parse().unwrap_or(0)).collect();
+    println!("{} {:?} {:?} {}", m.len(), hit, v.get(3), args.get(9).unwrap().len());
+}
+'''
+
+
+def _tiny_build(tmp, with_dep: bool):
+    proj = tmp / ("tiny_dep" if with_dep else "tiny")
+    (proj / "src").mkdir(parents=True)
+    dep = '[dependencies]\nmemchr = "2"\n' if with_dep else ""
+    (proj / "Cargo.toml").write_text('[package]\nname = "tiny"\nversion = "0.1.0"\nedition = "2021"\n'
+                                     '\n%s\n[workspace]\n' % dep)
+    (proj / "src" / "main.rs").write_text(TINY.replace(
+        "DEP", "memchr::memmem::find(&hay, b\"needle\")" if with_dep else "hay.iter().position(|&b| b == 7)"))
+    env = dict(os.environ, CARGO_TARGET_DIR=str(tmp / "target"), CARGO_NET_OFFLINE="true")
+    r = subprocess.run(["cargo", "build", "--release", "--offline"], cwd=proj, env=env,
+                       capture_output=True, text=True, timeout=900)
+    exe = tmp / "target" / "release" / ("tiny.exe" if os.name == "nt" else "tiny")
+    return exe if r.returncode == 0 and exe.is_file() else None
+
+
+@pytest.mark.skipif(not (shutil.which("cargo") and shutil.which("rustc")), reason="no cargo/rustc")
+def test_per_binary_db_end_to_end(tmp_path, monkeypatch):
+    import gen_sigdb as S
+    strip = shutil.which("llvm-strip") or shutil.which("strip")
+    if os.name == "nt" or not strip:
+        pytest.skip("needs an ELF/Mach-O strip tool on a POSIX host")
+    exe = _tiny_build(tmp_path, True) or _tiny_build(tmp_path, False)   # memchr if cached offline
+    if exe is None:
+        pytest.skip("tiny program did not build offline")
+    nostrip, stripped = tmp_path / "tiny.nostrip", tmp_path / "tiny.strip"
+    shutil.copy(exe, nostrip)
+    shutil.copy(exe, stripped)
+    subprocess.run([strip, str(stripped)], check=True, timeout=120)
+    monkeypatch.setenv("RUST_DEOBF_CACHE", str(tmp_path / "cache"))
+    rep = S.generate_for_binary(stripped, timeout=1200)     # installed toolchains only, offline
+    if rep["status"] == "missing":
+        pytest.skip("toolchain/target for the host build not resolvable: %s" % rep["missing"])
+    assert rep["status"] == "ok", rep
+    assert rep["meta"]["toolchain_match"] == "exact"
+    assert S.generate_for_binary(stripped)["status"] == "cached"
+    r = L.recover(stripped, db="auto")
+    assert r["db"]["source"] == "auto" and r["db"]["toolchain_match"] == "exact", r["db"]
+    truth = _truth(nostrip)
+    res = r["libfuncs"]
+    correct = sum(1 for x in res if truth.get(x["va"]) == x["name"])
+    no_truth = sum(1 for x in res if x["va"] not in truth)
+    assert no_truth == 0, "matches at addresses with no function"
+    assert correct >= 100 and correct >= 0.97 * len(res), (correct, len(res))

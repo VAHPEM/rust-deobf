@@ -104,7 +104,8 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 |--------|------|
 | `recover_rust_meta.py` | Tier 3: static Rust-specific structure recovery |
 | `recover_rust_strings.py` | split Rust's concatenated `&str` literals back apart |
-| `recover_libfuncs.py` | identify Rust stdlib / crate functions (FLIRT-style) |
+| `recover_libfuncs.py` | identify Rust stdlib / crate functions (FLIRT-style); `--db auto` = the per-binary DB below if cached, else the bundled one (reports toolchain match) |
+| `gen_sigdb.py` | per-binary signature DB: the binary's rustc + target + crates@versions → (rustup only with `--allow-download`) build a throwaway project in a temp dir, sign crate + prebuilt std rlib objects (relocations masked) + a linked std exerciser; cached `~/.cache/rust-deobf/sigdb/<rustc>-<triple>-<cratehash>.json`. Builds RUN crates' build scripts: `--dry-run` first on hostile input |
 | `recover_types.py` | Rust type-layout facts + C++ vtable/RTTI → decompiler |
 | `recover_cryptify.py` | static recovery for the `cryptify` crate (`encrypt_string!`) |
 | `recover_go.py` | Go function names from the pclntab (Go's metadata analog) |

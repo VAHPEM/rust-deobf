@@ -295,6 +295,8 @@ python3 scripts/recover.py samples/ --jsonl triage.jsonl          # a whole dire
 python3 scripts/recover_libfuncs.py --gen build/*release*nostrip   # build the DB once per toolchain
 python3 scripts/recover_libfuncs.py path/to/binary                 # identify; --json for records
 python3 scripts/recover_libfuncs.py path/to/binary --propagate     # + call-graph thunks & drop-glue
+python3 scripts/gen_sigdb.py path/to/binary [--allow-download]      # DB for THIS binary's rustc+target+crates
+python3 scripts/recover_libfuncs.py path/to/binary --db auto       # use it (falls back to the bundled DB)
 # recover Rust trait-object vtables (dyn Trait dispatch) as Ghidra data types:
 python3 scripts/recover_types.py path/to/binary                    # --json for records
 # push strings + library names + vtables into Ghidra (headless, PyGhidra):
@@ -737,7 +739,8 @@ This is research code, not a finished product. The ones that matter most:
 - **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
   signature on ELF, PE and Mach-O (x86-64, AArch64; 32-bit x86 ELF); the bundled DB is for one
   toolchain (rustc 1.97 x86-64) and must be regenerated (`--gen`) for another rustc, architecture
-  or format, and generic-heavy labels flatten their type args.
+  or format -- or built per binary with `gen_sigdb.py` (its own rustc, target and crate versions)
+  and picked with `--db auto` -- and generic-heavy labels flatten their type args.
 
 Full matrix: `RESULTS.md` · reproducible metrics: `METRICS.md` · real-binary validation and the
 generalisation work: `VALIDATION.md` (§10) · artifact tiers: `ARTIFACT_TIERS.md`.

@@ -21,7 +21,12 @@ recover_rust_meta.py's crate+version fingerprint to pick the right signature set
     python3 scripts/recover_libfuncs.py path/to/binary            # human-readable
     python3 scripts/recover_libfuncs.py path/to/binary --json     # {va, name, sym} records
     python3 scripts/recover_libfuncs.py path/to/binary --propagate  # + call-graph propagation
+    python3 scripts/recover_libfuncs.py path/to/binary --db auto  # per-binary DB (gen_sigdb.py)
     python3 scripts/recover_libfuncs.py --selftest
+
+`--db auto` uses the DB gen_sigdb.py built for THIS binary's rustc + target + crate set when it is
+cached, else the bundled one, and reports which DB was used and how well its toolchain matches
+(exact rustc commit / same minor / mismatch); `--db <file>` names one; the default is the bundled DB.
 
 Signature matching only labels functions it has an exact masked match for -- a fraction of the
 library code in a stripped static build. `--propagate` carries those labels further through the
@@ -53,6 +58,7 @@ MAX_WILDCARD = 0.4    # drop a signature that is mostly masked (no discriminatin
 # misidentification, only a less pretty name.
 # ---------------------------------------------------------------------------------------------
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_LLVM_SUFFIX = re.compile(r"\.llvm\.\d+$")
 
 
 def _v0_path(sym: str):
@@ -107,6 +113,9 @@ def _v0_path(sym: str):
 
 def readable(sym: str) -> str:
     """A human label for a mangled symbol: v0 path, legacy demangle, or the raw symbol."""
+    # LLVM's ThinLTO/internalisation suffix (`.llvm.<digits>`) differs between builds of the
+    # same function; drop it so the label (and its demangling) is build-independent
+    sym = _LLVM_SUFFIX.sub("", sym)
     p = _v0_path(sym)
     if p:
         return p
@@ -151,19 +160,24 @@ def _engine():
     return G
 
 
+def _toolchain_from_meta(d: dict) -> str:
+    """DB group key for a binary from recover_rust_meta's result: rustc-<release> /
+    commit-<12 hex> / unknown."""
+    rel = d.get("rust_release")
+    if isinstance(rel, dict) and rel.get("version"):
+        return "rustc-" + str(rel["version"])
+    commit = d.get("rustc_commit")
+    if commit:
+        return "commit-" + str(commit)[:12]
+    return "unknown"
+
+
 def _toolchain(path: Path) -> str:
     try:
         import recover_rust_meta as M
-        d = M.recover(path)
-        rel = d.get("rust_release")
-        if isinstance(rel, dict) and rel.get("version"):
-            return "rustc-" + str(rel["version"])
-        commit = d.get("rustc_commit")
-        if commit:
-            return "commit-" + str(commit)[:12]
+        return _toolchain_from_meta(M.recover(path))
     except Exception:
-        pass
-    return "unknown"
+        return "unknown"
 
 
 
@@ -259,15 +273,82 @@ def generate(paths):
     return db
 
 
-def load_db():
-    return json.loads(OUT.read_text()) if OUT.exists() else {}
+def load_db(path: Path | None = None):
+    p = Path(path) if path is not None else OUT
+    return json.loads(p.read_text()) if p.exists() else {}
 
 
-def match_binary(path: Path, db=None):
+def _groups(db: dict) -> dict:
+    """{tool: {arch: [sig]}} without metadata keys (a per-binary DB from gen_sigdb.py carries a
+    `__meta__` entry describing how it was built)."""
+    return {k: v for k, v in db.items() if not str(k).startswith("__") and isinstance(v, dict)}
+
+
+_PREFIX = 4                                       # index signatures by up to 4 leading concrete bytes
+
+
+def _index(sigs):
+    """{k: {first k bytes: [(n, mask int, value int, entry)]}}, k = the number of concrete bytes
+    a pattern starts with (capped at _PREFIX). A start is then compared only against signatures
+    sharing its first bytes, with one integer AND per candidate -- same result as
+    gen_runtime_sigs.matches, fast enough for a DB of every std + crate function."""
+    idx: dict[int, dict] = {}
+    for e in sigs:
+        pat = e.get("pattern", "")
+        if not isinstance(pat, str) or not pat or len(pat) % 2:
+            continue
+        n = len(pat) // 2
+        mb, vb = bytearray(n), bytearray(n)
+        try:
+            for i in range(n):
+                p = pat[2 * i:2 * i + 2]
+                if p != "..":
+                    mb[i], vb[i] = 0xFF, int(p, 16)
+        except ValueError:
+            continue                              # a corrupt entry: skip it, keep the rest
+        k = 0
+        while k < min(_PREFIX, n) and mb[k]:
+            k += 1
+        idx.setdefault(k, {}).setdefault(bytes(vb[:k]), []).append(
+            (n, int.from_bytes(mb, "little"), int.from_bytes(vb, "little"), e))
+    return idx
+
+
+_X86_PAD = {0x00, 0x90, 0xCC}
+_A64_PAD = {0x00000000, 0xD503201F}               # zero fill, nop
+
+
+def _ends_with_padding(code: bytes, base: int, end: int, next_start: int, arch: str) -> bool:
+    """True when [end, next_start) is only alignment padding (< 16 bytes of int3/nop/zero fill,
+    multi-byte x86 nops included): the function that started before `end` ends exactly there."""
+    gap = next_start - end
+    if gap < 0 or gap >= 16:
+        return False
+    chunk = code[end - base:next_start - base]
+    if len(chunk) != gap:
+        return False
+    if arch == "aarch64":
+        return gap % 4 == 0 and all(int.from_bytes(chunk[i:i + 4], "little") in _A64_PAD
+                                    for i in range(0, gap, 4))
+    if all(b in _X86_PAD for b in chunk):
+        return True
+    try:
+        seen = 0
+        for insn in _cs_md(arch).disasm(chunk, end):
+            if insn.mnemonic not in ("nop", "int3"):
+                return False
+            seen += insn.size
+        return seen == gap
+    except Exception:
+        return False
+
+
+def match_binary(path: Path, db=None, tool: str | None = None):
     import lief
     G = _engine()
     if db is None:
         db = load_db()
+    db = _groups(db)
     b = lief.parse(str(path))
     arch = G._arch(b)
     text = next((s for s in b.sections if s.name == ("__text" if b.format.name == "MACHO" else ".text")), None)
@@ -275,7 +356,8 @@ def match_binary(path: Path, db=None):
         return []
     code, base = bytes(text.content), text.virtual_address
     starts = sorted(a for a in G.function_starts(b) if base <= a < base + len(code))
-    tool = _toolchain(path)
+    if tool is None:
+        tool = _toolchain(path)
     # prefer the target's own toolchain; else pool every toolchain's sigs for this arch
     groups = []
     if tool in db and arch in db[tool]:
@@ -285,10 +367,7 @@ def match_binary(path: Path, db=None):
             if arch in byarch:
                 groups.append(byarch[arch])
     sigs = [e for g in groups for e in g]
-    # bucket by first concrete byte for speed
-    bucket: dict[str, list] = {}
-    for e in sigs:
-        bucket.setdefault(e["pattern"][:2], []).append(e)
+    idx = _index(sigs)
     # 1) which function start(s) each signature matches
     hits_by_sig = {}                              # pattern -> list[(start, name, sym)]
     matched_at = {}                               # start -> list[(pattern, name, sym)]
@@ -296,22 +375,139 @@ def match_binary(path: Path, db=None):
         chunk = code[a - base:a - base + SIG_LEN]
         if not chunk:
             continue
-        for e in bucket.get("%02x" % chunk[0], []) + bucket.get("..", []):
-            if G.matches(e["pattern"], chunk):
-                hits_by_sig.setdefault(e["pattern"], []).append((a, e["name"], e["sym"]))
-                matched_at.setdefault(a, []).append((e["pattern"], e["name"], e["sym"]))
+        ints = {}
+        for k, byprefix in idx.items():
+            if len(chunk) < k:
+                continue
+            for n, m, v, e in byprefix.get(chunk[:k], ()):
+                if len(chunk) < n:
+                    continue
+                x = ints.get(n)
+                if x is None:
+                    x = ints[n] = int.from_bytes(chunk[:n], "little")
+                if x & m == v:
+                    hits_by_sig.setdefault(e["pattern"], []).append((a, e["name"], e["sym"]))
+                    matched_at.setdefault(a, []).append((e["pattern"], e["name"], e["sym"]))
     # 2) a signature that matches more than one start is too loose to tell those functions
     #    apart (e.g. LowerHex vs UpperHex sharing a masked prologue) -> discard that pattern.
     loose = {pat for pat, hs in hits_by_sig.items() if len({a for a, _n, _s in hs}) > 1}
+    # ...except a WHOLE-function signature (the function was shorter than SIG_LEN, so the pattern
+    # is all of it) of one name: a hit whose function also ends right there (only alignment
+    # padding up to the next start) is a byte-identical copy -- generic glue such as
+    # drop_in_place<String> is emitted once per codegen unit -- not a different function that
+    # merely shares a prologue. Those hits keep the pattern.
+    nxt = dict(zip(starts, starts[1:] + [base + len(code)]))
+    copies = set()                               # (pattern, start) accepted despite `loose`
+    for pat in loose:
+        hs = hits_by_sig[pat]
+        n = len(pat) // 2
+        if n >= SIG_LEN or len({nm for _a, nm, _s in hs}) != 1:
+            continue
+        for a, _nm, _s in hs:
+            if _ends_with_padding(code, base, a + n, nxt.get(a, a), arch):
+                copies.add((pat, a))
     # 3) assign a start from its tight signatures when they agree on one name
     out = []
     for a in sorted(matched_at):
-        tight = [(n, s) for pat, n, s in matched_at[a] if pat not in loose]
+        tight = [(n, s) for pat, n, s in matched_at[a] if pat not in loose or (pat, a) in copies]
         names = {n: s for n, s in tight}
         if len(names) == 1:
             (name, sym), = names.items()
             out.append({"va": a, "name": name, "sym": sym})
     return out
+
+
+# ---------------------------------------------------------------------------------------------
+# which DB: the bundled one (one toolchain), a per-binary one built by gen_sigdb.py and cached
+# under its toolchain+target+crate key (--db auto), or an explicit file
+# ---------------------------------------------------------------------------------------------
+_RANK = {"exact": 3, "same-minor": 2, "mismatch": 1, "unknown": 0}
+
+
+def _bundled_quality(db: dict, meta: dict) -> tuple[str, str | None]:
+    """Best toolchain match between the binary and the DB's `rustc-<version>` groups."""
+    import gen_sigdb as S
+    rel = meta.get("rust_release") if isinstance(meta.get("rust_release"), dict) else {}
+    best, best_ver = "unknown", None
+    for tool in _groups(db):
+        ver = tool[len("rustc-"):] if tool.startswith("rustc-") else None
+        com = tool[len("commit-"):] if tool.startswith("commit-") else S.commit_of_version(ver)
+        q = S.match_quality(meta.get("rustc_commit"), rel.get("version"), com, ver)
+        if _RANK[q] > _RANK[best] or best_ver is None:
+            best, best_ver = q, ver or tool
+    return best, best_ver
+
+
+def select_db(path: Path, mode: str = "bundled", meta: dict | None = None) -> tuple[dict, dict]:
+    """(db, info). mode: 'bundled' (scripts/data/libfunc_sigs.json, the default), 'auto' (the
+    per-binary DB gen_sigdb.py cached for this binary's toolchain+target+crates when present,
+    else the bundled one), or a path to a DB file. `info` says which DB was used and how well
+    its toolchain matches the binary's: exact rustc commit / same-minor / mismatch / unknown."""
+    import gen_sigdb as S
+    if meta is None:
+        try:
+            import recover_rust_meta as M
+            meta = M.recover(Path(path))
+        except Exception:
+            meta = {}
+    rel = meta.get("rust_release") if isinstance(meta.get("rust_release"), dict) else {}
+    info = {"mode": mode, "binary_rustc": rel.get("version") or meta.get("rustc_commit")}
+    if mode not in ("bundled", "auto"):
+        db = load_db(Path(mode))
+        info.update(source="file", path=str(mode))
+        if not db:
+            info["error"] = "no such DB file (or empty): %s" % mode
+    else:
+        db = None
+        if mode == "auto":
+            try:
+                facts = S.binary_facts(Path(path), meta)
+                cp = S.cache_path(facts["key"])
+                info["key"] = facts["key"]
+                cand = load_db(cp) if cp.is_file() else None
+                arch = facts["target"]["arch"]
+                if cand and any(arch in byarch for byarch in _groups(cand).values()):
+                    db = cand
+                    info.update(source="auto", path=str(cp))
+                else:
+                    info["fallback_reason"] = ("no cached DB for this binary (build it: "
+                                               "gen_sigdb.py <binary>)" if not cand
+                                               else "cached DB has no %s signatures" % arch)
+            except Exception as e:                # a hostile/odd file: fall back, say why
+                info["fallback_reason"] = "%s: %s" % (type(e).__name__, e)
+        if db is None:
+            db = load_db()
+            info.update(source="bundled", path=str(OUT))
+    m = db.get("__meta__") if isinstance(db.get("__meta__"), dict) else None
+    if m and isinstance(m.get("built"), dict):
+        b = m["built"]
+        info["db_rustc"] = b.get("rust_version")
+        info["db_triple"] = b.get("triple")
+        info["toolchain_match"] = S.match_quality(meta.get("rustc_commit"), rel.get("version"),
+                                                  b.get("rustc_commit"), b.get("rust_version"))
+    else:
+        info["toolchain_match"], info["db_rustc"] = _bundled_quality(db, meta)
+    if info["toolchain_match"] == "mismatch":
+        info["warning"] = ("the DB was built by another rustc than the binary's: codegen differs, so "
+                           "matches are few and their labels unreliable -- build a matching DB with "
+                           "gen_sigdb.py <binary>")
+    return db, info
+
+
+def recover(path, db: str = "bundled", propagate_labels: bool = False) -> dict:
+    """Identify library functions in `path` with the DB chosen by `db` (see select_db).
+    Returns {file, libfuncs, propagated, db: {source, path, toolchain_match, ...}}."""
+    path = Path(path)
+    try:
+        import recover_rust_meta as M
+        meta = M.recover(path)
+    except Exception:
+        meta = {}
+    dbd, info = select_db(path, db, meta)
+    res = match_binary(path, dbd, tool=_toolchain_from_meta(meta))
+    prop = propagate(path, res) if propagate_labels else []
+    info["signatures"] = sum(len(lst) for byarch in _groups(dbd).values() for lst in byarch.values())
+    return {"file": str(path), "libfuncs": res, "propagated": prop, "db": info}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -553,8 +749,38 @@ def _selftest():
     assert 0x1000 not in prop and 0x1030 not in prop          # already labelled, not re-emitted
     assert graph[0x1070]["other_flow"] == 1 and graph[0x1080]["tail"] is None
     assert not ({0x1070, 0x1080, 0x1090} & set(prop)), {hex(k): v for k, v in prop.items()}
+    # indexed matcher == gen_runtime_sigs.matches on random patterns/chunks (incl. short chunks)
+    import random
+    G = _engine()
+    rnd = random.Random(7)
+    pats = []
+    for _ in range(300):
+        n = rnd.randint(1, 12)
+        pats.append("".join(".." if rnd.random() < 0.3 else "%02x" % rnd.choice((0x48, 0x89, 0xc3, 0x55))
+                            for _ in range(n)))
+    idx = _index([{"pattern": p, "name": p, "sym": p} for p in pats] + [{"pattern": "zz", "name": "bad"}])
+    for _ in range(300):
+        chunk = bytes(rnd.choice((0x48, 0x89, 0xc3, 0x55)) for _ in range(rnd.randint(0, 14)))
+        want = {p for p in pats if G.matches(p, chunk)}
+        got = set()
+        for k, byp in idx.items():
+            if len(chunk) >= k:
+                for n, m, v, e in byp.get(chunk[:k], ()):
+                    if len(chunk) >= n and int.from_bytes(chunk[:n], "little") & m == v:
+                        got.add(e["pattern"])
+        assert got == want, (chunk.hex(), got ^ want)
+    # metadata keys are not signature groups; .llvm.<n> suffixes do not leak into labels
+    assert _groups({"__meta__": {"x": 1}, "rustc-1.0.0": {"x86_64": []}}) == {"rustc-1.0.0": {"x86_64": []}}
+    assert readable("_ZN4core3fmt9Formatter3pad17h0123456789abcdefE.llvm.123") == "core::fmt::Formatter::pad"
+    # whole-function copies: only alignment padding may follow the matched bytes
+    pad = b"\xc3" + b"\x66\x0f\x1f\x44\x00\x00" + b"\x90" * 9      # ret; 6-byte nop; 9x nop
+    assert _ends_with_padding(pad, 0x1000, 0x1001, 0x1010, "x86_64")
+    assert not _ends_with_padding(b"\xc3\x48\x89\xc7" + b"\x90" * 12, 0x1000, 0x1001, 0x1010, "x86_64")
+    assert not _ends_with_padding(b"\x00" * 64, 0x1000, 0x1001, 0x1030, "x86_64")    # gap >= 16
+    assert _ends_with_padding(b"\x1f\x20\x03\xd5" * 2, 0x1000, 0x1000, 0x1008, "aarch64")
     print("selftest OK: v0 paths, base62, library classification, call-graph propagation "
-          "(2 thunks + 2 drop-glue to a fixed point; PLT calls / guarded jumps not propagated)")
+          "(2 thunks + 2 drop-glue to a fixed point; PLT calls / guarded jumps not propagated), "
+          "indexed matcher == byte matcher, DB metadata, padding-terminated copies")
 
 
 def main():
@@ -581,15 +807,43 @@ def main():
         return
     as_json = "--json" in args
     do_prop = "--propagate" in args
+    db_mode = None
+    for i, a in enumerate(list(args)):
+        if a == "--db" or a.startswith("--db="):
+            if a == "--db":
+                if i + 1 >= len(args):
+                    sys.exit("--db needs a value: auto | bundled | <db.json>")
+                db_mode = args[i + 1]
+                del args[i:i + 2]
+            else:
+                db_mode = a.split("=", 1)[1]
+                del args[i]
+            break
     paths = [Path(a) for a in args if not a.startswith("--")]
     if not paths:
-        sys.exit("usage: recover_libfuncs.py <binary> [--json] [--propagate]  |  "
-                 "--gen <builds...>  |  --selftest")
-    res = match_binary(paths[0])
-    prop = propagate(paths[0], res) if do_prop else []
-    if as_json:
-        print(json.dumps({"file": str(paths[0]), "libfuncs": res, "propagated": prop}, indent=1))
+        sys.exit("usage: recover_libfuncs.py <binary> [--json] [--propagate] "
+                 "[--db auto|bundled|<db.json>]  |  --gen <builds...>  |  --selftest")
+    info = None
+    if db_mode is None:                           # the original behaviour: the bundled DB
+        res = match_binary(paths[0])
+        prop = propagate(paths[0], res) if do_prop else []
     else:
+        r = recover(paths[0], db=db_mode, propagate_labels=do_prop)
+        res, prop, info = r["libfuncs"], r["propagated"], r["db"]
+    if as_json:
+        out = {"file": str(paths[0]), "libfuncs": res, "propagated": prop}
+        if info is not None:
+            out["db"] = info
+        print(json.dumps(out, indent=1))
+    else:
+        if info is not None:
+            print("DB: %s (%s; %d signatures) -- toolchain match: %s (binary rustc %s, DB rustc %s)%s"
+                  % (info.get("source"), info.get("path"), info.get("signatures", 0),
+                     info.get("toolchain_match"), info.get("binary_rustc") or "?",
+                     info.get("db_rustc") or "?",
+                     ("; " + info["fallback_reason"]) if info.get("fallback_reason") else ""))
+            if info.get("warning"):
+                print("WARNING: " + info["warning"])
         print("identified %d library function(s) in %s" % (len(res), paths[0]))
         for r in sorted(res, key=lambda x: x["va"]):
             print("  0x%x  %s" % (r["va"], r["name"]))
