@@ -17,9 +17,14 @@ GetProcAddress hands out that the stub stores to memory marks an IAT slot, so th
 import table the stub REBUILT and the stage-2 call sites bound to it -- the packed program's imports,
 recovered without running it.
 
-The original entry point (OEP) is the first JMP/RET from stub code into unpacked code; a CALL into
-unpacked code that returns (UPX runs the program's TLS callbacks first) is reported as a callback,
-and a stub patching a byte or two of itself is "self_patches", not stage-2. Emulation stops at the
+Hand-offs are tracked by stage: every page records which stage last wrote it, and a JMP/RET into
+code the CURRENT stage just produced is a hand-off. A hand-off into fresh memory (mmap/VirtualAlloc)
+is an intermediate stage (UPX's ELF decompressor) and is followed; the first hand-off into the
+file's own image is the original entry point (OEP). A CALL into produced code that returns (UPX runs
+the program's TLS callbacks first) is reported as a callback, and a stub patching a byte or two of
+itself is "self_patches", not stage-2. At an ELF entry point the stack is a real process stack
+(argc/argv/envp/auxv), and the stub may re-open itself via /proc/self/exe -- only the sample itself
+is ever served, every other path is ENOENT. Emulation stops at the
 OEP unless --follow. It is NOT a universal unpacker: a stub that walks the PEB / export tables by
 hand, needs real OS state, or uses an x86-32 stdcall import outside the known table stops early
 (`stopped` says where); for those, point --entry at the unpacking routine (recover_cfg / detect_vm /
@@ -61,6 +66,7 @@ _DYN_MAX = (TRAMP_SIZE // 2) // 16
 _MODULES = 0x6f000000        # fake HMODULE values returned by LoadLibrary / GetModuleHandle
 _MAX_CALLSITES = 4096
 _CALLSITE_SCAN = 16 << 20    # bytes of each executed stage disassembled for call-site binding
+_MAX_STAGES = 16             # hand-offs followed before giving up (a staged packer, not a loop)
 
 # Win32 imports an unpacking stub uses, with their stdcall argument counts (x86-32 callee pops them).
 # Anything else returns 0; on x86-32 PE an unknown stdcall import cannot be returned from safely
@@ -87,7 +93,14 @@ _WIN_ARGS = {
 _CDECL_DLLS = ("msvcrt", "ucrtbase", "api-ms-win-crt", "vcruntime", "libc", "libgcc")
 # Linux syscalls an unpacking stub uses: (x86-64, aarch64) numbers
 _SYS = {"mmap": (9, 222), "mprotect": (10, 226), "munmap": (11, 215), "exit": (60, 93),
-        "exit_group": (231, 94)}
+        "exit_group": (231, 94), "open": (2, None), "openat": (257, 56), "close": (3, 57),
+        "read": (0, 63), "pread64": (17, 67), "lseek": (8, 62), "readlink": (89, None),
+        "readlinkat": (267, 78), "write": (1, 64), "writev": (20, 66)}
+_ENOENT, _EBADF = -2, -9
+# A self-unpacking ELF stub re-opens its own file (UPX: openat + readlinkat("/proc/self/exe"), then
+# mmap of that fd). Only the sample itself is ever served -- any other path is ENOENT.
+_SELF_PATHS = ("/proc/self/exe",)
+_SELF_FD = 3
 
 
 def _entropy(b: bytes) -> float:
@@ -151,7 +164,10 @@ class _Unpacker:
         self.self_patches = []           # blocks that ran over a few self-patched bytes (not stage-2)
         self.callbacks = []              # unpacked code the stub CALLed and got control back from
         self.first_unpacked = None       # first unpacked block executed (a callback or the OEP)
-        self.prev_block = None           # (address, size, unpacked?) of the last block executed
+        self.prev_block = None           # (address, size, producing stage | None) of the last block
+        self.epoch = 0                   # stage counter: 0 = the stub, +1 at every hand-off
+        self.page_epoch = {}             # page -> stage that last wrote it
+        self.handoffs = []               # [{va, in_image}] every jump into freshly produced code
         self.oep = None
         self.stopped = "ret"             # ret|oep|exit|budget|timeout|unmapped|write_cap|error|import:<n>
         self.blocks = 0
@@ -161,6 +177,8 @@ class _Unpacker:
         self.iat = {}                    # slot va -> "dll!api" for slots the stub filled in
         self.import_calls = []           # (name) of each emulated import call, capped
         self.heap_next = HEAP + 0x100000
+        self._file = None                # the sample's bytes, read lazily if the stub re-opens itself
+        self._fd_off = 0
         if self.arm:
             self.uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
             self.SP, self.PC, self.RET = A.UC_ARM64_REG_SP, A.UC_ARM64_REG_PC, A.UC_ARM64_REG_X0
@@ -196,6 +214,24 @@ class _Unpacker:
                 uc.mem_write(BASE + va, struct.pack(fmt, v & mask))
             except (UcError, struct.error):
                 pass
+        # the file's own image (sections, or PT_LOAD segments when there is no section table)
+        self.image_ranges = []
+        from recover_emulate import _seg_extent
+        for sec in img.binary.sections:
+            try:
+                if sec.virtual_address and _seg_extent(sec):
+                    self.image_ranges.append((BASE + sec.virtual_address,
+                                              BASE + sec.virtual_address + _seg_extent(sec)))
+            except Exception:
+                continue
+        if img.fmt == "ELF":
+            for sg in img.binary.segments:
+                try:
+                    if int(sg.type) == 1 and sg.virtual_size:
+                        self.image_ranges.append((BASE + sg.virtual_address,
+                                                  BASE + sg.virtual_address + sg.virtual_size))
+                except Exception:
+                    continue
         uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
         uc.hook_add(UC_HOOK_BLOCK, self._on_block)
         uc.hook_add(UC_HOOK_CODE, self._on_tramp, None, TRAMP, TRAMP + TRAMP_SIZE - 1)
@@ -210,9 +246,11 @@ class _Unpacker:
     # ---- memory bookkeeping ------------------------------------------------------------------
     def _written(self, a):
         bm = self.wpages.get(a & ~0xfff)
-        return bool(bm and bm[a & 0xfff])
+        return bool(bm and (bm[(a & 0xfff) >> 3] >> (a & 7)) & 1)
 
     def _on_write(self, uc, access, address, size, value, _):
+        # per-page BIT maps (512 bytes per dirtied page): at the page cap that is 16 MB of
+        # bookkeeping for 128 MB of tracked writes, bounded however much the stub stores
         if not (0 < size <= 64):
             return
         for a in range(address, address + size):
@@ -223,8 +261,10 @@ class _Unpacker:
                     self.stopped = "write_cap"
                     uc.emu_stop()
                     return
-                bm = self.wpages[pg] = bytearray(4096)
-            bm[a & 0xfff] = 1
+                bm = self.wpages[pg] = bytearray(512)
+            o = a & 0xfff
+            bm[o >> 3] |= 1 << (o & 7)
+            self.page_epoch[pg] = self.epoch
         # a pointer GetProcAddress returned, stored to memory = an IAT slot the stub rebuilt
         if size == self.ptr and _DYN <= value < _DYN + 16 * len(self.dyn):
             self.iat[address - BASE] = self.dyn[(value - _DYN) // 16]
@@ -235,38 +275,51 @@ class _Unpacker:
         self.blocks += 1
         if TRAMP <= address < TRAMP + TRAMP_SIZE:
             return              # an emulated import: transparent to stub/stage-2 hand-off tracking
-        if self._written(address):
-            n = max(1, min(size, 64))
-            if sum(1 for a in range(address, address + n) if self._written(a)) * 2 < n:
-                # a stub patching a byte or two of itself (UPX flips a TLS-callback `ret` to `cld`)
-                # is self-modification, not an unpacked stage: note it, keep going
-                if len(self.self_patches) < 64:
-                    self.self_patches.append(address)
-                self.executed.add(address)
-                self.prev_block = (address, size, False)
-                return
-            # executing a block mostly made of bytes this run produced = unpacked code
-            self.wx_hits.append(address)
-            if self.first_unpacked is None:
-                self.first_unpacked = address
-            prev = self.prev_block
-            self.prev_block = (address, size, True)
-            if prev is not None and not prev[2] and self.oep is None:
-                # control just moved from stub code into unpacked code. A CALL (the return address
-                # points right after the previous stub block) is the stub invoking a callback --
-                # e.g. UPX running the program's TLS callbacks -- and it comes back; a JMP / RET into
-                # unpacked code is the hand-off to the original entry point.
-                if self._called_from(prev[0] + prev[1]):
-                    if len(self.callbacks) < 64:
-                        self.callbacks.append(address)
-                    return
-                self.oep = address
-                if not self.follow:
-                    self.stopped = "oep"
-                    uc.emu_stop()
+        if not self._written(address):
+            self.executed.add(address)
+            self.prev_block = (address, size, None)        # original file code
             return
-        self.executed.add(address)
-        self.prev_block = (address, size, False)
+        n = max(1, min(size, 64))
+        if sum(1 for a in range(address, address + n) if self._written(a)) * 2 < n:
+            # a stub patching a byte or two of itself (UPX flips a TLS-callback `ret` to `cld`) is
+            # self-modification, not an unpacked stage: note it, keep going
+            if len(self.self_patches) < 64:
+                self.self_patches.append(address)
+            self.executed.add(address)
+            self.prev_block = (address, size, None)
+            return
+        # a block mostly made of bytes written during this run = unpacked code
+        self.wx_hits.append(address)
+        if self.first_unpacked is None:
+            self.first_unpacked = address
+        produced_by = self.page_epoch.get(address & ~0xfff)
+        prev, self.prev_block = self.prev_block, (address, size, produced_by)
+        if produced_by != self.epoch:
+            return              # code an EARLIER stage produced: the current stage running its own code
+        if prev is not None and prev[2] == self.epoch:
+            return              # already inside the code the current stage produced (no transition)
+        # control reached code the CURRENT stage just produced. A CALL that will come back (the
+        # return address sits right after the previous block) is the stage invoking a callback --
+        # UPX runs the program's TLS callbacks first; a JMP / RET into it is a hand-off.
+        if prev is not None and self._called_from(prev[0] + prev[1]):
+            if len(self.callbacks) < 64:
+                self.callbacks.append(address)
+            return
+        in_image = any(lo <= address < hi for lo, hi in self.image_ranges)
+        self.handoffs.append({"va": address - BASE, "in_image": in_image})
+        self.epoch += 1
+        if in_image:
+            # unpacked code inside the file's own image: the original entry point. A hand-off into
+            # fresh memory (mmap / VirtualAlloc) is an intermediate stage -- e.g. UPX's ELF
+            # decompressor -- and emulation follows it to the next hand-off.
+            if self.oep is None:
+                self.oep = address
+            if not self.follow:
+                self.stopped = "oep"
+                uc.emu_stop()
+        elif len(self.handoffs) >= _MAX_STAGES:
+            self.stopped = "stages"
+            uc.emu_stop()
 
     def _on_unmapped(self, uc, access, address, size, value, _):
         self.stopped = "unmapped"
@@ -409,26 +462,102 @@ class _Unpacker:
         return self._ret(0, nargs)
 
     # ---- syscalls ----------------------------------------------------------------------------------
+    def _is(self, nr, name):
+        n = _SYS[name][1 if self.arm else 0]
+        return n is not None and nr == n
+
+    def _self_bytes(self):
+        if self._file is None:
+            try:
+                self._file = Path(self.img.path).read_bytes()
+            except OSError:
+                self._file = b""
+        return self._file
+
     def _syscall(self, nr, args):
-        k = 1 if self.arm else 0
-        if nr == _SYS["mmap"][k]:
-            addr, length, flags = args[0], args[1], args[3]
+        neg = lambda e: e & (2**64 - 1)                     # noqa: E731  (-errno, as the kernel returns)
+        uc = self.uc
+        if self._is(nr, "mmap"):
+            addr, length, flags, fd, off = args[0], args[1], args[3], args[4], args[5]
+            length = min(length, HEAP_SIZE)
             if addr and flags & 0x10:                       # MAP_FIXED: make sure it is mapped
                 lo, hi = addr & ~0xfff, (addr + length + 0xfff) & ~0xfff
-                if hi - lo > HEAP_SIZE:
-                    return -12 & (2**64 - 1)
                 for pg in range(lo, hi, 0x1000):
                     try:
-                        self.uc.mem_map(pg, 0x1000)
+                        uc.mem_map(pg, 0x1000)
                     except UcError:
                         pass
-                return addr
-            return self._alloc(min(length, HEAP_SIZE)) or (-12 & (2**64 - 1))
-        if nr in (_SYS["exit"][k], _SYS["exit_group"][k]):
+                if flags & 0x20:                            # MAP_ANONYMOUS replaces with zero pages
+                    try:
+                        uc.mem_write(lo, b"\0" * (hi - lo))
+                    except UcError:
+                        pass
+                at = addr
+            else:
+                at = self._alloc(length)
+                if not at:
+                    return neg(-12)
+            if not flags & 0x20 and fd == _SELF_FD:         # file-backed mapping of the sample itself
+                data = self._self_bytes()[off:off + length]
+                try:
+                    uc.mem_write(at, data)
+                except UcError:
+                    pass
+            return at
+        if self._is(nr, "exit") or self._is(nr, "exit_group"):
             self.stopped = "exit"
-            self.uc.emu_stop()
+            uc.emu_stop()
             return 0
-        return 0                                            # mprotect/munmap/...: neutral success
+        if self._is(nr, "open") or self._is(nr, "openat"):
+            path = self._cstr(args[1] if self._is(nr, "openat") else args[0], limit=4096)
+            if path in _SELF_PATHS or path == str(self.img.path):
+                self._fd_off = 0
+                return _SELF_FD
+            return neg(_ENOENT)
+        if self._is(nr, "readlink") or self._is(nr, "readlinkat"):
+            path_p, buf, size = (args[1], args[2], args[3]) if self._is(nr, "readlinkat") \
+                else (args[0], args[1], args[2])
+            if self._cstr(path_p, limit=4096) not in _SELF_PATHS:
+                return neg(_ENOENT)
+            target = str(Path(self.img.path).resolve()).encode()[:max(0, size)]
+            try:
+                uc.mem_write(buf, target)
+            except UcError:
+                return neg(-14)                             # EFAULT
+            return len(target)
+        if self._is(nr, "read") or self._is(nr, "pread64"):
+            fd, buf, size = args[0], args[1], min(args[2], HEAP_SIZE)
+            if fd != _SELF_FD:
+                return neg(_EBADF)
+            off = args[3] if self._is(nr, "pread64") else self._fd_off
+            data = self._self_bytes()[off:off + size]
+            try:
+                uc.mem_write(buf, data)
+            except UcError:
+                return neg(-14)
+            if self._is(nr, "read"):
+                self._fd_off = off + len(data)
+            return len(data)
+        if self._is(nr, "lseek"):
+            if args[0] != _SELF_FD:
+                return neg(_EBADF)
+            whence, off = args[2], args[1]
+            base = {0: 0, 1: self._fd_off, 2: len(self._self_bytes())}.get(whence)
+            if base is None:
+                return neg(-22)
+            self._fd_off = max(0, base + (off - 2**64 if off >= 2**63 else off))
+            return self._fd_off
+        if self._is(nr, "write"):
+            return min(args[2], 1 << 30)                    # swallowed, but report it as written
+        if self._is(nr, "writev"):
+            total = 0
+            for i in range(min(args[2], 64)):
+                try:
+                    total += struct.unpack("<Q", bytes(uc.mem_read(args[1] + 16 * i + 8, 8)))[0]
+                except UcError:
+                    break
+            return min(total, 1 << 30)
+        return 0                                            # mprotect/munmap/close/...: success
 
     def _on_syscall(self, uc, _):
         nr = uc.reg_read(X.UC_X86_REG_RAX)
@@ -446,15 +575,51 @@ class _Unpacker:
         uc.reg_write(A.UC_ARM64_REG_X0, self._syscall(nr, args))
 
     # ---- run ---------------------------------------------------------------------------------------
+    def _process_stack(self, entry_va):
+        """The initial stack the kernel hands an ELF at its entry point: argc, argv, envp and the
+        auxiliary vector (AT_PHDR/AT_PHNUM/AT_PAGESZ/AT_ENTRY/AT_RANDOM/AT_EXECFN ...). A self-
+        unpacking stub (UPX) reads these to find its program headers and the real entry. Returns sp."""
+        uc, w = self.uc, self.ptr
+        fmt = "<I" if w == 4 else "<Q"
+        top = self.stack + STACK_SIZE - 0x100
+        name = str(Path(self.img.path).resolve()).encode()[:200] + b"\0"
+        execfn = top - len(name)
+        rnd = (execfn - 16) & ~0xf
+        uc.mem_write(execfn, name)
+        uc.mem_write(rnd, bytes(range(16)))
+        b = self.img.binary
+        try:
+            phoff, phnum = b.header.program_header_offset, b.header.numberof_segments
+            first = min((sg.virtual_address - sg.file_offset for sg in b.segments
+                         if int(sg.type) == 1 and sg.file_offset <= phoff), default=0)
+            phdr = first + phoff
+        except Exception:
+            phnum, phdr = 0, 0
+        auxv = [(3, phdr), (4, 32 if w == 4 else 56), (5, phnum), (6, 0x1000), (7, 0), (8, 0),
+                (9, entry_va), (11, 1000), (12, 1000), (13, 1000), (14, 1000), (16, 0), (17, 100),
+                (23, 0), (25, rnd), (31, execfn), (0, 0)]
+        words = [1, execfn, 0, 0] + [x for kv in auxv for x in kv]     # argc, argv[0], NULL, envp NULL
+        sp = (rnd - 8 * len(words) - 0x40) & ~0xf
+        uc.mem_write(sp, b"".join(struct.pack(fmt, x & ((1 << (8 * w)) - 1)) for x in words))
+        return sp
+
     def run(self, entry_rva: int):
         import time
         uc = self.uc
         sp = self.stack + STACK_SIZE - 0x1000
-        uc.reg_write(self.SP, sp)
-        if self.arm:
-            uc.reg_write(A.UC_ARM64_REG_X30, RET_SENTINEL)
+        at_elf_entry = self.img.fmt == "ELF" and BASE + entry_rva == BASE + self.img.binary.entrypoint
+        if at_elf_entry:
+            # a process entry point: no return address, [sp] = argc (as the kernel sets it up)
+            sp = self._process_stack(BASE + entry_rva)
+            uc.reg_write(self.SP, sp)
+            if self.arm:
+                uc.reg_write(A.UC_ARM64_REG_X30, RET_SENTINEL)
         else:
-            uc.mem_write(sp, struct.pack("<I" if self.x32 else "<Q", RET_SENTINEL))
+            uc.reg_write(self.SP, sp)
+            if self.arm:
+                uc.reg_write(A.UC_ARM64_REG_X30, RET_SENTINEL)
+            else:
+                uc.mem_write(sp, struct.pack("<I" if self.x32 else "<Q", RET_SENTINEL))
         t0 = time.monotonic()
         try:
             uc.emu_start(BASE + entry_rva, RET_SENTINEL, timeout=int(_WALL_S * 1e6), count=_MAX_INSNS)
@@ -467,26 +632,23 @@ class _Unpacker:
         return self._regions()
 
     def _runs(self):
-        """Contiguous written runs (gaps <= 8 bytes bridged), from the per-page bitmaps."""
+        """Contiguous written runs (gaps <= 8 bytes bridged), from the per-page bit maps."""
         runs, start, prev = [], None, None
         for pg in sorted(self.wpages):
             bm = self.wpages[pg]
-            i = bm.find(1)
-            while i != -1:
-                a = pg + i
-                if start is None:
-                    start = prev = a
-                elif a - prev <= 8:
+            for byte_i, bits in enumerate(bm):
+                if not bits:
+                    continue
+                for bit in range(8):
+                    if not (bits >> bit) & 1:
+                        continue
+                    a = pg + (byte_i << 3) + bit
+                    if start is None:
+                        start = a
+                    elif a - prev > 8:
+                        runs.append((start, prev + 1))
+                        start = a
                     prev = a
-                else:
-                    runs.append((start, prev + 1))
-                    start = prev = a
-                j = bm.find(0, i)
-                if j == -1:
-                    prev = pg + 4095
-                    break
-                prev = pg + j - 1
-                i = bm.find(1, j)
         if start is not None:
             runs.append((start, prev + 1))
         return runs
@@ -584,7 +746,10 @@ def recover(path, entry=None, follow=False) -> dict:
         return {"error": f"emulator setup failed: {e}", "arch": arch, "entry": entry_rva,
                 "instructions_blocks": 0, **empty}
     detected = any(r["executed"] and (not r["in_text"] or r["entropy"] < 7.9) for r in regions)
-    if up.oep is None and up.first_unpacked is not None and up.stopped != "oep":
+    if up.oep is None and up.handoffs:
+        # every hand-off went to fresh memory (no in-image stage-2): the last one is the best OEP
+        up.oep = BASE + up.handoffs[-1]["va"]
+    elif up.oep is None and up.first_unpacked is not None:
         # never saw a JMP hand-off (the stub CALLed into stage-2 and the run ended inside it):
         # the first unpacked code is the best available OEP estimate
         up.oep = up.first_unpacked
@@ -602,6 +767,7 @@ def recover(path, entry=None, follow=False) -> dict:
         "import_calls": sorted(set(up.import_calls))[:200],
         "self_patches": [a - BASE for a in up.self_patches],
         "callbacks": [a - BASE for a in up.callbacks],
+        "handoffs": up.handoffs,
         "_regions": regions,            # kept for --dump; stripped by --json
     }
 

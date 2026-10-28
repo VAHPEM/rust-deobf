@@ -32,8 +32,11 @@ def test_positive_on_real_packed_elf():
     assert res["stopped"] == "oep", res["stopped"]
     carved_va = [r for r in res["_regions"] if r["executed"]][0]["va"]
     assert res["oep"] == carved_va
-    # --follow keeps going: stage-2's `ret` pops the sentinel, a clean finish
-    assert U.recover(PACKED, follow=True)["stopped"] == "ret"
+    # --follow keeps going past the OEP. Run from the ELF entry point the stack is a real process
+    # stack (argc/argv/envp/auxv, no return address), so stage-2's final `ret` leaves the image --
+    # exactly what a real process would do -- instead of popping a planted sentinel.
+    followed = U.recover(PACKED, follow=True)
+    assert followed["stopped"] in ("unmapped", "ret") and followed["oep"] == res["oep"]
     assert res["unpacked_detected"] is True
     execd = [r for r in res["unpacked"] if r["executed"]]
     assert execd, res["unpacked"]
