@@ -8,6 +8,8 @@
 #   ct.c    -> ct32/ct64  a global constructor, i386 PIE and x86-64 PIE
 #   tls.c   -> tls.so     two initial-exec thread-locals (x86-64; R_X86_64_TPOFF64 relocations)
 #   heap.c  -> heap.so    a constructor that malloc()s a block a global points at
+#   tls2.c  -> tls2.so/tls2_32.so/tls2_a64.so  a 32-byte initial-exec TLS struct next to an 8-byte one
+#   bigbss.c -> bigbss64  a constructor in an image whose .bss (32 MB) exceeds the emulator's _BSS_CAP
 #   mo.c    -> mo_chained/mo_classic   a Mach-O pointer table, chained fixups vs classic dyld
 #   mo2.c   -> mo2_classic             a Mach-O __mod_init_func constructor
 #
@@ -39,6 +41,13 @@ set -x
 "${CC[@]}" -m32 -nostdlib -fpie -pie                 -o "$out/ct32"    "$here/ct.c"
 "${CC[@]}"      -nostdlib -shared -fpic -ftls-model=initial-exec -o "$out/tls.so" "$here/tls.c"
 "${CC[@]}"      -nostdlib -shared -fpic              -o "$out/heap.so" "$here/heap.c"
+# tls2.so / tls2_32.so use the default (bfd) linker: its GOT order puts T2 before T1, the order in
+# which a fixed 8-byte stride overlapped the struct on x86 (lld orders them the other way)
+small=(-Wl,-z,noseparate-code -Wl,-z,max-page-size=0x1000)
+clang -O1 -shared -fpic -nostdlib "${small[@]}" -s       -o "$out/tls2.so"    "$here/tls2.c"
+clang -O1 -m32 -shared -fpic -nostdlib "${small[@]}"     -o "$out/tls2_32.so" "$here/tls2.c"
+clang -O1 --target=aarch64-linux-gnu -shared -fpic -nostdlib -fuse-ld=lld -o "$out/tls2_a64.so" "$here/tls2.c"
+"${CC[@]}"      -nostdlib -static                    -o "$out/bigbss64" "$here/bigbss.c"
 { set +x; } 2>/dev/null
-echo "built null64 vt32 ct64 ct32 tls.so heap.so in $out"
+echo "built null64 vt32 ct64 ct32 tls.so heap.so tls2.so tls2_32.so tls2_a64.so bigbss64 in $out"
 echo "note: pe64.exe and the Mach-O fixtures are committed (need lld-link / ld64 to rebuild)"

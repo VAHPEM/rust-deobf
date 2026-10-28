@@ -81,6 +81,11 @@ HEAP = 0x30000000         # bump allocator for malloc/HeapAlloc/__rust_alloc/mma
 HEAP_SIZE = 0x4000000
 TLS = 0x50000000          # thread pointer block (fs/gs base on x86-64, TPIDR_EL0 on AArch64)
 TLS_SIZE = 0x20000
+# initial-exec TLS offsets are handed out inside one half of the TLS block (TP sits at its middle):
+# x86 from TP-0x1000 downward, AArch64 from TP+16 upward. _TLS_ALLOC_SPAN keeps both inside the
+# mapped block; _TLS_VAR_CAP bounds the stride a single (possibly crafted) symbol size can claim.
+_TLS_ALLOC_SPAN = 0xE000
+_TLS_VAR_CAP = 0x4000
 TRAMP = 0x7e000000        # one 16-byte `ret` trampoline per import
 TRAMP_SIZE = 0x100000
 BRK = 0x60000000          # program break for brk()
@@ -375,6 +380,7 @@ class Image:
                                 if v >= ib:
                                     self.patches[e.address] = v - ib
                 return
+            tls_cur = 0     # initial-exec TLS allocation cursor (bytes used in the TLS block)
             for r in b.relocations:
                 t = str(r.type)
                 if t.endswith("_RELATIVE"):
@@ -393,19 +399,33 @@ class Image:
                         self.patches[r.address] = sym.value + r.addend
                     elif sym.name:
                         self.patches[r.address] = self._import(sym.name)
-                elif "TPOFF" in t or "TPREL" in t or "TLS_TPREL" in t:
+                elif ("TPOFF" in t or "TPREL" in t) and "DTP" not in t:
                     # initial-exec thread-local: the GOT slot holds the variable's offset from the
                     # thread pointer. Left 0, every thread-local sits AT the thread pointer, so they
                     # alias each other and a write corrupts the TP self-pointer. Give each a distinct
-                    # offset inside the mapped TLS block (below TP on x86-64 SysV; above the TCB on
-                    # AArch64 variant-I), so distinct thread-locals get distinct, writable storage.
-                    key = r.symbol.name if (r.has_symbol and r.symbol.name) else r.address
+                    # offset inside the mapped TLS block (below TP on x86/x86-64 variant II; above
+                    # the 16-byte TCB on AArch64 variant I), so distinct thread-locals get distinct,
+                    # writable storage. (DTPOFF/DTPREL are module-relative general-dynamic slots,
+                    # not TP offsets, so they are excluded.)
+                    key = ((r.symbol.name, r.addend) if (r.has_symbol and r.symbol.name)
+                           else r.address)
                     off = self._tls_off.get(key)
                     if off is None:
-                        k = len(self._tls_off)
-                        off = (16 + 8 * k) if self.arm else -(0x1000 + 8 * k)
+                        # space by the variable's own size (16-aligned, at least 8): a fixed 8-byte
+                        # stride let a bigger thread-local (a struct, an array) overlap the next one
+                        size = (r.symbol.size or 0) if r.has_symbol else 0
+                        span = max(8, (min(size, _TLS_VAR_CAP) + 15) & ~15)
+                        if tls_cur + span > _TLS_ALLOC_SPAN:
+                            tls_cur = 0        # crafted sizes: wrap (aliasing) rather than leave the block
+                        if self.arm:           # variant I: TP -> TCB(16) -> vars, growing upward
+                            off = 16 + tls_cur
+                        else:                  # variant II: vars grow downward from below TP
+                            off = -(0x1000 + tls_cur + span)
+                        tls_cur += span
                         self._tls_off[key] = off
-                    self.patches[r.address] = off & ((1 << (8 * self.ptr)) - 1)
+                    # i386 R_386_TLS_TPOFF32 holds the NEGATED offset (the code subtracts it)
+                    val = -off if t.endswith("X86_TLS_TPOFF32") else off
+                    self.patches[r.address] = val & ((1 << (8 * self.ptr)) - 1)
         except Exception:
             pass
 
@@ -1384,8 +1404,14 @@ class Emulator:
     def _capture_primed(self):
         """Snapshot current writable-section memory as the new restore baseline."""
         snap = []
-        for s in self.img.binary.sections:
-            if not s.virtual_address or not s.size:
+        # walk the same section set, and read the same capped extent, that map_image mapped: a .bss
+        # larger than _BSS_CAP is only mapped up to the cap, so reading its declared s.size faulted
+        # and silently dropped the whole section (constructor-set globals then read 0 after reset)
+        for s in _mappable_sections(self.img.binary):
+            if not s.virtual_address:
+                continue
+            n = _seg_extent(s)
+            if not n:
                 continue
             w = (bool(int(s.characteristics) & 0x80000000) if self.img.pe
                  else bool(int(s.flags) & 0x1))
@@ -1393,7 +1419,7 @@ class Emulator:
                 continue
             try:
                 snap.append((BASE + s.virtual_address,
-                             bytes(self.uc.mem_read(BASE + s.virtual_address, s.size))))
+                             bytes(self.uc.mem_read(BASE + s.virtual_address, n))))
             except UcError:
                 pass
         self._primed = snap
@@ -1512,27 +1538,20 @@ class Emulator:
                     return 0 if x == y else (1 if x > y else 0xffffffffffffffff)
                 return 0
             if n == "strlen":
-                # read in page-sized chunks so a string within 4 KB of a mapping's end does not
-                # fault the whole fixed-0x1000 read (which returned 0, a wrong length)
+                # read up to the next page boundary each step: mappings are page-granular, so a chunk
+                # never straddles into an unmapped page. A fixed 0x1000 read from an unaligned p
+                # faulted for a string within 4 KB of a mapping's end and returned 0 (wrong length).
                 p, total = arg(0), 0
                 while total < 0x100000:
+                    chunk = 0x1000 - ((p + total) & 0xfff)
                     try:
-                        s = bytes(uc.mem_read(p + total, 0x1000))
+                        s = bytes(uc.mem_read(p + total, chunk))
                     except UcError:
-                        if total:
-                            s = b""
-                            for off in range(0, 0x1000):     # salvage the readable bytes one page in
-                                try:
-                                    s += bytes(uc.mem_read(p + total + off, 1))
-                                except UcError:
-                                    break
-                        else:
-                            return 0
-                    if 0 in s:
-                        return total + s.index(0)
-                    if len(s) < 0x1000:
-                        return total + len(s)
-                    total += 0x1000
+                        return total           # ran off the mapping: the readable prefix
+                    i = s.find(0)
+                    if i >= 0:
+                        return total + i
+                    total += chunk
                 return total
             # output succeeds: a `write` that returns 0 is io::ErrorKind::WriteZero, and std's
             # print! panics ("failed printing to stdout") after the first line, ending the run

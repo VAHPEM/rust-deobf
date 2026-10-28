@@ -156,3 +156,70 @@ def test_build_script_reproduces_committed_fixture_shapes(tmp_path):
     assert any("TPOFF64" in t for t in tls[3]), tls
     for exe in ("null64", "ct64", "ct32", "vt32"):
         assert _elf_shape(tmp_path / exe)[:2] == ("FILE_TYPE.DYN", True), exe     # PIE
+
+
+def _ret_reg(emu):
+    if emu.arm:
+        import unicorn.arm64_const as A
+        return emu.uc.reg_read(A.UC_ARM64_REG_X0)
+    import unicorn.x86_const as X
+    return emu.uc.reg_read(X.UC_X86_REG_EAX)
+
+
+@pytest.mark.parametrize("name", ["tls2.so", "tls2_a64.so", "tls2_32.so"])
+def test_initial_exec_tls_offsets_respect_variable_size(name):
+    # T1 is a 32-byte (16 on i386) struct, T2 an 8-byte long next to it. With a fixed 8-byte offset
+    # stride T1 overlaps T2, so setting every T1 field to 0x1111 and then T2 = 0x2222 clobbered a
+    # field and the sum of T1 was no longer 0x4444.
+    # x86-64 / i386 (variant II, below TP) and AArch64 (variant I, above the 16-byte TCB).
+    img, emu = _emu(name)
+    b = img.binary
+    sym = next((s for s in b.symbols if s.name == "f"), None)
+    if sym is None:
+        pytest.skip("no f symbol")
+    offs = {k[0]: v for k, v in img._tls_off.items() if isinstance(k, tuple)}
+    assert set(offs) == {"T1", "T2"}
+    span = {"T1": 16 if img.x32 else 32, "T2": 8}
+    lo1, lo2 = offs["T1"], offs["T2"]
+    assert lo1 + span["T1"] <= lo2 or lo2 + span["T2"] <= lo1, offs        # no overlap
+    if img.arm:
+        assert min(lo1, lo2) >= 16, offs           # past the TCB, never on top of it
+    else:
+        assert max(lo1 + span["T1"], lo2 + span["T2"]) <= 0, offs   # wholly below TP
+    import gen_runtime_sigs as G
+    emu.run(G.sym_va(b, sym), 0x200)
+    if img.x32 and _ret_reg(emu) == 0:
+        pytest.skip("this Unicorn build cannot set a 32-bit segment base (TLS run faults)")
+    assert _ret_reg(emu) & 0xffffffff == 0x4444
+
+
+def test_primed_baseline_keeps_bss_larger_than_cap():
+    # bigbss64: a constructor sets MARK in an image whose .bss (32 MB) exceeds _BSS_CAP. The primed
+    # snapshot read the declared s.size (past the 16 MB mapping) -> UcError -> the whole .bss was
+    # dropped from the baseline and MARK read 0 after a reset.
+    img, emu = _emu("bigbss64")
+    mark = next((s for s in img.binary.symbols if s.name == "MARK"), None)
+    if mark is None:
+        pytest.skip("no MARK symbol")
+    assert emu.prime_constructors() == 1
+    emu._reset()
+    import gen_runtime_sigs as G
+    v = struct.unpack("<I", emu.uc.mem_read(R.BASE + G.sym_va(img.binary, mark), 4))[0]
+    assert v == 0x1337
+
+
+def test_strlen_stub_near_end_of_mapping():
+    # a string within 4 KB of a mapping's end: the fixed 0x1000 read from an unaligned pointer
+    # faulted and strlen returned 0. Also an unterminated run up to the mapping end returns the
+    # readable length, not 0.
+    img, emu = _emu("ct64")
+    emu._reset()
+    end = R.HEAP + R.HEAP_SIZE
+    for p, s, want in ((R.HEAP + 0x100, b"hello\x00", 5), (end - 16, b"hello\x00", 5),
+                       (end - 0x1801, b"\x00", 0), (end - 0x1803, b"ab\x00", 2)):
+        emu.uc.mem_write(p, s)
+        emu.uc.reg_write(emu.ARGS[0], p)
+        assert emu._stub("strlen") == want, hex(p)
+    emu.uc.mem_write(end - 0x20, b"A" * 0x20)        # no terminator before the mapping ends
+    emu.uc.reg_write(emu.ARGS[0], end - 0x20)
+    assert emu._stub("strlen") == 0x20
