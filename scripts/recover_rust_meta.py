@@ -119,11 +119,19 @@ def _clean_own(p: str) -> str | None:
     return p
 
 
+def _str(name) -> str:
+    """LIEF hands back `bytes` for a section / symbol name that is not valid UTF-8 (a crafted or
+    corrupted binary -- found by fuzz_recover); treat names as text everywhere."""
+    if isinstance(name, (bytes, bytearray)):
+        return bytes(name).decode("latin-1")
+    return name if isinstance(name, str) else ""
+
+
 def _is_debug_section(name: str) -> bool:
     """DWARF sections: their file tables hold bare relative names (`src\\frame.rs`) whose
     directory lives elsewhere, so they cannot be attributed to a crate. Panic paths and
     Location records live in the read-only data, which is what we scan."""
-    return name.startswith((".debug", ".zdebug", "__debug", "__DWARF"))
+    return _str(name).startswith((".debug", ".zdebug", "__debug", "__DWARF"))
 
 
 def _coff_long_names(path: Path) -> dict:
@@ -185,7 +193,7 @@ def read_sections(path: Path):
     try:
         for s in b.symbols:
             if s.name:
-                syms.append(s.name)
+                syms.append(_str(s.name))
     except Exception:
         pass
     # Pointers the loader fills in, as (slot VA, target VA): in a PIE build a Location filename

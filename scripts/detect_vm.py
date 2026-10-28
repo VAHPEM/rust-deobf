@@ -114,7 +114,9 @@ def _symbol_names(img):
         for s in img.binary.symbols:
             try:
                 v = int(s.value)
-                if v:
+                # skip ELF mapping symbols ($x/$d on AArch64, $a/$t on ARM): they share the
+                # function's address and, seen first, would hide its real name
+                if v and s.name and not s.name.startswith("$"):
                     names.setdefault(base + v, s.name)
             except Exception:
                 pass

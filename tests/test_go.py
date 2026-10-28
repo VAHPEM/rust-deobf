@@ -50,7 +50,7 @@ def test_real_stripped_go_binary(tmp_path):
 
 # ---- regressions (review B): pointer size, whole-section scan, DoS bounds, PE RVAs, version regex
 
-import resource  # noqa: E402
+import tracemalloc  # noqa: E402  (portable: `resource` is POSIX-only and broke collection on Windows)
 import struct  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
@@ -105,9 +105,12 @@ def test_crafted_pclntab_bounded():
     struct.pack_into("<Q", hdr, 8, nfunc); struct.pack_into("<Q", hdr, 24, 0x401000)
     struct.pack_into("<Q", hdr, 32, 72 + len(functab) + len(fstruct)); struct.pack_into("<Q", hdr, 64, 72)
     raw = bytes(hdr) + functab + fstruct + b"A" * namelen
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    res = GO.parse_pclntab(raw)
-    grown_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) >> 10
+    tracemalloc.start()
+    try:
+        res = GO.parse_pclntab(raw)
+        grown_mb = tracemalloc.get_traced_memory()[1] >> 20      # peak Python allocation
+    finally:
+        tracemalloc.stop()
     assert len(res["functions"]) == nfunc
     assert max(len(n) for n in res["functions"].values()) <= GO._MAX_NAME
     assert grown_mb < 50, grown_mb

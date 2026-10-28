@@ -26,7 +26,9 @@ edit. Instead:
 
 `scripts/check.sh` wraps these: `./scripts/check.sh` = the 8s gate; `./scripts/check.sh changed` =
 only the scripts you touched vs `origin/master` (narrow-first); `./scripts/check.sh full` = the fast
-CI subset; `./scripts/check.sh <name>` = that module's selftest + test file.
+CI subset; `./scripts/check.sh <name>` = that module's selftest + test file(s) (found via an explicit
+module→test map, `scripts/` or `premium/`). Exit codes: 0 pass, 1 a selftest/test failed, 2 usage
+error (unknown module, missing base ref for `changed`). `CHECK_DRY_RUN=1` prints the commands only.
 
 **Narrow before broad** — run the cheapest thing that can fail first, widen only if it passes:
 `./scripts/check.sh <name>` → `./scripts/check.sh changed` → `./scripts/check.sh` → `full`. Within
@@ -93,7 +95,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_lang.py` | per-function source-language map (mixed-language binaries) |
 | `detect_vm.py` | flag functions hidden behind a bytecode VM |
 | `recover_dynamic.py` / `recover_artifacts.py` | Frida runtime memory-diff recovery |
-| `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals (dynamic, runs the sample) |
+| `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals (dynamic, runs the sample): EXEC flips, the main module's in-memory image at exit (+ a file-layout `.fixed.exe`), MZ sweeps; sample stdio piped away |
 | `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub (x86-64/x86/AArch64, ELF incl. section-less, PE with headers + import stubs), report the OEP, carve stage-2, and the import table the stub rebuilt + stage-2 call sites bound to it (no host execution; `--entry`, `--follow`) |
 | `unpack.py` | Tier 2: one unpacking command — static (unpack_emulate) first + PE-stage carve; dynamic (dump_unpacked/Frida) only as opt-in fallback behind `--i-understand-this-executes`. Nothing runs a sample by default. |
 
@@ -115,8 +117,9 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 `recover.py` (unified string front end) · `soc_triage.py` / `llm_triage.py` (triage cards) ·
 `floss_export.py` / `export_rules.py` (FLOSS / capa+YARA output) · `mcp_server.py` (MCP over stdio) ·
 `ghidra_annotate.py` + `ghidra_run.sh` / `ghidra_dump_annotations.py` (Ghidra) ·
-`redblue_loop.py` (RustCloak hide ↔ rust-deobf recover regression) · `fuzz_recover.py` (fuzz our own
-analysis path on malformed binaries) · `recover_blobs.py` (triage pipeline: carve blobs via
+`redblue_loop.py` (RustCloak hide ↔ rust-deobf recover regression; exit 3 = no round was
+evaluable, e.g. every build failed or the plugin hid nothing) · `fuzz_recover.py` (fuzz our own
+analysis path on malformed binaries; findings grouped by root cause, seed always printed) · `recover_blobs.py` (triage pipeline: carve blobs via
 recover_embedded → keyless recovery = decompression + magic-anchored single-byte-XOR → annotate with
 recover_crypto's candidate primitives; honest that encrypted blobs need a key).
 Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `heldout_eval.py`,
@@ -135,7 +138,33 @@ clang/clang++/g++/cmake/llvm-18-dev; go1.24.7. libRustCloak.so built at
 `/home/user/rustcloak/build/`. Python deps: lief≥0.16, capstone≥5&lt;6, unicorn≥2.1&lt;3, z3-solver,
 pyelftools (optional; DWARF enum/niche names in recover_enums.py), pytest.
 
+## Test matrix (measured — say which targets you ran, never assume an untested one)
+The maintainer's lab (see the project's `dual-vm-ai-agent/CLAUDE.md`): **ARM64 Kali** (native ELF /
+AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Windows 11 ARM64** VM
+(x64 Python runs there under emulation = the x64-Windows target), and x86-64 Linux (cloud / CI).
+- **Windows ARM64 *native* Python cannot run this toolkit today**: no win_arm64 wheels for
+  `unicorn` (any version) or `capstone<6` (only 6.0 alphas), and no MSVC ARM64 to build them. Use
+  x64 Python on Windows-on-ARM.
+- Host-built tests follow the host arch: on ARM64 Kali `rustc` emits AArch64 (LLVM tables a match
+  only from ~20 arms there, not 8; every import goes through a `.plt` stub).
+- Windows: no `/tmp` (use `tempfile`), no `resource` module, no `fork`/`forkserver` (fall back to
+  `spawn`), and an open `NamedTemporaryFile` cannot be reopened.
+- `tests/test_dump_unpacked_dynamic.py` EXECUTES the benign UPX fixture: opt-in only
+  (`RUST_DEOBF_DYNAMIC=1`, frida, Windows), run it on the Windows VM.
+
 ## Gotchas (each cost a debugging round once — don't repeat them)
+- **PE addresses are RVAs** everywhere in this toolkit (LIEF section VAs, function starts, results);
+  LIEF's `binary.entrypoint` for a PE is an absolute VA — subtract `optional_header.imagebase`.
+- **ELF mapping symbols** (`$x`/`$d` on AArch64, `$a`/`$t` on ARM) share each function's address:
+  skip names starting with `$` when building an address → name map, or they hide the real name.
+- **LIEF:** keep the parsed binary alive while iterating `.symbols` (iterating a temporary's
+  symbols segfaults); a section/symbol name that is not valid UTF-8 comes back as `bytes`.
+- **Unicorn reserves large VIRTUAL memory per instance**: don't run tests under `ulimit -v` (the
+  process dies silently); bound real memory instead (the unpacker's write tracking is bit-mapped
+  and page-capped).
+- **`deobf_opaque` is sound within its model**: it lifts flags per flag at the operand width and
+  abandons anything it does not model exactly; `tests/test_opaque_differential.py` checks every
+  claim against Unicorn on random blocks (0 false claims is the bar — never relax it).
 - **capstone is pinned `>=5,<6`** — the code uses `CS_ARCH_ARM64` (renamed in capstone 6). Don't bump.
 - **Unicorn + multiprocessing:** use `forkserver`, not `fork`. Forking after the parent has
   instantiated Unicorn → "Could not allocate dynamic translator buffer".

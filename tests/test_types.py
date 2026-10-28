@@ -144,7 +144,10 @@ def test_null_drop_vtable_of_copy_type(tmp_path):
     if r.returncode != 0:
         pytest.skip("rustc failed: " + r.stderr[-200:])
     binary = lief.parse(str(out))          # keep a reference: iterating a temporary's symbols segfaults
-    syms = {s.value: s.name for s in binary.symbols if s.value and s.name}
+    # skip ELF mapping symbols ($x / $d): on AArch64 they share each function's address and would
+    # overwrite its name in this address -> name map (the test then "missed" a vtable it found)
+    syms = {s.value: s.name for s in binary.symbols
+            if s.value and s.name and not s.name.startswith("$")}
     res = RT.recover(out)
     by_method = {}
     for vt in res["vtables"]:
