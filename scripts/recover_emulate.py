@@ -65,6 +65,7 @@ from unicorn import x86_const as X
 from unicorn import arm64_const as A
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from emu_backend import fast_hook_add  # noqa: E402  (one Python frame per hook event)
 
 ROOT = Path(__file__).resolve().parent.parent
 _SIGS = Path(__file__).resolve().parent / "data" / "runtime_sigs.json"
@@ -1225,10 +1226,10 @@ class Emulator:
         uc.mem_map(HEAP, HEAP_SIZE)
         uc.mem_map(TLS, TLS_SIZE)
         self._image_snapshot = None
-        uc.hook_add(UC_HOOK_BLOCK, self._on_block)
-        uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
-        uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
-                    self._on_unmapped)
+        fast_hook_add(uc, UC_HOOK_BLOCK, self._on_block)
+        fast_hook_add(uc, UC_HOOK_MEM_WRITE, self._on_write)
+        fast_hook_add(uc, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
+                      self._on_unmapped)
         if self.arm or self.x32:
             uc.hook_add(UC_HOOK_INTR, self._on_intr)        # i386 syscalls / svc are int/svc
         else:

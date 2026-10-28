@@ -47,6 +47,7 @@ from recover_emulate import (  # noqa: E402  (shared, fuzz-hardened primitives)
     BASE, HEAP, HEAP_SIZE, RET_SENTINEL, STACK, STACK32, STACK_SIZE, TRAMP, TRAMP_SIZE, Image,
     map_image,
 )
+from emu_backend import fast_hook_add  # noqa: E402  (one Python frame per hook event)
 from unicorn import (  # noqa: E402
     UC_ARCH_ARM64, UC_ARCH_X86, UC_HOOK_BLOCK, UC_HOOK_CODE, UC_HOOK_INSN, UC_HOOK_INTR,
     UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE,
@@ -232,11 +233,11 @@ class _Unpacker:
                                                   BASE + sg.virtual_address + sg.virtual_size))
                 except Exception:
                     continue
-        uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
-        uc.hook_add(UC_HOOK_BLOCK, self._on_block)
-        uc.hook_add(UC_HOOK_CODE, self._on_tramp, None, TRAMP, TRAMP + TRAMP_SIZE - 1)
-        uc.hook_add(
-            UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
+        fast_hook_add(uc, UC_HOOK_MEM_WRITE, self._on_write)
+        fast_hook_add(uc, UC_HOOK_BLOCK, self._on_block)
+        fast_hook_add(uc, UC_HOOK_CODE, self._on_tramp, None, TRAMP, TRAMP + TRAMP_SIZE - 1)
+        fast_hook_add(
+            uc, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
             self._on_unmapped)
         if self.arm:
             uc.hook_add(UC_HOOK_INTR, self._on_intr)
