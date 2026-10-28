@@ -45,6 +45,12 @@ _WIN = 512          # entropy window (small windows undershoot Shannon on random
 _STEP = 256         # entropy window stride
 _ENT_HI = 7.2       # bits/byte: packed/encrypted (a 512B random window sits ~7.6)
 _MIN_BLOB = 1024    # smallest high-entropy region worth reporting
+_MAX_HITS = 256     # per-kind cap on magic hits (a crafted run of PK\x03\x04 gave 200k entries)
+
+# Mach-O host headers (thin, both byte orders) and universal ("fat") headers. The fat magic is
+# shared with Java class files; a fat header's nfat_arch is small, a class file's version is >= 45.
+_MACHO_THIN = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce")
+_MACHO_FAT = (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf")     # fat_header / fat_header_64 (BE)
 
 
 def _entropy(b: bytes) -> float:
@@ -57,17 +63,28 @@ def _entropy(b: bytes) -> float:
     return -sum((c / n) * math.log2(c / n) for c in counts if c)
 
 
-def _find_magics(data: bytes, self_skip=0):
-    """Magic-byte hits, excluding offset 0 if it is the host's own header (self_skip bytes)."""
+def _find_magics(data: bytes, self_skip=0, exclude=()):
+    """Magic-byte hits, excluding offset 0 if it is the host's own header (self_skip bytes) and any
+    offset in `exclude` (the host's own structure, e.g. a fat Mach-O's slices). At most _MAX_HITS
+    per kind; _find_magics_capped also says which kinds hit the cap."""
+    return _find_magics_capped(data, self_skip, exclude)[0]
+
+
+def _find_magics_capped(data: bytes, self_skip=0, exclude=()):
+    """(hits, capped_kinds): _find_magics plus the kinds whose hit count reached _MAX_HITS (so a
+    flood of one signature is reported as truncated rather than as an exact count)."""
     out = []
+    capped = []
+    exclude = set(exclude)
     for name, sig, need in _MAGICS:
         start = 0
+        n = 0
         while True:
             i = data.find(sig, start)
             if i < 0:
                 break
             start = i + 1
-            if i < self_skip:            # the file's own header, not an embedded artifact
+            if i < self_skip or i in exclude:    # the file's own header/structure, not embedded
                 continue
             if i + len(sig) + need > len(data):
                 continue
@@ -79,14 +96,47 @@ def _find_magics(data: bytes, self_skip=0):
                 cls, dat, ver = data[i + 4], data[i + 5], data[i + 6]
                 if cls not in (1, 2) or dat not in (1, 2) or ver != 1:
                     continue
+            if n >= _MAX_HITS:
+                capped.append(name)
+                break
             out.append({"kind": name, "offset": i})
-    return out
+            n += 1
+    return out, capped
+
+
+def _host_layout(data: bytes):
+    """(self_skip, exclude): how much of offset 0 is the host's own header, and the offsets of the
+    host's own nested headers (a fat Mach-O's per-architecture slices), so neither is reported as an
+    embedded artifact. PE (DOS header), ELF, thin Mach-O (either byte order) and fat Mach-O."""
+    head = data[:4]
+    if head[:2] == b"MZ":
+        return 0x40, ()
+    if head == b"\x7fELF" or head in _MACHO_THIN:
+        return 4, ()
+    if head in _MACHO_FAT and len(data) >= 8:
+        nfat = int.from_bytes(data[4:8], "big")
+        if 0 < nfat < 45:                # else a Java class file (major version >= 45), not fat
+            wide = head == _MACHO_FAT[1]
+            esz, ooff, osz = (32, 8, 8) if wide else (20, 8, 4)
+            slices = []
+            for k in range(min(nfat, 64)):
+                e = 8 + k * esz
+                if e + esz > len(data):
+                    break
+                slices.append(int.from_bytes(data[e + ooff:e + ooff + osz], "big"))
+            return 4, tuple(slices)
+    return 0, ()
 
 
 def _high_entropy_regions(data: bytes):
     """Coalesce sliding windows whose entropy exceeds the threshold into contiguous blobs."""
     hot = []
-    for off in range(0, max(0, len(data) - _WIN), _STEP):
+    if len(data) < _WIN:
+        return []                        # smaller than one window (and than _MIN_BLOB)
+    offs = list(range(0, len(data) - _WIN + 1, _STEP))
+    if offs[-1] != len(data) - _WIN:
+        offs.append(len(data) - _WIN)    # a final window flush with EOF: an overlay blob at the
+    for off in offs:                     # end must be carved whole, not cut at the last stride
         if _entropy(data[off:off + _WIN]) >= _ENT_HI:
             hot.append((off, off + _WIN))
     if not hot:
@@ -114,25 +164,71 @@ def _base64_runs(data: bytes, limit=32):
     out = []
     for m in _B64_RUN.finditer(data):
         tok = m.group()
-        if len(tok) % 4:
-            continue
-        try:
-            dec = base64.b64decode(tok, validate=True)
-        except Exception:
-            continue
-        if len(dec) < 48:
-            continue
-        ent = _entropy(dec)
-        # require a genuinely binary decode: symbol/identifier runs on a real binary match the
-        # charset but decode to low-entropy ASCII, so gate on entropy AND control bytes.
-        if not (ent >= 5.5 and any(b < 9 or (13 < b < 32) for b in dec)):
-            continue
-        out.append({"offset": m.start(), "b64_len": len(tok), "decoded_len": len(dec),
-                    "decoded_entropy": round(ent, 2),
-                    "decoded_sha256": hashlib.sha256(dec).hexdigest()})
+        r = len(tok) % 4
+        # a run glued to identifier characters (`key` + payload, or payload + `End`) is not a
+        # multiple of 4 long: try the 4-aligned suffix (glued head) and, for an unpadded run, the
+        # 4-aligned prefix (glued tail). Which side was glued is a guess, so it is reported.
+        if not r:
+            cands = [(0, tok, None)]
+        else:
+            cands = [(r, tok[r:], "head")]
+            if not tok.endswith(b"="):
+                cands.append((0, tok[:-r], "tail"))
+        for skip, t, trimmed in cands:
+            dec = _b64_payload(t)
+            if dec is None:
+                continue
+            ent = _entropy(dec)
+            rec = {"offset": m.start() + skip, "b64_len": len(t), "decoded_len": len(dec),
+                   "decoded_entropy": round(ent, 2),
+                   "decoded_sha256": hashlib.sha256(dec).hexdigest()}
+            if trimmed:
+                rec["trimmed"] = trimmed
+            out.append(rec)
+            break
         if len(out) >= limit:
             break
     return out
+
+
+def _wordlike(tok: bytes) -> bool:
+    """True when a base64-charset run reads as identifiers (CamelCase words, mangled C++/Rust
+    names, concatenated enum-variant names) rather than encoded bytes. Base64 of binary data draws
+    each character ~independently from 26 lower / 26 upper / 10 digit / 2 symbol, so the character
+    CLASS changes between neighbours with probability q = 1 - sum(p^2) ~= 0.645. Words keep the
+    class for runs of letters/digits, giving far fewer changes. Reject at z < -3 under a binomial
+    model: on a corpus of real ELF binaries this drops 99.7% of the charset-matching identifier runs
+    that also decode to "binary-looking" bytes, at a ~0.3% loss on random 64-char payloads (less
+    for longer ones). Without it, trimming glued runs to 4-aligned length quadrupled those FPs."""
+    t = tok.rstrip(b"=")
+    n = len(t) - 1
+    if n < 1:
+        return False
+
+    def cls(c):
+        return 0 if 97 <= c <= 122 else 1 if 65 <= c <= 90 else 2 if 48 <= c <= 57 else 3
+    changes = sum(1 for a, b in zip(t, t[1:]) if cls(a) != cls(b))
+    q = 0.645
+    return (changes - n * q) / math.sqrt(n * q * (1 - q)) < -3.0
+
+
+def _b64_payload(tok: bytes):
+    """Decoded bytes of a base64 token if it decodes cleanly to a non-trivial binary payload."""
+    if len(tok) < 4 or len(tok) % 4:
+        return None
+    try:
+        dec = base64.b64decode(tok, validate=True)
+    except Exception:
+        return None
+    if len(dec) < 48:
+        return None
+    if _wordlike(tok):
+        return None
+    # require a genuinely binary decode: symbol/identifier runs on a real binary match the
+    # charset but decode to low-entropy ASCII, so gate on entropy AND control bytes.
+    if not (_entropy(dec) >= 5.5 and any(b < 9 or (13 < b < 32) for b in dec)):
+        return None
+    return dec
 
 
 def recover(path) -> dict:
@@ -142,23 +238,29 @@ def recover(path) -> dict:
     feed a carver/`dd` directly. Returns {embedded, high_entropy, base64, counts}.
     """
     data = Path(path).read_bytes()
-    # the host's own header occupies the first page; don't report it as an embedded artifact
-    self_skip = 0x40 if data[:2] == b"MZ" else (4 if data[:4] == b"\x7fELF" else 0)
-    embedded = _find_magics(data, self_skip)
+    # the host's own header (and a fat Mach-O's own slices) are not embedded artifacts
+    self_skip, exclude = _host_layout(data)
+    embedded, capped = _find_magics_capped(data, self_skip, exclude)
     hi = _high_entropy_regions(data)
     b64 = _base64_runs(data)
-    return {
+    res = {
         "file_size": len(data),
         "embedded": embedded,
         "high_entropy": hi,
         "base64": b64,
         "counts": {"embedded": len(embedded), "high_entropy": len(hi), "base64": len(b64)},
     }
+    if capped:
+        res["embedded_capped"] = {"kinds": capped, "max_per_kind": _MAX_HITS}
+    return res
 
 
 def _print(res):
     print(f"file_size={res['file_size']}  embedded={res['counts']['embedded']}  "
           f"high_entropy_blobs={res['counts']['high_entropy']}  base64_payloads={res['counts']['base64']}")
+    if res.get("embedded_capped"):
+        cap = res["embedded_capped"]
+        print(f"  (embedded hits capped at {cap['max_per_kind']} per kind for: {', '.join(cap['kinds'])})")
     for e in res["embedded"]:
         print(f"  [embedded] {e['kind']:8} @ file offset 0x{e['offset']:x}")
     for h in res["high_entropy"]:
@@ -171,9 +273,10 @@ def _print(res):
 
 def _selftest():
     # a synthetic data section: an embedded ELF header, a high-entropy blob, and a base64 payload.
-    import os
-    blob = os.urandom(4096)                           # high entropy (~7.9 over 4 KB)
-    payload = os.urandom(128)                          # 128 random bytes decode at entropy ~6.7
+    import random
+    rng = random.Random(0x5eed)                        # deterministic: the selftest must not flake
+    blob = rng.randbytes(4096)                         # high entropy (~7.9 over 4 KB)
+    payload = rng.randbytes(128)                       # 128 random bytes decode at entropy ~6.7
     b64 = base64.b64encode(payload)
     buf = (b"HOST BINARY HEADER\x00" + b"\x00" * 64
            + b"\x7fELF" + b"\x02\x01\x01" + b"\x00" * 64            # embedded ELF
@@ -189,6 +292,10 @@ def _selftest():
     # precision: low-entropy ASCII text must NOT be flagged as a packed blob
     assert not _high_entropy_regions(b"the quick brown fox " * 200), "false high-entropy on plain text"
     assert abs(_entropy(bytes(range(256))) - 8.0) < 0.01, "entropy of a uniform byte range must be 8"
+    # an overlay blob flush with EOF is carved to the end of the file, not cut at the last stride
+    tail = b"\x00" * 4096 + rng.randbytes(1100)
+    hot = _high_entropy_regions(tail)
+    assert hot and hot[-1]["offset"] + hot[-1]["size"] == len(tail), hot
     print("selftest OK: embedded ELF, high-entropy blob and base64 payload recovered; "
           "plain text not misflagged")
 
