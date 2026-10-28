@@ -20,6 +20,10 @@ sys.path.insert(0, str(ROOT))
 import recover_crypto  # noqa: E402
 import recover_embedded  # noqa: E402
 
+MAX_OUT = 16 << 20      # decompression output cap (16 MiB): a small bomb must not amplify to GBs
+_MIN_STREAM = 128       # a completed stream shorter than this must span the whole blob (see _inflate)
+_XOR_SAMPLE = 4096      # bytes decoded per accepted XOR key (enough for a PE's e_lfanew -> PE\0\0)
+
 
 def _printable_ratio(b: bytes) -> float:
     if not b:
@@ -34,49 +38,102 @@ def _known_magic(b: bytes):
     return None
 
 
+def _validated_magic(b: bytes):
+    """A file magic at offset 0 that is strong enough to prove a decode: recover_embedded's
+    validated hit (PE needs e_lfanew -> PE\\0\\0, ELF a sane e_ident) for any signature of at least
+    4 bytes, or the validated PE. A bare 2-3 byte magic ("MZ", gzip's 1f8b08, "BZh") is hit by ~1 in
+    700 random blobs across 255 XOR keys, so it proves nothing on its own."""
+    sigs = {name: sig for name, sig, _need in recover_embedded._MAGICS}
+    for h in recover_embedded._find_magics(b, 0):
+        if h["offset"] != 0:
+            continue
+        if h["kind"] == "pe" or len(sigs.get(h["kind"], b"")) >= 4:
+            return h["kind"]
+    return None
+
+
+def _inflate(make, blob: bytes):
+    """Run a streaming decompressor with the MAX_OUT output cap. Returns (out, truncated) only for a
+    stream that either completed (eof) or was cut by the cap; an error or an incomplete stream (a
+    random blob that merely parsed for a while) is None, as zlib.decompress & co. would raise."""
+    d = make()
+    out = d.decompress(blob, MAX_OUT)
+    if getattr(d, "eof", False):
+        # a completed stream must account for the blob: random bytes parse as a tiny raw-deflate
+        # stream ~1 time in 1000 (consuming 10-60 bytes, the rest left as unused_data). A real
+        # payload is the whole carve, or at least _MIN_STREAM bytes of it.
+        consumed = len(blob) - len(getattr(d, "unused_data", b""))
+        if consumed < min(_MIN_STREAM, len(blob)):
+            return None
+        return out, False
+    if len(out) >= MAX_OUT:
+        return out, True
+    return None
+
+
 def _try_decompress(blob: bytes):
-    """Keyless: a compressed payload decompresses with no key. Try the common codecs."""
+    """Keyless: a compressed payload decompresses with no key. Try the common codecs, each capped at
+    MAX_OUT bytes of output (a zip bomb is reported truncated, not inflated). Returns
+    (name, out, truncated) or (None, None, False)."""
     import bz2
-    import gzip
     import lzma
     import zlib
     attempts = [
-        ("zlib", lambda d: zlib.decompress(d)),
-        ("zlib_raw", lambda d: zlib.decompress(d, -15)),
-        ("gzip", lambda d: gzip.decompress(d)),
-        ("bz2", lambda d: bz2.decompress(d)),
-        ("lzma", lambda d: lzma.decompress(d)),
+        ("zlib", lambda: zlib.decompressobj(15)),
+        ("zlib_raw", lambda: zlib.decompressobj(-15)),
+        ("gzip", lambda: zlib.decompressobj(16 + 15)),
+        ("bz2", bz2.BZ2Decompressor),
+        # memlimit: an xz/lzma header can declare a ~1.5 GiB dictionary; real presets need <= ~65 MiB
+        ("lzma", lambda: lzma.LZMADecompressor(memlimit=128 << 20)),
     ]
-    for name, fn in attempts:
+    for name, make in attempts:
         try:
-            out = fn(blob)
+            r = _inflate(make, blob)
         except Exception:
             continue
+        if r is None:
+            continue
+        out, truncated = r
         if out and len(out) >= 8:
-            return name, out
-    return None, None
+            return name, out, truncated
+    return None, None, False
 
 
 def _xor1_break(blob: bytes):
-    """Single-byte XOR brute (256 tries, keyless). Accept a key ONLY when the decode reveals a known
-    file magic: that uniquely identifies the key. Printability alone is ambiguous -- many keys turn a
-    printable-XOR'd blob back into different printable bytes -- so we don't guess from it (that would
-    be a false 'decoded'). A nested exe/archive hidden by a one-byte XOR is the reliable win here."""
-    sample = blob[:512]
+    """Single-byte XOR brute (keys 1..255, keyless). Accept a key ONLY when the decode reveals a
+    VALIDATED file magic at offset 0 (_validated_magic): that uniquely identifies the key. A bare
+    2-byte "MZ" is not enough (~1/700 random blobs), nor is printability -- many keys turn a
+    printable-XOR'd blob back into different printable bytes. Key 0 is the identity, not a
+    decode: a blob whose plain bytes carry a magic is reported by _keyless as method "plain"."""
+    sample = blob[:_XOR_SAMPLE]
     if not sample:
         return None
-    for k in range(256):
-        if _known_magic(bytes(b ^ k for b in sample)):
-            return {"key": k, "magic": _known_magic(bytes(b ^ k for b in sample))}
+    first = sample[0]
+    leads = {sig[0] for _name, sig, _need in recover_embedded._MAGICS}
+    for k in range(1, 256):
+        if (first ^ k) not in leads:       # cheap pre-filter: the decoded first byte must start a magic
+            continue
+        magic = _validated_magic(sample.translate(_XOR_TABLES[k]))
+        if magic:
+            return {"key": k, "magic": magic}
     return None
+
+
+_XOR_TABLES = [bytes(b ^ k for b in range(256)) for k in range(256)]
 
 
 def _keyless(blob: bytes):
     """What can be recovered from `blob` with no key: decompression first, then XOR-1 brute."""
-    name, out = _try_decompress(blob)
+    name, out, truncated = _try_decompress(blob)
     if out is not None:
-        return {"method": name, "out_size": len(out), "out_magic": _known_magic(out),
-                "preview": out[:48].decode("latin-1", "replace")}
+        r = {"method": name, "out_size": len(out), "out_magic": _known_magic(out),
+             "preview": out[:48].decode("latin-1", "replace")}
+        if truncated:
+            r["truncated_at"] = MAX_OUT      # output cap hit: out_size is a floor, not the real size
+        return r
+    plain = _validated_magic(blob[:_XOR_SAMPLE])
+    if plain:
+        return {"method": "plain", "magic": plain}  # not encoded at all (the XOR key-0 identity)
     x = _xor1_break(blob)
     if x is not None:
         return {"method": "xor8", **x}
@@ -97,7 +154,8 @@ def recover(path) -> dict:
         b = data[h["offset"]:h["offset"] + h["size"]]
         blobs.append({"offset": h["offset"], "size": h["size"], "entropy": h["entropy"],
                       "sha256": h["sha256"], "keyless": _keyless(b)})
-    recovered = sum(1 for x in blobs if x["keyless"])
+    # "plain" is a blob that needed no recovery (its bytes already carry a magic), not a recovery
+    recovered = sum(1 for x in blobs if x["keyless"] and x["keyless"]["method"] != "plain")
     return {
         "file_size": len(data),
         "crypto_candidates": crypto,
@@ -118,9 +176,12 @@ def _print(res):
         print(f"  candidate algorithms present (need a key to decrypt): {', '.join(res['crypto_candidates'])}")
     for b in res["blobs"]:
         k = b["keyless"]
-        if k and k["method"] != "xor8":
+        if k and k["method"] == "plain":
+            print(f"  [blob 0x{b['offset']:x} {b['size']}B H={b['entropy']}] plain {k['magic']} (not encoded)")
+        elif k and k["method"] != "xor8":
+            cut = f" (truncated at the {k['truncated_at']}B cap)" if k.get("truncated_at") else ""
             print(f"  [blob 0x{b['offset']:x} {b['size']}B H={b['entropy']}] decompressed via {k['method']} "
-                  f"-> {k['out_size']}B magic={k['out_magic']} {k['preview']!r}")
+                  f"-> {k['out_size']}B{cut} magic={k['out_magic']} {k['preview']!r}")
         elif k:
             print(f"  [blob 0x{b['offset']:x} {b['size']}B H={b['entropy']}] single-byte XOR key=0x{k['key']:02x} "
                   f"reveals {k['magic']}")
@@ -136,7 +197,8 @@ def _selftest():
     assert r and r["method"] == "gzip" and r["out_size"] == len(plain), r
 
     # 2. a single-byte-XOR'd PE header: the brute finds the key and the revealed magic
-    hdr = b"MZ" + b"\x90" * 6 + b"\x00" * 56 + b"PE\x00\x00" + bytes(64)
+    # (a real DOS header: e_lfanew at 0x3c points at the PE\0\0 signature, which validation checks)
+    hdr = b"MZ" + b"\x90" * 6 + b"\x00" * 52 + (0x40).to_bytes(4, "little") + b"PE\x00\x00" + bytes(64)
     enc = bytes(b ^ 0x3c for b in hdr)
     x = _xor1_break(enc)
     assert x and x["key"] == 0x3c and x["magic"] == "pe", x
@@ -146,10 +208,17 @@ def _selftest():
     z = _xor1_break(bytes(b ^ 0xa5 for b in elf))
     assert z and z["key"] == 0xa5 and z["magic"] == "elf", z
 
-    # 4. precision: random bytes and plain text yield NO magic-anchored XOR key (no false decode)
-    import os
-    assert _keyless(os.urandom(2048)) is None
+    # 4. precision: random bytes and plain text yield NO magic-anchored XOR key (no false decode);
+    #    seeded so the assertion is deterministic, and including a blob whose first two bytes XOR to
+    #    "MZ" (which a bare 2-byte magic check accepted as key 0x77)
+    import random
+    rng = random.Random(0xb10b)
+    assert _keyless(rng.randbytes(2048)) is None
+    assert _keyless(bytes([0x4d ^ 0x77, 0x5a ^ 0x77]) + rng.randbytes(1022)) is None
     assert _xor1_break(b"ordinary readable configuration text, nothing hidden here " * 4) is None
+
+    # 5. key 0 is not a decode: a plain ELF is "plain", never "xor8 key=0"
+    assert _keyless(elf) == {"method": "plain", "magic": "elf"}, _keyless(elf)
     print("selftest OK: gzip payload decompressed; XOR-1 PE & ELF payloads recovered by magic; "
           "random and plain text stay opaque (no false decode)")
 
