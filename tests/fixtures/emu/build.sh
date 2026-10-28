@@ -1,22 +1,44 @@
 #!/usr/bin/env bash
 # Regenerate the emulation-engine regression fixtures. All are tiny, benign programs that exercise
 # one loader/runtime path each; they are ANALYSED (emulated function-by-function), never run.
-#   null.c  -> null64     a call through a null pointer between two decodes (x86-64)
+#   null.c  -> null64     a call through a null pointer between two decodes (x86-64 PIE)
 #   pe.c    -> pe64.exe   a PE .data whose VirtualSize >> SizeOfRawData (.bss merged in)
 #   vt.c    -> vt32       an i386 PIE vtable whose size field a wide relocation patch would zero
-#   ct.c    -> ct32/ct64  a global constructor, i386 PIE and x86-64
-#   tls.c   -> tls.so     two initial-exec thread-locals (x86-64)
+#                         (linked with -z notext, as committed: it carries DT_TEXTREL)
+#   ct.c    -> ct32/ct64  a global constructor, i386 PIE and x86-64 PIE
+#   tls.c   -> tls.so     two initial-exec thread-locals (x86-64; R_X86_64_TPOFF64 relocations)
 #   heap.c  -> heap.so    a constructor that malloc()s a block a global points at
 #   mo.c    -> mo_chained/mo_classic   a Mach-O pointer table, chained fixups vs classic dyld
 #   mo2.c   -> mo2_classic             a Mach-O __mod_init_func constructor
-# x86-64/i386 need clang + lld; the Mach-O fixtures need an ld64 toolchain (built elsewhere and
-# committed). This script documents provenance; see each .c for the exact build flags used.
-set -eu
+#
+#   ./build.sh            rebuild the ELF fixtures in place (next to this script)
+#   ./build.sh OUTDIR     build them into OUTDIR instead (to compare against the committed ones)
+#
+# Needs clang + ld.lld (i386 targets need nothing else: everything is -nostdlib). With Ubuntu
+# clang/lld 18.1.3 (the version in each fixture's .comment) this reproduces the committed binaries
+# byte for byte. pe64.exe and the Mach-O fixtures need lld-link / ld64 and are committed as built.
+# Any failure aborts with a non-zero exit -- a fixture that silently failed to rebuild is worse
+# than no rebuild.
+set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-clang -O1 -nostdlib -static -o "$here/null64"  "$here/null.c"   2>/dev/null || echo "null64: needs clang"
-clang -m32 -O1 -fpie -pie -nostdlib -o "$here/vt32" "$here/vt.c" 2>/dev/null || echo "vt32: needs clang -m32"
-clang -O1 -nostdlib -static -o "$here/ct64"    "$here/ct.c"     2>/dev/null || echo "ct64: needs clang"
-clang -m32 -O1 -fpie -pie -nostdlib -o "$here/ct32" "$here/ct.c" 2>/dev/null || echo "ct32: needs clang -m32"
-clang -shared -fpic -nostdlib -o "$here/tls.so"  "$here/tls.c"  2>/dev/null || echo "tls.so: needs clang"
-clang -shared -fpic -o "$here/heap.so" "$here/heap.c"           2>/dev/null || echo "heap.so: needs clang"
+out="${1:-$here}"
+mkdir -p "$out"
+
+for tool in clang ld.lld; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "build.sh: '$tool' not found (needs clang + lld)" >&2
+    exit 1
+  fi
+done
+
+CC=(clang -O1 -fuse-ld=lld)
+set -x
+"${CC[@]}"      -nostdlib -fpie -pie                 -o "$out/null64"  "$here/null.c"
+"${CC[@]}" -m32 -nostdlib -fpie -pie -Wl,-z,notext   -o "$out/vt32"    "$here/vt.c"
+"${CC[@]}"      -nostdlib -fpie -pie                 -o "$out/ct64"    "$here/ct.c"
+"${CC[@]}" -m32 -nostdlib -fpie -pie                 -o "$out/ct32"    "$here/ct.c"
+"${CC[@]}"      -nostdlib -shared -fpic -ftls-model=initial-exec -o "$out/tls.so" "$here/tls.c"
+"${CC[@]}"      -nostdlib -shared -fpic              -o "$out/heap.so" "$here/heap.c"
+{ set +x; } 2>/dev/null
+echo "built null64 vt32 ct64 ct32 tls.so heap.so in $out"
 echo "note: pe64.exe and the Mach-O fixtures are committed (need lld-link / ld64 to rebuild)"

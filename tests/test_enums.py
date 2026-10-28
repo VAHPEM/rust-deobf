@@ -62,10 +62,10 @@ def test_stripped_binary_no_dwarf_but_well_formed():
         assert len(s["values"]) >= 2 and "field_offset" in s
 
 
-def test_non_elf_reported():
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".bin") as f:
-        f.write(b"MZ" + b"\x00" * 64)
-        f.flush()
-        res = E.recover(f.name)
+def test_non_elf_reported(tmp_path):
+    # a closed file under tmp_path, not a still-open NamedTemporaryFile: Windows refuses to reopen
+    # an open NamedTemporaryFile by name (PermissionError), which made this test fail there
+    f = tmp_path / "not_elf.bin"
+    f.write_bytes(b"MZ" + b"\x00" * 64)
+    res = E.recover(str(f))
     assert res.get("error") and res["enums"] == []
