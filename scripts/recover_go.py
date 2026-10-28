@@ -8,10 +8,10 @@ its functions (`main.beacon`, `main.(*Config).decrypt`, ...). This parses the pc
 `{entry VA: function name}`, the Go counterpart of what recover_rust_meta does for Rust (metadata
 that survives strip), and reports the Go toolchain version for provenance.
 
-Supports the modern self-describing pclntab (Go 1.18+ magic 0xfffffff0, Go 1.20+ 0xfffffff1), the
-common case today; older magics (1.16-1.17 0xfffffffa, 1.2-1.15 0xfffffffb) are detected and
-reported but not fully parsed (next tier). Finds the table by section (`.gopclntab` / `__gopclntab`)
-or by scanning for its magic (PE Go binaries carry it unnamed in `.rdata`).
+Parses every pclntab layout since Go 1.2 (magics 0xfffffffb 1.2-1.15, 0xfffffffa 1.16-1.17,
+0xfffffff0 1.18-1.19, 0xfffffff1 1.20+) at either pointer size (GOARCH=386/arm use 4-byte header
+fields). Finds the table by section (`.gopclntab` / `__gopclntab`) or by scanning whole sections for
+its magic (PE Go binaries carry it unnamed in `.rdata`). Addresses are RVAs for PE, VAs otherwise.
 
     python3 scripts/recover_go.py path/to/go-binary            # summary + sample names
     python3 scripts/recover_go.py path/to/go-binary --json     # all {va: name}
@@ -30,83 +30,160 @@ sys.path.insert(0, str(ROOT))
 
 _MAGICS = {0xfffffffb: "go1.2-1.15", 0xfffffffa: "go1.16-1.17",
            0xfffffff0: "go1.18-1.19", 0xfffffff1: "go1.20+"}
-_PARSEABLE = {0xfffffff0, 0xfffffff1}        # the header layout this tier parses
-_GO_VER = re.compile(rb"go1\.\d{1,2}(?:\.\d{1,2})?")
+_V12, _V116, _V118, _V120 = 0xfffffffb, 0xfffffffa, 0xfffffff0, 0xfffffff1
+# A `go1.N[.M]` toolchain string, anchored on the left so `algo1.5`/`cargo1.2` do not count.
+_GO_VER = re.compile(rb"(?<![A-Za-z0-9_.])go1\.\d{1,2}(?:\.\d{1,2})?(?![0-9])")
 _MAX_FUNCS = 2_000_000
+_MAX_NAME = 1024              # a function name is read at most this many bytes (crafted-table DoS)
+
+
+def _header_ok(raw: bytes, off: int) -> bool:
+    """Cheap structural check of a pclntab header at `raw[off:]` (any supported version)."""
+    if off < 0 or off + 8 > len(raw):
+        return False
+    return (struct.unpack_from("<I", raw, off)[0] in _MAGICS and raw[off + 4:off + 6] == b"\0\0"
+            and raw[off + 6] in (1, 2, 4) and raw[off + 7] in (4, 8))
 
 
 def find_pclntab(b):
     """(virtual_address, raw_bytes, named) of the pclntab, or (None, None, False). `named` is True
     when it came from a `.gopclntab`/`__gopclntab` section (a strong Go signal) rather than a magic
-    scan (which can match by chance in a non-Go binary)."""
+    scan (which can match by chance in a non-Go binary). The address is lief's section address, i.e.
+    an RVA for PE and a VA for ELF/Mach-O."""
     for name in (".gopclntab", "__gopclntab"):
         s = next((x for x in b.sections if x.name == name), None)
         if s is not None:
             return s.virtual_address, bytes(s.content), True
-    # scan sections for a pclntab magic at an aligned offset (PE: unnamed in .rdata)
+    # Scan every section, whole length, for a pclntab magic (PE: unnamed inside .rdata, which in a
+    # large binary sits well past the first MB). A candidate must pass the header check AND parse
+    # into at least one function; otherwise keep scanning past it.
+    pats = [struct.pack("<I", m) + b"\0\0" for m in _MAGICS]
     for s in b.sections:
         try:
             raw = bytes(s.content)
         except Exception:
             continue
-        for off in range(0, min(len(raw) - 8, 1 << 20), 8):
-            if struct.unpack_from("<I", raw, off)[0] in _MAGICS \
-                    and raw[off + 6] in (1, 2, 4) and raw[off + 7] in (4, 8):
+        cands = []
+        for pat in pats:
+            i = raw.find(pat)
+            while i != -1:
+                if i % 4 == 0 and _header_ok(raw, i):
+                    cands.append(i)
+                i = raw.find(pat, i + 1)
+        for off in sorted(cands)[:64]:          # bound work on a crafted section full of magics
+            parsed = parse_pclntab(raw[off:])
+            if parsed and parsed["functions"]:
                 return s.virtual_address + off, raw[off:], False
     return None, None, False
 
 
-def parse_pclntab(raw: bytes):
-    """Return {"magic", "version_hint", "functions": {entry_va: name}} for a 1.18+/1.20+ pclntab."""
-    if len(raw) < 72:
+def _layout(magic: int, ptr: int):
+    """Per-version pclntab layout: (header_len, fields) where `fields` maps name -> header offset.
+
+    go1.2-1.15 : magic,pad,minLC,ptr | nfunc | functab[(entry uintptr, funcoff uintptr)] inline
+    go1.16-1.17: ... | nfunc | nfiles | funcnameOff | cuOff | filetabOff | pctabOff | pclnOff
+    go1.18+    : ... | nfunc | nfiles | textStart | funcnameOff | cuOff | filetabOff | pctabOff | pclnOff
+    (each field after the 8-byte prefix is pointer-sized; GOARCH=386/arm put 4 there, not 8)."""
+    if magic == _V12:
+        return 8 + ptr, {"nfunc": 8}
+    if magic == _V116:
+        return 8 + 7 * ptr, {"nfunc": 8, "funcname": 8 + 2 * ptr, "pcln": 8 + 6 * ptr}
+    return 8 + 8 * ptr, {"nfunc": 8, "text": 8 + 2 * ptr, "funcname": 8 + 3 * ptr,
+                         "pcln": 8 + 7 * ptr}
+
+
+def parse_pclntab(raw: bytes, text_start=None):
+    """Return {"magic", "version_hint", "functions": {entry_va: name}} for a Go pclntab (1.2, 1.16,
+    1.18, 1.20+ layouts, pointer size 4 or 8), or None if `raw` does not start with one. For 1.18+
+    `text_start` overrides the header's textStart (a PIE whose field is 0 in the file, filled by a
+    dynamic relocation). Bounded against crafted tables: nfunc must fit the table, a name is read
+    at most _MAX_NAME bytes, repeated name offsets are decoded once, and the total decoded name
+    bytes are capped relative to the table size."""
+    if raw is None or len(raw) < 16 or not _header_ok(raw, 0):
         return None
     magic = struct.unpack_from("<I", raw, 0)[0]
-    if magic not in _MAGICS:
-        return None
-    info = {"magic": hex(magic), "version_hint": _MAGICS[magic], "functions": {}}
-    if magic not in _PARSEABLE:
-        return info
     ptr = raw[7]
-    u = (lambda o: struct.unpack_from("<Q", raw, o)[0]) if ptr == 8 else \
-        (lambda o: struct.unpack_from("<I", raw, o)[0])
+    info = {"magic": hex(magic), "version_hint": _MAGICS[magic], "ptr_size": ptr, "functions": {}}
+    hlen, f = _layout(magic, ptr)
+    if len(raw) < hlen:
+        return info
+    pfmt = "<Q" if ptr == 8 else "<I"
+    up = lambda o: struct.unpack_from(pfmt, raw, o)[0]
     u32 = lambda o: struct.unpack_from("<I", raw, o)[0]
     i32 = lambda o: struct.unpack_from("<i", raw, o)[0]
     try:
-        nfunc = u(8)
-        text_start = u(24)
-        funcname_off = u(32)
-        pcln_off = u(64)
+        nfunc = up(f["nfunc"])
+        if magic == _V12:
+            functab, ent, names_base, fbase = 8 + ptr, 2 * ptr, 0, 0
+        else:
+            functab = fbase = up(f["pcln"])
+            names_base = up(f["funcname"])
+            ent = 8 if magic in (_V118, _V120) else 2 * ptr
+        tstart = 0
+        if magic in (_V118, _V120):
+            tstart = up(f["text"]) if text_start is None else text_start
     except struct.error:
         return info
-    if not (0 < nfunc <= _MAX_FUNCS) or pcln_off >= len(raw) or funcname_off >= len(raw):
+    # nfunc must be positive and its functab must lie inside the table (bounds a crafted count)
+    if not (0 < nfunc <= _MAX_FUNCS) or functab < hlen or functab + nfunc * ent > len(raw) \
+            or names_base >= len(raw):
         return info
+    info["nfunc"] = nfunc
+
+    memo = {}
+    budget = [2 * len(raw) + (1 << 20)]       # total distinct name bytes; a real table is < len(raw)
 
     def cstr(o):
-        if o < 0 or o >= len(raw):
+        if o in memo:
+            return memo[o]
+        if o < 0 or o >= len(raw) or budget[0] <= 0:
             return ""
-        end = raw.find(b"\x00", o)
-        return raw[o:end if end != -1 else len(raw)].decode("utf-8", "replace")
+        end = raw.find(b"\x00", o, o + _MAX_NAME)
+        chunk = raw[o:end if end != -1 else min(len(raw), o + _MAX_NAME)]
+        budget[0] -= len(chunk) + 1
+        name = chunk.decode("utf-8", "replace")
+        memo[o] = name
+        return name
 
     funcs = {}
-    ft = pcln_off
     for i in range(nfunc):
-        base = ft + i * 8
-        if base + 8 > len(raw):
-            break
-        entryoff = u32(base)
-        funcoff = u32(base + 4)
-        fstruct = pcln_off + funcoff
-        if fstruct + 8 > len(raw):
+        base = functab + i * ent
+        if magic in (_V118, _V120):
+            entry = tstart + u32(base)
+            fstruct = fbase + u32(base + 4)
+            noff = fstruct + 4                       # _func{entryOff u32; nameOff i32}
+        else:
+            entry = up(base)
+            fstruct = fbase + up(base + ptr)
+            noff = fstruct + ptr                     # _func{entry uintptr; nameoff i32}
+        if noff + 4 > len(raw):
             continue
-        name_off = i32(fstruct + 4)
-        name = cstr(funcname_off + name_off)
+        name = cstr(names_base + i32(noff))
+        if budget[0] <= 0:
+            info["truncated"] = True
+            break
         if name:
-            funcs[text_start + entryoff] = name
+            funcs[entry] = name
     info["functions"] = funcs
     return info
 
 
+def _text_start_reloc(b, va):
+    """The textStart value a dynamic relocation writes at `va` (an external-linked PIE stores 0 in
+    the file and relies on R_*_RELATIVE), or None."""
+    try:
+        for r in b.relocations:
+            if getattr(r, "address", None) == va:
+                ad = getattr(r, "addend", 0) or 0
+                return ad or None
+    except Exception:
+        pass
+    return None
+
+
 def recover(path) -> dict:
+    """{is_go, go_version, pclntab_va, function_count, functions{addr: name}, ...}. Addresses follow
+    the toolkit convention: RVAs for PE (add `imagebase` to rebase), VAs for ELF / Mach-O."""
     import lief
     b = lief.parse(str(path))
     if b is None:
@@ -114,12 +191,26 @@ def recover(path) -> dict:
     data = Path(path).read_bytes()
     ver = _GO_VER.search(data)
     version = ver.group().decode() if ver else None
+    pe = b.format.name == "PE"
+    imagebase = b.optional_header.imagebase if pe else 0
     try:
         va, raw, named = find_pclntab(b)
         parsed = parse_pclntab(raw) if raw is not None else None
+        if parsed and not pe and parsed["magic"] in (hex(_V118), hex(_V120)):
+            # an external-linked PIE stores textStart as 0 in the file (a RELATIVE relocation
+            # fills it at load); take the relocation's addend so entries are real VAs
+            ptr = parsed["ptr_size"]
+            if struct.unpack_from("<Q" if ptr == 8 else "<I", raw, 8 + 2 * ptr)[0] == 0:
+                ts = _text_start_reloc(b, va + 8 + 2 * ptr)
+                if ts:
+                    parsed = parse_pclntab(raw, text_start=ts)
     except Exception:
         va, raw, named, parsed = None, None, False, None
     funcs = parsed["functions"] if parsed else {}
+    if pe and funcs:
+        # the pclntab stores absolute VAs (textStart / entry); report RVAs like the rest of the
+        # toolkit (lief section addresses, recover_imports, recover_cfg are RVA-based for PE)
+        funcs = {k - imagebase if k >= imagebase else k: v for k, v in funcs.items()}
     # Go only on strong evidence: a named pclntab section, a `go1.x` version string, or a scan-found
     # table that parsed into a substantial set of Go-shaped names -- so a chance magic match in a
     # non-Go binary is not reported as Go.
@@ -128,13 +219,17 @@ def recover(path) -> dict:
     if not is_go:
         return {"is_go": False, "go_version": version, "function_count": 0, "functions": {},
                 "note": "no Go pclntab found"}
-    return {
+    out = {
         "is_go": True, "go_version": version,
+        "address_space": "rva" if pe else "va", "imagebase": imagebase,
         "pclntab_va": va, "pclntab_magic": parsed["magic"] if parsed else None,
         "pclntab_version_hint": parsed["version_hint"] if parsed else None,
         "function_count": len(funcs),
         "functions": {hex(k): v for k, v in sorted(funcs.items())},
     }
+    if parsed and parsed.get("truncated"):
+        out["truncated"] = True
+    return out
 
 
 def _print(res: dict) -> None:
@@ -149,60 +244,79 @@ def _print(res: dict) -> None:
         print(f"  ... and {res['function_count'] - 20} more (--json for all)")
 
 
-def _build_pclntab(funcs, text_start=0x401000):
-    """Build a minimal valid 1.20+ pclntab holding `funcs` = [(entryoff, name)], for the selftest."""
+def _build_pclntab(funcs, text_start=0x401000, magic=_V120, ptr=8):
+    """Build a minimal valid pclntab of version `magic` and pointer size `ptr` holding `funcs` =
+    [(entryoff, name)], for the selftest / tests. Entries are text_start + entryoff."""
+    pk = "<Q" if ptr == 8 else "<I"
     funcnametab = b"\x00"
     name_off = {}
     for _e, nm in funcs:
-        name_off[nm] = len(funcnametab)
-        funcnametab += nm.encode() + b"\x00"
-    # layout: [72-byte header][functab: nfunc*(u32 entryoff,u32 funcoff)][func structs][funcnametab]
-    header_len = 72
-    functab_len = len(funcs) * 8
-    funcstructs = b""
-    funcoff_of = []
-    for e, nm in funcs:
-        funcoff_of.append(len(funcstructs))
-        funcstructs += struct.pack("<Ii", e, name_off[nm]) + b"\x00" * 8   # entryoff u32, nameOff i32
-    pcln_off = header_len                        # functab starts right after the header
-    funcstruct_base = pcln_off + functab_len     # func structs follow the functab
-    funcname_off = funcstruct_base + len(funcstructs)
-    out = bytearray(b"\x00" * (header_len + functab_len))   # header + room for the functab
-    struct.pack_into("<I", out, 0, 0xfffffff1)
-    out[6] = 1  # minLC
-    out[7] = 8  # ptrSize
-    struct.pack_into("<Q", out, 8, len(funcs))      # nfunc
-    struct.pack_into("<Q", out, 24, text_start)     # textStart
-    struct.pack_into("<Q", out, 32, funcname_off)   # funcnameOffset
-    struct.pack_into("<Q", out, 64, pcln_off)       # pclnOffset
+        name_off.setdefault(nm, len(funcnametab))
+        if name_off[nm] == len(funcnametab):
+            funcnametab += nm.encode() + b"\x00"
+    hlen, f = _layout(magic, ptr)
+    out = bytearray(hlen)
+    struct.pack_into("<I", out, 0, magic)
+    out[6], out[7] = 1, ptr
+    struct.pack_into(pk, out, 8, len(funcs))
+    if magic == _V12:
+        # inline functab of (entry, funcoff) uintptr pairs + end pc; _func{entry; nameoff i32}
+        # with nameoff relative to the table start, so the names go into the same buffer
+        ftab_len = (2 * len(funcs) + 1) * ptr
+        fs_base = hlen + ftab_len
+        fsz = ptr + 4
+        names_base = fs_base + fsz * len(funcs)
+        out += b"\x00" * ftab_len
+        for i, (e, nm) in enumerate(funcs):
+            struct.pack_into(pk, out, hlen + 2 * i * ptr, text_start + e)
+            struct.pack_into(pk, out, hlen + 2 * i * ptr + ptr, fs_base + fsz * i)
+        for e, nm in funcs:
+            out += struct.pack(pk, text_start + e) + struct.pack("<i", names_base + name_off[nm])
+        return bytes(out + funcnametab)
+    new = magic in (_V118, _V120)
+    ent = 8 if new else 2 * ptr
+    pcln = hlen
+    ftab_len = len(funcs) * ent + ent
+    fsz = (8 if new else ptr + 4)
+    fnames = pcln + ftab_len + fsz * len(funcs)
+    struct.pack_into(pk, out, f["funcname"], fnames)
+    struct.pack_into(pk, out, f["pcln"], pcln)
+    if new:
+        struct.pack_into(pk, out, f["text"], text_start)
+    out += b"\x00" * ftab_len
     for i, (e, nm) in enumerate(funcs):
-        # funcoff is relative to pcln_off; func structs begin functab_len after it
-        struct.pack_into("<II", out, pcln_off + i * 8, e, functab_len + funcoff_of[i])
-    out += funcstructs + funcnametab
-    return bytes(out)
+        foff = ftab_len + fsz * i                    # relative to pcln
+        if new:
+            struct.pack_into("<II", out, pcln + i * ent, e, foff)
+        else:
+            struct.pack_into(pk, out, pcln + i * ent, text_start + e)
+            struct.pack_into(pk, out, pcln + i * ent + ptr, foff)
+    for e, nm in funcs:
+        out += (struct.pack("<Ii", e, name_off[nm]) if new
+                else struct.pack(pk, text_start + e) + struct.pack("<i", name_off[nm]))
+    return bytes(out + funcnametab)
 
 
 def _selftest():
     funcs = [(0x0, "main.main"), (0x40, "main.(*Config).decrypt"),
              (0x120, "runtime.main"), (0x300, "github.com/x/y.Beacon")]
-    raw = _build_pclntab(funcs, text_start=0x401000)
-    parsed = parse_pclntab(raw)
-    assert parsed is not None and parsed["magic"] == "0xfffffff1"
-    got = parsed["functions"]
-    assert got.get(0x401000) == "main.main", got
-    assert got.get(0x401040) == "main.(*Config).decrypt"
-    assert got.get(0x401120) == "runtime.main"
-    assert got.get(0x401300) == "github.com/x/y.Beacon"
-    assert len(got) == 4
+    for magic in (_V12, _V116, _V118, _V120):
+        for ptr, ts in ((8, 0x401000), (4, 0x8049000)):
+            parsed = parse_pclntab(_build_pclntab(funcs, text_start=ts, magic=magic, ptr=ptr))
+            assert parsed is not None and parsed["magic"] == hex(magic), (magic, ptr)
+            got = parsed["functions"]
+            want = {ts + e: n for e, n in funcs}
+            assert got == want, (hex(magic), ptr, got)
     # a truncated / non-Go buffer is handled without raising
     assert parse_pclntab(b"not a pclntab") is None
     assert parse_pclntab(struct.pack("<I", 0xdeadbeef) + b"\x00" * 100) is None
-    # an older magic is detected but reports no functions (not parsed in this tier)
-    old = bytearray(b"\x00" * 72); struct.pack_into("<I", old, 0, 0xfffffffa); old[7] = 8
-    po = parse_pclntab(bytes(old))
-    assert po["version_hint"] == "go1.16-1.17" and po["functions"] == {}
-    print("selftest OK: 1.20+ pclntab parsed to {va: name} (main/runtime/import-path names), "
-          "truncated/non-Go rejected, older magic detected-not-parsed")
+    # nfunc larger than the table can hold is rejected, not iterated
+    big = bytearray(_build_pclntab(funcs)); struct.pack_into("<Q", big, 8, 1_000_000)
+    assert parse_pclntab(bytes(big))["functions"] == {}
+    # the version regex needs a left boundary
+    assert _GO_VER.search(b"algo1.5") is None and _GO_VER.search(b"\x00go1.22.4\x00")
+    print("selftest OK: pclntab 1.2/1.16/1.18/1.20+ x ptr 4/8 parsed to {va: name}, "
+          "truncated/non-Go/oversized-nfunc rejected, go-version regex anchored")
 
 
 def main(argv=None) -> int:
