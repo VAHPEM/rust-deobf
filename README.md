@@ -141,6 +141,11 @@ crypto-clipper config, staging paths. [More below](#-real-malware).
   — the function's exact source.
 - **Safe by design** — static + emulation by default: emulation runs *functions* of the binary under
   Unicorn, never the binary itself. Dynamic (Frida) recovery is opt-in and for isolated VMs only.
+- **Async state machines** — `recover_async.py` finds every `async fn` / async block's state
+  machine in a stripped binary (x86-64 / AArch64, ELF / PE): where the state lives, state → resume
+  target, each `.await`'s inner poll (direct, `dyn Future` vtable, or inlined) as a nesting graph,
+  the coroutine's source line, and the async runtime (tokio, ...) — anchored on rustc's
+  "`async fn` resumed after completion" panics.
 - **Rust metadata that survives `strip`** — rustc version, third-party crates with exact versions,
   and panic sites, rebuilt from the source paths the compiler leaves in every Rust binary (no
   `cargo-auditable` needed).

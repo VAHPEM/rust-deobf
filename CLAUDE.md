@@ -112,6 +112,8 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_enums.py` | enum discriminant/niche layout; variant names via DWARF (pyelftools, optional) else a capstone dispatch-site heuristic (x86-64 + ARM64) |
 | `recover_embedded.py` | embedded artifacts: nested exes/archives (magic; LZ4/aPLib/BriefLZ containers header-validated), high-entropy blobs, base64 payloads (file offsets) |
 | `decompress.py` | strict pure-Python LZ4 (frame/legacy/block), aPLib (raw/AP32), BriefLZ (raw/blzpack), LZNT1 decoders: output-capped, linear, never raise; headerless decodes need an encoder signature (no literal runs/zero literals a compressor never emits), full consumption, expansion (waived for magic / >= 64 B text) and "interesting" output (validated magic / text / literal-entropy drop / repetitive). Test encoders in `tests/_compress.py`; reference vectors (jibsen BriefLZ, apultra, lz4_flex) in `tests/fixtures/compress/` |
+| `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64, ELF + PE |
+| `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
 ### scripts/ — front ends, export, orchestration
