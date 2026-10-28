@@ -178,6 +178,15 @@ def recover_cpp_vtables(img, read):
     return out
 
 
+def _header_at(img, read, va, ptr) -> bool:
+    """Does a Rust vtable header with a code drop_in_place start at `va`? (code ptr, then a non-code
+    size, a power-of-two align dividing it, then a code method pointer.)"""
+    size, align = read(va + ptr), read(va + 2 * ptr)
+    return (_exec(img, read(va)) and size is not None and not _exec(img, size)
+            and size <= _MAX_SIZE and align in _ALIGNS and size % align == 0
+            and _exec(img, read(va + 3 * ptr)))
+
+
 def recover(path) -> dict:
     """Recover vtables and the type facts they carry. Returns {arch, format, vtables, ghidra_types}."""
     import recover_emulate
@@ -200,9 +209,13 @@ def recover(path) -> dict:
             drop = read(va)
             size = read(va + ptr)
             align = read(va + 2 * ptr)
-            if not (_exec(img, drop) and size is not None and align in _ALIGNS):
+            # current rustc writes a NULL drop_in_place for a type without drop glue (Copy / POD),
+            # so a 0 slot is legal -- but a zero word is also the commonest data, so it needs more
+            # evidence than a code pointer (below)
+            no_drop = drop == 0
+            if not ((no_drop or _exec(img, drop)) and size is not None and align in _ALIGNS):
                 continue
-            if size > _MAX_SIZE or (align and size % align != 0):
+            if size > _MAX_SIZE or size % align != 0:
                 continue
             m0 = read(va + 3 * ptr)
             if not _exec(img, m0):                     # a vtable has at least one method slot
@@ -213,8 +226,15 @@ def recover(path) -> dict:
                 p = read(va + k * ptr)
                 if not _exec(img, p):
                     break
+                # adjacent vtables: the next one's drop_in_place is also a code pointer; stop the
+                # method run where a whole [drop, size, align, method] header begins instead of
+                # swallowing it (which also hid that next vtable behind this one's claimed span)
+                if k > 3 and _header_at(img, read, va + k * ptr, ptr):
+                    break
                 methods.append(p)
                 k += 1
+            if no_drop and size == 0 and len(methods) < 2:
+                continue                               # {0, 0, 1, fn}: too weak to call a vtable
             vt = {"va": va, "drop_in_place": drop, "size": size, "align": align,
                   "methods": methods, "method_count": len(methods)}
             vtables.append(vt)
@@ -290,6 +310,21 @@ def _selftest():
     vt2_va = base + 16 * ptr
     add(0x1180, 0, 1, 0x1280)
     add(S)
+    # [21] a Copy type's vtable: NULL drop_in_place (no drop glue), size 8, align 8, 2 methods
+    vt3_va = base + 21 * ptr
+    add(0, 8, 8, 0x1400, 0x1480)
+    add(S)
+    # [27] decoy: NULL drop, ZST, a single code pointer -- not enough evidence
+    add(0, 0, 1, 0x1500)
+    add(S)
+    # [32] decoy: NULL drop with size not a multiple of align
+    add(0, 12, 8, 0x1500, 0x1580)
+    add(S)
+    # [38] two adjacent vtables (no separator): the first's method run must stop at the second
+    vt4_va, vt5_va = base + 38 * ptr, base + 43 * ptr
+    add(0, 8, 8, 0x1600, 0x1680)
+    add(0x1700, 24, 8, 0x1780)
+    add(S)
     raw = b"".join(struct.pack("<Q", w & 0xffffffffffffffff) for w in words)
 
     class FakeSec:
@@ -325,8 +360,10 @@ def _selftest():
     finally:
         recover_emulate.Image = orig
     got = {vt["va"]: vt for vt in res["vtables"]}
-    assert vt_va in got and vt2_va in got, sorted(hex(v) for v in got)
-    assert len(got) == 2, [hex(v) for v in got]             # exactly the two real vtables
+    assert {vt_va, vt2_va, vt3_va, vt4_va, vt5_va} <= set(got), sorted(hex(v) for v in got)
+    assert len(got) == 5, [hex(v) for v in got]             # exactly the five real vtables
+    assert got[vt4_va]["method_count"] == 2 and got[vt5_va]["method_count"] == 1
+    assert got[vt3_va]["drop_in_place"] == 0 and got[vt3_va]["method_count"] == 2
     assert got[vt_va]["size"] == 16 and got[vt_va]["align"] == 8 and got[vt_va]["method_count"] == 2
     assert got[vt2_va]["size"] == 0 and got[vt2_va]["align"] == 1 and got[vt2_va]["method_count"] == 1
     # the decoy regions produced no vtable
@@ -344,8 +381,8 @@ def _selftest():
     assert demangle_rtti("N3foo3BarE") == "foo::Bar"
     assert demangle_rtti("1A") == "A"
     assert demangle_rtti("") == "" and demangle_rtti("weird") == "weird"
-    print("selftest OK: vtable recovery ([drop,size,align,methods]) rejects 3 decoy shapes, "
-          "handles a ZST vtable, emits a Ghidra struct per method-count, and demangles C++ RTTI names")
+    print("selftest OK: vtable recovery ([drop,size,align,methods]) rejects 5 decoy shapes, "
+          "handles a ZST vtable and a NULL-drop (Copy type) vtable, emits a Ghidra struct per method-count, and demangles C++ RTTI names")
 
 
 def main(argv=None) -> int:

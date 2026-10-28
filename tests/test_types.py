@@ -32,7 +32,11 @@ def test_vtables_recovered_and_structurally_sound():
     assert 3 <= len(vts) <= 60, len(vts)
     img = E.Image(str(FIXTURE))
     for vt in vts:
-        assert _exec(img, vt["drop_in_place"]), hex(vt["drop_in_place"])
+        # a NULL drop_in_place is legal (type without drop glue) but then needs stronger evidence
+        if vt["drop_in_place"] == 0:
+            assert vt["size"] > 0 or vt["method_count"] >= 2
+        else:
+            assert _exec(img, vt["drop_in_place"]), hex(vt["drop_in_place"])
         assert vt["align"] in RT._ALIGNS
         assert vt["size"] <= RT._MAX_SIZE and (vt["align"] == 0 or vt["size"] % vt["align"] == 0)
         assert vt["method_count"] >= 1
@@ -107,3 +111,52 @@ def test_metadata_sections_not_scanned():
     assert not RT._is_type_section(".gnu.hash", "ELF")
     assert RT._is_type_section(".data.rel.ro", "ELF")
     assert RT._is_type_section(".rodata", "ELF")
+
+
+_VT_SRC = r"""
+pub trait Shape { fn area(&self) -> u64; fn name(&self) -> &'static str; }
+struct Sq(u64);           // Copy-like: no drop glue -> NULL drop_in_place slot in current rustc
+struct Named(String);     // needs drop
+impl Shape for Sq { fn area(&self) -> u64 { self.0 * self.0 } fn name(&self) -> &'static str { "sq" } }
+impl Shape for Named { fn area(&self) -> u64 { self.0.len() as u64 } fn name(&self) -> &'static str { "named" } }
+#[inline(never)]
+fn mk(n: u64) -> Box<dyn Shape> { if n % 2 == 0 { Box::new(Sq(n)) } else { Box::new(Named(format!("{n}"))) } }
+fn main() {
+    let n = std::env::args().count() as u64;
+    let v: Vec<Box<dyn Shape>> = (0..n + 3).map(mk).collect();
+    let t: u64 = v.iter().map(|s| s.area() + s.name().len() as u64).sum();
+    println!("{t}");
+}
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("rustc"), reason="rustc not available")
+def test_null_drop_vtable_of_copy_type(tmp_path):
+    """A `dyn Trait` vtable for a type without drop glue has drop_in_place == 0; it must be found,
+    and the adjacent vtable (Named, real drop) must stay separate rather than be swallowed."""
+    import subprocess
+    import lief
+    src = tmp_path / "vt.rs"
+    src.write_text(_VT_SRC)
+    out = tmp_path / "vt"
+    r = subprocess.run(["rustc", "-O", "-C", "symbol-mangling-version=v0", "-o", str(out), str(src)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip("rustc failed: " + r.stderr[-200:])
+    binary = lief.parse(str(out))          # keep a reference: iterating a temporary's symbols segfaults
+    syms = {s.value: s.name for s in binary.symbols if s.value and s.name}
+    res = RT.recover(out)
+    by_method = {}
+    for vt in res["vtables"]:
+        for m in vt["methods"]:
+            by_method.setdefault(syms.get(m, ""), []).append(vt)
+    sq = [vt for n, vts in by_method.items() if "2SqNtB2_5Shape4area" in n for vt in vts]
+    named = [vt for n, vts in by_method.items() if "5NamedNtB4_5Shape4area" in n for vt in vts]
+    assert sq, "Sq (NULL drop_in_place) vtable missed"
+    assert named, "Named vtable missed"
+    assert sq[0]["drop_in_place"] == 0 and sq[0]["size"] == 8 and sq[0]["method_count"] == 2
+    assert named[0]["va"] != sq[0]["va"] and named[0]["method_count"] == 2
+    # no method run swallows a following vtable's drop_in_place
+    for vt in res["vtables"]:
+        assert not any("drop_in_place" in syms.get(m, "") or "drop_glue" in syms.get(m, "")
+                       for m in vt["methods"]), hex(vt["va"])
