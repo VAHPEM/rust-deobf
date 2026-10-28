@@ -121,8 +121,12 @@ crypto-clipper config, staging paths. [More below](#-real-malware).
 - **Fits your workflow** — FLOSS-compatible export (`--floss-json`), headless Ghidra annotation
   (plate comments, bookmarks, renames), library-function identification by byte signature
   (`lib_<name>` in stripped binaries), batch mode over a directory (`--jsonl`).
-- **Beyond strings** — config/C2 extraction, hash-obfuscated API-import resolution, unpacked
-  stage-2 carving, control-flow-flattening detection **and reconstruction** (x86-64 and AArch64,
+- **Static unpacking** — `unpack.py` emulates the unpacking stub (UPX and UPX-like; PE and ELF,
+  x86-64 / x86 / AArch64) to the original entry point, carves stage-2, and recovers the import
+  table the stub rebuilds — without running the sample. Verified on UPX-packed PE32/PE32+ and
+  AArch64 ELF (OEP = the entry of the binary before packing) and cross-checked against a live
+  Frida dump (99% identical).
+- **Beyond strings** — config/C2 extraction, hash-obfuscated API-import resolution, control-flow-flattening detection **and reconstruction** (x86-64 and AArch64,
   validated on goldberg, OLLVM `-fla` and a real LLVM-18 flattening pass), MBA / opaque-predicate
   simplification with Z3, Rust trait-object vtable recovery (`recover_types.py`), and
   optimization-reversal (jump-table un-switching, unrolled-loop detection — `premium/opt_reverse.py`).
@@ -184,7 +188,7 @@ host), the Anthropic or OpenAI API, or prints the grounded prompt for offline us
 ```bash
 git clone https://github.com/VAHPEM/rust-deobf.git
 cd rust-deobf
-python3 -m pip install -r requirements.txt          # lief, capstone, unicorn, z3-solver
+python3 -m pip install -r requirements.txt          # lief, capstone, unicorn, z3-solver, pyelftools, pyyaml
 
 python3 scripts/recover.py path/to/binary            # static + emulation (default), never runs it
 python3 scripts/soc_triage.py path/to/binary         # one-screen triage card
@@ -616,6 +620,8 @@ This is research code, not a finished product. The ones that matter most:
   is routed to literal recovery only (32-bit x86 ELF and Mach-O are verified 5/5).
 - **Runtime-keyed configs** (custom-key cryptify, KrustyLoader's cfb-mode config) need dynamic
   recovery with that environment.
+- **Platforms**: Linux (x86-64, ARM64) and Windows x64 are tested. On Windows-on-ARM use x64
+  Python — native ARM64 Python has no `unicorn` / `capstone<6` wheels yet.
 
 <details>
 <summary><b>Full list</b></summary>

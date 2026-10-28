@@ -2381,3 +2381,80 @@ always-taken (dead fall-through), `(x&0)==1` -> never-taken, a genuine input-dep
 -> not flagged, and a memory-touching block -> abandoned (no unsound claim). Precision on the
 committed `benign_rust_std.x64`: **0** opaque branches across 524 functions (normal code has real
 branches). x86-64/x86; memory + cross-block lifting and AArch64 are the next tier.
+
+## 61. Cross-platform matrix, static unpacking of real packers, and a full bug review (Oct 2026)
+
+Everything added in rounds 8–20 had only ever run on x86-64 Linux. This round ran it on the
+maintainer's lab -- **ARM64 Kali** (rustc 1.99.1, Python 3.14) and a **Windows 11 ARM64** VM (x64
+Python 3.14 under emulation = the x64-Windows target) -- and put every new module through an
+independent bug review (static reading + a minimal repro for each finding).
+
+**Matrix, before → after this round** (fast CI subset):
+
+| target | before | after |
+|---|---|---|
+| ARM64 Kali (native AArch64 ELF) | 4 failed / 234 passed | **0 failed / 446 passed** / 36 skipped |
+| Windows x64 (on Windows-on-ARM) | 24 failed / 202 passed (3 root causes) | **0 failed / 410 passed** / 72 skipped, + the opt-in dynamic test passes |
+| Windows ARM64 *native* Python | — | **blocked**: no win_arm64 wheel for unicorn (any version) or capstone<6 (only 6.0 alphas); no MSVC ARM64 on the VM to build them |
+| x86-64 Linux (cloud) | — | **0 failed / 468 passed** / 14 skipped |
+
+**What only the real targets showed.**
+- **AArch64 imports went unseen.** Every AArch64 call to a library goes through a `.plt` stub;
+  `recover_cfg` resolved none, so `recover_behavior` reported *no capability at all* on ARM64.
+  PLT / `.plt.sec` / IAT stubs are now decoded on both architectures (plus import tail calls,
+  PE32 absolute IAT calls, AArch64 adrp+add/ldr address-taken). Native ARM64 network program:
+  import call sites 0 → 475, dispatch edges 0 → 48. x86-64: 312 → 450, reachable 98.3% → 100%.
+- **AArch64 jump tables.** Native glibc builds address the table with adrp+add (far table) and
+  LLVM compresses tables to 1/2-byte entries (`ldrb/ldrh … add …, lsl #2`); neither was matched
+  (0 → 10 tables on a 20-arm match), and the text printer crashed on any AArch64 result.
+- **Windows:** `/tmp` hard-coded in fuzz_recover (22 failures), a POSIX-only `resource` import
+  aborting collection, reopened `NamedTemporaryFile`s, a `\` in a test file name.
+- **ARM64 hosts:** `clang -m32` builds 32-bit ARM, not i386; AArch64 mapping symbols (`$x`/`$d`)
+  overwrite function names in an address → name map.
+
+**Static unpacking now reaches the OEP of real packers.** The static unpacker could not load a UPX
+PE ("no .text"), never applied relocations / import slots, had no import stubs, and emulated
+x86-32 as x86-64. It now maps relocations, IAT/GOT slots and PE headers, answers the Win32 imports
+and Linux syscalls a stub needs (re-opening itself only via `/proc/self/exe`), gives an ELF entry
+a real process stack, tracks hand-offs per stage, and records the import table the stub rebuilds:
+
+| benign fixture | OEP reported | = entry before packing | imports rebuilt | stage-2 call sites bound |
+|---|---|---|---|---|
+| `upx_hello_pe64.exe` (UPX 4.2.4, mingw x64) | 0x13f0 | yes | 53 | 80 (all 6 APIs the program calls) |
+| `upx_hello_pe32.exe` (UPX 4.2.4, mingw i686) | 0x13f0 | yes | 59 | 66 (all 6) |
+| UPX static AArch64 ELF (built at test time on ARM64 Kali) | 0x400600 | yes | – | – |
+
+UPX's TLS callbacks are reported as callbacks, its one-byte self-patch as `self_patches`, and the
+AArch64 ELF's mmap'd decompressor as an intermediate hand-off (3 s). **Cross-validated against
+the dynamic path**: on the Windows VM (frida 17.24.3) the image dumped from the live process at
+`ExitProcess` agrees with the statically unpacked stage-2 on 62315/62861 bytes (99.13%; the rest
+is ASLR-relocated pointers and the run-time IAT). The dynamic dumper itself had captured nothing
+(UPX never flips a page to EXEC through the API; the exe was looked up as SHELL32.dll under x64
+emulation) and leaked the sample's stdout into `--json`; fixed. Frida cannot inject into a static
+libc-less ELF, so that case is static-only (and now handled statically).
+
+**Bug review (4 reviewers, ~60 confirmed findings, each fixed with a regression test that fails on
+the old code).** The ones that changed results:
+- `deobf_opaque` was **not sound**: 13 false opaque claims confirmed against emulation (stale
+  flags after arithmetic, every register treated as 64-bit, unmasked shift counts, `asr` on
+  w-registers as a logical shift, `cmn` as `cmp a,-b`, 1-operand `imul` crashing `recover()`).
+  Rewritten with per-flag, operand-width lifting; a differential test checks every claim against
+  Unicorn on random x86-64 / i386 / AArch64 blocks: **0 false claims in 3,560 claims over 21,000
+  blocks** (the old module: 5 in 750). True opaque branches on the fixtures: 4 → 5.
+- Go pclntab: header offsets hard-coded for 64-bit (GOARCH=386 → 0 functions; now 1834 / 1865)
+  and a 1 MB scan cap (11 MB Go PE → 0; now 8771).
+- `recover_types` rejected vtables with a NULL `drop_in_place` (every Copy/POD `dyn Trait`):
+  benign_rust_std 9 → 30, vt_rs 12 → 35, all checked against symbols.
+- `recover_crypto` reported MD5 as SHA-1 and SHA-512 as SHA-256 (shared constants); AArch64
+  movz/movk constants were invisible.
+- `unpack.py`: argparse abbreviations let `--dyn --i` arm the execute gate. Fixed
+  (`allow_abbrev=False` + a literal check).
+- `export_rules` emitted YARA that YARA rejects and a capa rule capa refuses; `mcp_server`
+  answered notifications; `recover_blobs` "decoded" ~1 in 700 random blobs as single-byte XOR;
+  fuzz_recover reported large results as hangs and Ctrl-C as a finding.
+
+Remaining skips are missing toolchains (no Go / x86 headers on the ARM64 VM; no clang, rustc, Go,
+yara or capa on the Windows VM) and the two benchmark builds CI makes. 28 tests that had been
+skipped on every non-x86 host by a `platform.machine()` gate -- their x86-64 fixtures are analysed
+statically / by emulation -- now run on ARM64 and on Windows-on-ARM (where x64 Python reports
+`ARM64`) and pass.
