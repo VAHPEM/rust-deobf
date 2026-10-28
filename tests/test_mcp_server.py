@@ -146,3 +146,107 @@ def test_subprocess_strict_stdin_survives_invalid_utf8():
     assert lines[0]["error"]["code"] == M.PARSE_ERROR
     assert lines[1]["result"] == {}
     assert lines[2]["error"]["code"] == M.INVALID_PARAMS
+
+
+# --- annotations / push_annotations (decompiler_bridge) ----------------------------------------
+sys.path.insert(0, str(ROOT / "tests"))
+
+
+def _call(name, arguments, req_id=40):
+    r = M.handle({"jsonrpc": "2.0", "id": req_id, "method": "tools/call",
+                  "params": {"name": name, "arguments": arguments}})
+    res = r["result"]
+    return res, (json.loads(res["content"][0]["text"]) if not res["isError"] else
+                 res["content"][0]["text"])
+
+
+@pytest.fixture
+def synthetic_doc(monkeypatch):
+    """Serve a synthetic analysis (PE, RVAs) instead of running the engines."""
+    import decompiler_bridge as DB
+    from test_decompiler_bridge import FACTS, PE_HDR, _doc
+    calls = []
+
+    def fake(path, **kw):
+        calls.append((str(path), kw))
+        return _doc(PE_HDR, FACTS)
+    monkeypatch.setattr(DB, "analyze", fake)
+    monkeypatch.setattr(M, "_ANN_CACHE", {})
+    return calls
+
+
+def test_annotations_tool_filters_pagination_and_cache(synthetic_doc):
+    res, doc = _call("annotations", {"path": str(SAMPLE)})
+    assert not res["isError"] and doc["address_space"] == "rva"
+    assert doc["page"]["total"] == len(doc["annotations"]) and not doc["page"]["has_more"]
+    assert "untrusted_text" in doc
+    _, d2 = _call("annotations", {"path": str(SAMPLE), "tier": "recover", "kind": ["rename"]})
+    assert [a["address"] for a in d2["annotations"]] == ["0x2000", "0x3000"]
+    _, d3 = _call("annotations", {"path": str(SAMPLE), "function": "0x3000", "image_base": "0x140000000"})
+    assert {a["decompiler_address"] for a in d3["annotations"]} == {"0x140003000", "0x140002050"}
+    _, d4 = _call("annotations", {"path": str(SAMPLE), "offset": 1, "limit": 2})
+    assert len(d4["annotations"]) == 2 and d4["page"]["has_more"]
+    assert len(synthetic_doc) == 1                      # one analysis served every call
+
+
+@pytest.mark.parametrize("args,msg", [
+    ({"tier": "nope"}, "unknown value"), ({"kind": 5}, "string or a list"),
+    ({"function": "zz"}, "not an address"), ({"emulate": "maybe"}, "emulate"),
+    ({"limit": 0}, "limit"),
+])
+def test_annotations_tool_bad_args_are_tool_errors(synthetic_doc, args, msg):
+    res, text = _call("annotations", dict({"path": str(SAMPLE)}, **args))
+    assert res["isError"] and msg in text
+
+
+def test_push_annotations_loopback_only_and_dry_run_default(synthetic_doc):
+    from decompiler_mocks import GhidraV2
+    from test_decompiler_bridge import _ghidra_pe
+    for url in ("http://192.0.2.10:8080/", "http://127.0.0.1@evil.example/"):
+        res, text = _call("push_annotations", {"path": str(SAMPLE), "backend": "ghidra-mcp",
+                                               "url": url})
+        assert res["isError"] and ("non-loopback" in text or "credentials" in text)
+    assert not synthetic_doc                             # refused before any analysis
+    res, text = _call("push_annotations", {"path": str(SAMPLE), "backend": "radare",
+                                           "url": "http://127.0.0.1:1/"})
+    assert res["isError"] and "backend" in text
+    with _ghidra_pe() as g:
+        assert isinstance(g, GhidraV2)
+        res, rep = _call("push_annotations", {"path": str(SAMPLE), "backend": "ghidra-mcp",
+                                              "url": g.url})
+        assert not res["isError"] and rep["dry_run"] is True and not g.posts()
+        assert rep["mapping"]["verified"] and rep["summary"]["planned"] > 0
+        res, rep = _call("push_annotations", {"path": str(SAMPLE), "backend": "ghidra-mcp",
+                                              "url": g.url, "dry_run": False, "kind": "rename"})
+        assert rep["summary"]["applied"] == 5 and g.funcs[0x140002000][0].startswith("rd_url_")
+    res, text = _call("push_annotations", {"path": str(SAMPLE), "backend": "ghidra-mcp",
+                                           "url": "http://127.0.0.1:9/", "dry_run": "no"})
+    assert res["isError"] and "dry_run" in text
+
+
+def test_push_annotations_unreachable_is_a_tool_error(synthetic_doc):
+    res, text = _call("push_annotations", {"path": str(SAMPLE), "backend": "ida-mcp",
+                                           "url": "http://127.0.0.1:9/mcp"})
+    assert res["isError"] and "cannot reach ida-pro-mcp" in text
+
+
+def test_annotations_tool_real_fixture_over_stdio():
+    """End to end through the stdio loop on a committed fixture (no mocking): stdout stays
+    JSON-RPC only even though the engines run."""
+    vt = ROOT / "tests" / "fixtures" / "emu" / "vt32"
+    req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+           "params": {"name": "annotations", "arguments": {"path": str(vt), "emulate": "never",
+                                                           "tier": "recover_types"}}}
+    out = io.StringIO()
+    M.serve(io.StringIO(json.dumps(req) + "\n"), out)
+    (line,) = out.getvalue().splitlines()
+    doc = json.loads(json.loads(line)["result"]["content"][0]["text"])
+    assert {a["source_tier"] for a in doc["annotations"]} == {"recover_types"}
+    assert any(a["text"] == "rd_vtmethod_22e4_0" for a in doc["annotations"])
+
+
+@pytest.mark.parametrize("key", ["dry_run", "force", "bookmarks", "triage"])
+def test_push_annotations_booleans_are_strict(synthetic_doc, key):
+    res, text = _call("push_annotations", {"path": str(SAMPLE), "backend": "ghidra-mcp",
+                                           "url": "http://127.0.0.1:9/", key: "false"})
+    assert res["isError"] and key in text and not synthetic_doc
