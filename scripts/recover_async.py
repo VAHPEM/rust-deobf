@@ -21,18 +21,26 @@ States 1 and 2 panic with "`async fn` resumed after completion" / "...after pani
                  (premium/opt_reverse's table recovery is not reused: it requires the dominating
                  `cmp idx, K` bound, and rustc emits none for a u8 state with range metadata --
                  the table is indexed by the raw byte, so its length comes from these checks);
-  3. dataflow  - a small forward analysis (register = arg/stack pointer + offset, or a constant)
-                 gives each state field's location relative to `self` (or the stack, for a
-                 coroutine inlined into its executor), and every store of a state value to it:
-                 the Pending paths' write-backs, which validate the recovered state count;
+  3. dataflow  - a forward analysis (register = arg/stack pointer + offset, a pointer loaded from
+                 such a slot, a stack spill, a constant, or a bounded set of these where paths
+                 merge -- a pointer phi) gives each state field's location relative to `self` (or
+                 the stack, for a coroutine inlined into its executor) and every store of a state
+                 value to it: the Pending paths' write-backs, which validate the recovered states
+                 (a store through a pointer phi counts for each field it may hit);
   4. suspend   - for each Suspend state, the first poll reached from its resume target: a direct
                  call (another recovered poll function -> nesting edge), a `dyn Future` vtable
-                 slot (slot 3 = poll; resolved through recover_types' vtables when the function
-                 references one whose poll is recovered), or a nested inlined state machine;
+                 slot (slot 3 = poll), or a nested inlined state machine. A dyn call is resolved
+                 per call site: the vtable that reaches the call's vtable register on the path
+                 that set the await up (dispatch edges cut), through spills and constructor return
+                 values; ambiguous ones are reported as candidates;
   5. extras    - the coroutine's source location (the &Location passed to the resume panic, so a
                  stripped binary still says `src/main.rs:13:30`), its size (the `dyn Future`
                  vtable's size field when it is boxed; else a lower bound from the accesses through
-                 `self`), and which async runtime is linked (recover_rust_meta's crate list).
+                 `self`), and which async runtime is linked (registry paths in the data).
+
+Two dispatch sites on one state field are one machine when they share a target (one coroutine
+polled from two code paths) and two when they share none (two inlined copies of a coroutine whose
+storage overlaps).
 
 Machines whose field is relative to the function's own argument are that function's state
 machine ("poll"); with -O an awaited future's poll is often inlined into its parent's, so a function
@@ -86,7 +94,8 @@ for _i in range(8, 16):
     for _n in (f"r{_i}", f"r{_i}d", f"r{_i}w", f"r{_i}b"):
         _X86_CANON[_n] = f"r{_i}"
 _X86_CALLER_SAVED = {"sysv": ("rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"),
-                     "win64": ("rax", "rcx", "rdx", "r8", "r9", "r10", "r11")}
+                     "win64": ("rax", "rcx", "rdx", "r8", "r9", "r10", "r11"),
+                     "cdecl": ("rax", "rcx", "rdx")}
 _A64_CALLER_SAVED = tuple(f"x{i}" for i in range(19)) + ("x30",)
 
 
@@ -446,7 +455,7 @@ def _const_of(b: _Bin, ins):
 # 2. the dispatch interpreter
 # ----------------------------------------------------------------------------------------------
 class _Run:
-    __slots__ = ("target", "jt", "table", "reads", "branches")
+    __slots__ = ("target", "jt", "table", "reads", "branches", "path")
 
     def __init__(self):
         self.target = None      # where control lands for this state value
@@ -454,6 +463,7 @@ class _Run:
         self.table = None       # first table read VA
         self.reads = []         # table entry VAs read
         self.branches = 0
+        self.path = []          # instructions the dispatch executed (its CFG edges are "dispatch")
 
 
 def _x86_op_val(b, ins, op, regs, smem, v, run):
@@ -530,6 +540,7 @@ def _run_x86(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
         if ins is None or not (lo <= pc < hi):
             run.target = seg
             return run
+        run.path.append(pc)
         m = ins.mnemonic
         ops = ins.operands
         nxt = pc + ins.size
@@ -755,6 +766,7 @@ def _run_a64(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
         if ins is None or not (lo <= pc < hi):
             run.target = seg
             return run
+        run.path.append(pc)
         m, s = ins.mnemonic, ins.op_str
         nxt = pc + 4
         parts = [p.strip() for p in s.split(",")] if s else []
@@ -1017,7 +1029,7 @@ def _call_info(b: _Bin, ins, recent):
                         t = b.read_ptr(base_c + disp)
                         nm = b.import_name(t)
                         return {"kind": "import", "name": nm} if nm else {"kind": "direct", "target": t}
-                    return {"kind": "dyn", "slot_offset": disp}
+                    return {"kind": "dyn", "slot_offset": disp, "via": (p.address, _ac(mi.group(2)))}
             if p.mnemonic not in ("mov",) and p.op_str.split(",")[0].strip() in (reg, "w" + reg[1:]):
                 break
         return {"kind": "indirect"}
@@ -1031,7 +1043,8 @@ def _call_info(b: _Bin, ins, recent):
             nm = b.import_name(t)
             return {"kind": "import", "name": nm} if nm else {"kind": "direct", "target": t}
         if op.mem.base and not op.mem.index and _xc(ins.reg_name(op.mem.base)) not in ("rsp", "rbp"):
-            return {"kind": "dyn", "slot_offset": op.mem.disp}
+            return {"kind": "dyn", "slot_offset": op.mem.disp,
+                    "via": (ins.address, _xc(ins.reg_name(op.mem.base)))}
         return {"kind": "indirect"}
     if op.type == X86_OP_REG:
         reg = _xc(ins.reg_name(op.reg))
@@ -1041,7 +1054,8 @@ def _call_info(b: _Bin, ins, recent):
                 src = p.operands[1]
                 if src.type == X86_OP_MEM and src.mem.base and src.mem.base != X86_REG_RIP \
                         and not src.mem.index and _xc(p.reg_name(src.mem.base)) not in ("rsp", "rbp"):
-                    return {"kind": "dyn", "slot_offset": src.mem.disp}
+                    return {"kind": "dyn", "slot_offset": src.mem.disp,
+                            "via": (p.address, _xc(p.reg_name(src.mem.base)))}
                 break
     return {"kind": "indirect"}
 
@@ -1153,155 +1167,440 @@ def _location(b: _Bin, va):
 # ----------------------------------------------------------------------------------------------
 # 3. dataflow: pointer aliases (root + offset) and constants
 # ----------------------------------------------------------------------------------------------
-def _deref(bf, disp):
+# A fact is one of
+#   ("p", root, k)            the register holds root + k (root: argN, sp, *<root>+off, ...)
+#   ("ps", frozenset{(root, k)})  one of several such pointers -- a pointer phi at a merge point
+#   ("c", value) / ("cs", frozenset{value})   a constant / one of several constants
+#   ("cp", value, bits)       only the low `bits` bits are known (`mov cl, 3`)
+# Joins keep a register when every incoming edge knows it, merging differing pointers (or
+# constants) into a bounded set; a set that grows past the cap is dropped. Facts only shrink or
+# grow towards the cap, so the fixpoint terminates.
+_MAX_ALT_PTR = 4
+_MAX_ALT_CONST = 8
+_ARG_SLOTS_32 = 6          # i386: [esp_entry + 4 .. + 24] are the first six stack arguments
+
+
+def _ptrs(fact):
+    if not fact:
+        return None
+    if fact[0] == "p":
+        return {(fact[1], fact[2])}
+    if fact[0] == "ps":
+        return set(fact[1])
+    return None
+
+
+def _consts(fact):
+    if not fact:
+        return None
+    if fact[0] == "c":
+        return {fact[1]}
+    if fact[0] == "cs":
+        return set(fact[1])
+    return None
+
+
+def _mkptr(pairs):
+    if not pairs or len(pairs) > _MAX_ALT_PTR:
+        return None
+    if len(pairs) == 1:
+        r, k = next(iter(pairs))
+        return ("p", r, k)
+    return ("ps", frozenset(pairs))
+
+
+def _mkconst(vals):
+    if not vals or len(vals) > _MAX_ALT_CONST:
+        return None
+    if len(vals) == 1:
+        return ("c", next(iter(vals)))
+    return ("cs", frozenset(vals))
+
+
+def _shift(fact, k, bits=64):
+    """fact + k (a pointer moves, a constant adds)."""
+    p = _ptrs(fact)
+    if p is not None:
+        return _mkptr({(r, o + k) for r, o in p})
+    c = _consts(fact)
+    if c is not None:
+        return _mkconst({(v + k) & _mask(bits) for v in c})
+    return None
+
+
+def _deref(bf, disp, x32=False):
     """A pointer loaded from [root+k+disp] gets its own symbolic root `*root+off`, so two accesses
     through the same loaded pointer (a `&mut Future` held in the executor's frame) agree. One level
-    of indirection beyond an argument / the stack is enough here and keeps roots finite."""
+    of indirection beyond an argument / the stack is enough here and keeps roots finite. On i386
+    the entry-relative stack slots [esp+4..] ARE the arguments: they load as `argN` itself."""
     if not bf or bf[0] != "p" or bf[1].count("*") >= 2:
         return None
-    return ("p", f"*{bf[1]}{bf[2] + disp:+#x}", 0)
+    off = bf[2] + disp
+    if x32 and bf[1] == "sp" and 4 <= off <= 4 * _ARG_SLOTS_32 and off % 4 == 0:
+        return ("p", f"arg{off // 4 - 1}", 0)
+    return ("p", f"*{bf[1]}{off:+#x}", 0)
+
+
+_DEREF_RE = re.compile(r"^\*(.+?)([+-]0x[0-9a-f]+)$")
+
+
+def _deref_slot(root):
+    """`*sp+0x48` -> ("sp", 0x48): the memory slot a deref'd root was loaded from, or None."""
+    m = _DEREF_RE.match(root or "")
+    return (m.group(1), int(m.group(2), 16)) if m else None
+
+
+def _merge(a, b):
+    if a == b:
+        return a
+    pa, pb = _ptrs(a), _ptrs(b)
+    if pa is not None and pb is not None:
+        return _mkptr(pa | pb)
+    ca, cb = _consts(a), _consts(b)
+    if ca is not None and cb is not None:
+        return _mkconst(ca | cb)
+    return None
 
 
 def _join(a, b):
     if a is None:
         return dict(b)
-    return {k: v for k, v in a.items() if b.get(k) == v}
+    out = {}
+    for k, va in a.items():
+        vb = b.get(k)
+        if vb is None:
+            continue
+        m = _merge(va, vb)
+        if m is not None:
+            out[k] = m
+    return out
+
+
+def _sp_fact(bn, f):
+    """The stack pointer's fact: a constant root on x86-64/AArch64 (rsp/sp do not move after the
+    prologue there), tracked through push/pop/sub/add on i386 (cdecl args live above it)."""
+    if bn.x32:
+        return f.get("rsp")
+    return ("p", "sp", 0)
+
+
+def _callee_pop(bn, target):
+    """Bytes an i386 callee pops on return (`ret imm16`: sret / stdcall), from its first `ret`."""
+    cache = bn.__dict__.setdefault("_pop_cache", {})
+    if target in cache:
+        return cache[target]
+    pop = 0
+    if target is not None and bn.lo <= target < bn.hi:
+        o = target - bn.lo
+        for ins in bn.md.disasm(bn.code[o:o + 0x1000], target):
+            if ins.mnemonic in ("ret", "retn"):
+                pop = ins.operands[0].imm if ins.operands else 0
+                break
+            if ins.mnemonic in ("int3", "ud2", "hlt"):
+                break
+    cache[target] = pop
+    return pop
+
+
+def _pc_thunk_reg(bn, target):
+    """If `target` is an i386 PIC thunk `mov reg, [esp]; ret`, the register it loads, else None."""
+    raw = bn.read(target, 4) if target is not None and bn.lo <= target < bn.hi else None
+    if raw and raw[0] == 0x8B and raw[2] == 0x24 and raw[3] == 0xC3 and (raw[1] & 0xC7) == 0x04:
+        return ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi")[(raw[1] >> 3) & 7]
+    return None
+
+
+def _slot_clear(f, off, size):
+    """A write to the stack slot [sp+off, +size): forget every spilled value it overlaps."""
+    for k in [k for k in f if isinstance(k, tuple) and k[0] == "m" and off - 8 < k[1] < off + size]:
+        del f[k]
+
+
+def _stack_slot(bf, disp):
+    """Entry-relative stack offset of [base+disp] when the base is a plain stack pointer."""
+    if bf and bf[0] == "p" and bf[1] == "sp":
+        return bf[2] + disp
+    return None
+
+
+def _ret_regs(bn):
+    return ("x0", "x1") if bn.arm else ("rax", "rdx")
+
+
+def _ret_facts(bn, f, target):
+    """After a direct call: the return registers hold "what `target` returns" -- a symbolic fact
+    resolved on demand by _ret_summary (a `Pin<Box<dyn Future>>` constructor returns its vtable)."""
+    if target is not None and bn.lo <= target < bn.hi:
+        for k, r in enumerate(_ret_regs(bn)):
+            f[r] = ("r", target, k)
+
+
+def _ret_summary(bn, target, idx):
+    """Constants function `target` returns in return register `idx` on every `ret`, or None."""
+    cache = bn.__dict__.setdefault("_ret_cache", {})
+    key = (target, idx)
+    if key in cache:
+        return cache[key]
+    cache[key] = None                     # recursion guard
+    lo, hi = bn.fn_bounds(target)
+    if lo != target or hi - lo > 0x1000:
+        return None
+    insns = bn.sweep(lo, hi)
+    entry = {r: ("p", f"arg{k}", 0) for k, r in enumerate(bn.args)}
+    if bn.x32:
+        entry = {"rsp": ("p", "sp", 0)}
+    at = _dataflow(bn, insns, lo, hi, {}, entry, None)
+    vals = set()
+    reg = _ret_regs(bn)[idx]
+    for i in insns:
+        if i.mnemonic in ("ret", "retn"):
+            fact = at.get(i.address, {}).get(reg)
+            c = _consts(fact)
+            if c is None:
+                return None
+            vals |= c
+    cache[key] = vals or None
+    return cache[key]
 
 
 def _transfer(bn: _Bin, ins, f, on_access=None):
-    """Update facts `f` (reg -> ("p", root, k) | ("c", value)) across `ins`. `on_access(ins, kind,
-    root, off, width, value)` is called for memory accesses through a known pointer."""
+    """Update facts `f` across `ins`. `on_access(ins, kind, ptrs, width, vals, may)` is called for
+    each memory access through a known pointer: `ptrs` = [(root, off)] (several for a pointer
+    phi), `vals` = possible stored constants (None = unknown), `may` = the access targets one of
+    several locations."""
     m = ins.mnemonic
     if bn.arm:
-        s = ins.op_str
-        parts = [p.strip() for p in s.split(",")] if s else []
-        if m in ("bl", "blr"):
-            for r in _A64_CALLER_SAVED:
-                f.pop(r, None)
-            return
-        is_ld = m in _A64_LOAD or m in ("ldp", "ldpsw")
-        is_st = m in ("strb", "strh", "str", "sturb", "sturh", "stur", "stp")
-        if is_ld or is_st:
-            mi = _A64_MEM_IMM.match(s) if m not in ("ldp", "stp", "ldpsw") else \
-                re.match(r"^(\w+), \w+, \[(\w+)(?:, #(-?(?:0x[0-9a-f]+|\d+)))?\](!?)$", s)
-            mp = _A64_MEM_POST.match(s) if mi is None else None
-            if mp is None and mi is None and m in ("ldp", "stp", "ldpsw"):
-                mp = re.match(r"^(\w+), \w+, \[(\w+)\], #(-?(?:0x[0-9a-f]+|\d+))$", s)
-            base = disp = None
-            wb = 0
-            if mi:
-                base, disp = _ac(mi.group(2)), _num(mi.group(3) or "0")
-                if mi.group(4):
-                    wb = disp
-            elif mp:
-                base, disp, wb = _ac(mp.group(2)), 0, _num(mp.group(3))
-            bf = None
-            if base is not None:
-                bf = ("p", "sp", 0) if base == "sp" else f.get(base)   # before any writeback
-                if on_access and bf and bf[0] == "p" and m not in ("ldp", "stp", "ldpsw"):
-                    w = {"strb": 1, "sturb": 1, "strh": 2, "sturh": 2}.get(m)
-                    if w is None:
-                        w = _A64_LOAD.get(m, (None, 0))[0] if is_ld else None
-                    if w is None:
-                        w = 4 if parts[0].startswith("w") else 8
-                    val = None
-                    if is_st:
-                        src = _ac(parts[0])
-                        val = 0 if src == "xzr" else (f[src][1] if f.get(src, ("",))[0] == "c" else None)
-                    on_access(ins, "store" if is_st else "load", bf[1], bf[2] + disp, w, val)
-                if wb and base != "sp":
-                    if bf and bf[0] == "p":
-                        f[base] = ("p", bf[1], bf[2] + wb)
-                    elif bf and bf[0] == "c":
-                        f[base] = ("c", bf[1] + wb)
-                    else:
-                        f.pop(base, None)
-            if is_ld:
-                f.pop(_ac(parts[0]), None)
-                if m in ("ldp", "ldpsw") and len(parts) > 1:
-                    f.pop(_ac(parts[1]), None)
-                    if m == "ldp" and parts[0].startswith("x") and base is not None and not wb:
-                        for k, r in enumerate((parts[0], parts[1])):
-                            d = _deref(bf, disp + 8 * k)
-                            if d is not None and _ac(r) != base:
-                                f[_ac(r)] = d
-                elif m in ("ldr", "ldur") and parts[0].startswith("x") and base is not None:
-                    d = _deref(bf, disp)
-                    if d is not None and _ac(parts[0]) != base:
-                        f[_ac(parts[0])] = d
-            return
-        if not parts:
-            return
-        dst = _ac(parts[0])
-        if dst == "sp" or m in ("cmp", "cmn", "tst", "b", "br", "cbz", "cbnz", "tbz", "tbnz", "ret", "nop") \
-                or m.startswith("b."):
-            return
-        if m == "mov" and len(parts) == 2:
-            src = parts[1]
-            im = _A64_IMM.match(src)
-            if im:
-                f[dst] = ("c", _num(im.group(1)) & _mask(_a64_bits(parts[0])))
-            elif _ac(src) == "sp":
-                f[dst] = ("p", "sp", 0)
-            elif _ac(src) == "xzr":
-                f[dst] = ("c", 0)
-            elif _ac(src) in f and (parts[0].startswith("x") or f[_ac(src)][0] == "c"):
-                f[dst] = f[_ac(src)]
-            else:
-                f.pop(dst, None)
-            return
-        if m in ("adr", "adrp"):
-            c = _const_of(bn, ins)
-            if c is None:
-                f.pop(dst, None)
-            else:
-                f[dst] = ("c", c)
-            return
-        if m in ("add", "sub") and len(parts) == 3 and _A64_IMM.match(parts[2]):
-            k = _num(_A64_IMM.match(parts[2]).group(1))
-            k = k if m == "add" else -k
-            src = ("p", "sp", 0) if _ac(parts[1]) == "sp" else f.get(_ac(parts[1]))
-            if src and src[0] == "p":
-                f[dst] = ("p", src[1], src[2] + k)
-            elif src and src[0] == "c":
-                f[dst] = ("c", (src[1] + k) & _mask(64))
-            else:
-                f.pop(dst, None)
-            return
-        f.pop(dst, None)
+        _transfer_a64(bn, ins, f, on_access, m)
+    else:
+        _transfer_x86(bn, ins, f, on_access, m)
+
+
+def _report(on_access, ins, kind, base_fact, disp, width, vals):
+    p = _ptrs(base_fact)
+    if on_access and p:
+        on_access(ins, kind, sorted((r, k + disp) for r, k in p), width, vals, len(p) > 1)
+
+
+def _transfer_a64(bn, ins, f, on_access, m):
+    s = ins.op_str
+    parts = [p.strip() for p in s.split(",")] if s else []
+    if m in ("bl", "blr"):
+        for r in _A64_CALLER_SAVED:
+            f.pop(r, None)
+        if m == "bl":
+            _ret_facts(bn, f, _num(s.lstrip("#")))
         return
-    # x86-64
+    pair = m in ("ldp", "stp", "ldpsw")
+    is_ld = m in _A64_LOAD or m in ("ldp", "ldpsw")
+    is_st = m in ("strb", "strh", "str", "sturb", "sturh", "stur", "stp")
+    if is_ld or is_st:
+        if pair:
+            mi = re.match(r"^(\w+), (\w+), \[(\w+)(?:, #(-?(?:0x[0-9a-f]+|\d+)))?\](!?)$", s)
+            mp = None if mi else re.match(r"^(\w+), (\w+), \[(\w+)\], #(-?(?:0x[0-9a-f]+|\d+))$", s)
+            regs_ = (mi or mp).groups()[:2] if (mi or mp) else (parts[0],)
+            bidx = 3
+        else:
+            mi = _A64_MEM_IMM.match(s)
+            mp = None if mi else _A64_MEM_POST.match(s)
+            regs_ = (parts[0],)
+            bidx = 2
+        base = disp = None
+        wb = 0
+        if mi:
+            base, disp = _ac(mi.group(bidx)), _num(mi.group(bidx + 1) or "0")
+            if mi.group(bidx + 2):
+                wb = disp
+        elif mp:
+            base, disp, wb = _ac(mp.group(bidx)), 0, _num(mp.group(bidx + 1))
+        bf = None
+        if base is not None:
+            bf = ("p", "sp", 0) if base == "sp" else f.get(base)   # before any writeback
+            if on_access and _ptrs(bf):
+                w = {"strb": 1, "sturb": 1, "strh": 2, "sturh": 2}.get(m)
+                if w is None:
+                    w = _A64_LOAD.get(m, (None, 0))[0] if is_ld and not pair else None
+                if w is None:
+                    w = 4 if regs_[0].startswith("w") else 8
+                for k, r in enumerate(regs_):
+                    vals = None
+                    if is_st:
+                        src = _ac(r)
+                        vals = {0} if src == "xzr" else _consts(f.get(src))
+                    _report(on_access, ins, "store" if is_st else "load", bf, disp + k * w, w, vals)
+            if wb and base != "sp":
+                nf = _shift(bf, wb)
+                if nf is None:
+                    f.pop(base, None)
+                else:
+                    f[base] = nf
+        slot = _stack_slot(bf, disp) if base is not None else None
+        wid = 4 if regs_[0].startswith("w") else 8
+        if is_st and slot is not None:
+            # a spill: remember what an 8-byte register store put in the frame
+            for k, r in enumerate(regs_):
+                _slot_clear(f, slot + k * wid, wid)
+                sf = ("c", 0) if _ac(r) == "xzr" else f.get(_ac(r))
+                if wid == 8 and sf is not None and m in ("str", "stur", "stp"):
+                    f[("m", slot + k * wid)] = sf
+        if is_ld:
+            for r in regs_:
+                f.pop(_ac(r), None)
+            if base is not None and m in ("ldr", "ldur", "ldp") and regs_[0].startswith("x"):
+                for k, r in enumerate(regs_):
+                    if _ac(r) == base:
+                        continue
+                    sv = f.get(("m", slot + 8 * k)) if slot is not None else None
+                    d = sv if sv is not None else _deref(bf, disp + 8 * k)
+                    if d is not None:
+                        f[_ac(r)] = d
+        return
+    if not parts:
+        return
+    dst = _ac(parts[0])
+    if dst == "sp" or m in ("cmp", "cmn", "tst", "b", "br", "cbz", "cbnz", "tbz", "tbnz", "ret", "nop") \
+            or m.startswith("b."):
+        return
+    if m == "mov" and len(parts) == 2:
+        src = parts[1]
+        im = _A64_IMM.match(src)
+        if im:
+            f[dst] = ("c", _num(im.group(1)) & _mask(_a64_bits(parts[0])))
+        elif _ac(src) == "sp":
+            f[dst] = ("p", "sp", 0)
+        elif _ac(src) == "xzr":
+            f[dst] = ("c", 0)
+        elif _ac(src) in f and (parts[0].startswith("x") or _consts(f[_ac(src)]) is not None):
+            sf = f[_ac(src)]
+            f[dst] = sf if parts[0].startswith("x") else _mkconst({v & _mask(32) for v in _consts(sf)})
+        else:
+            f.pop(dst, None)
+        return
+    if m in ("adr", "adrp"):
+        c = _const_of(bn, ins)
+        if c is None:
+            f.pop(dst, None)
+        else:
+            f[dst] = ("c", c)
+        return
+    if m in ("add", "sub") and len(parts) == 3 and _A64_IMM.match(parts[2]):
+        k = _num(_A64_IMM.match(parts[2]).group(1))
+        k = k if m == "add" else -k
+        src = ("p", "sp", 0) if _ac(parts[1]) == "sp" else f.get(_ac(parts[1]))
+        nf = _shift(src, k)
+        if nf is None:
+            f.pop(dst, None)
+        else:
+            f[dst] = nf
+        return
+    f.pop(dst, None)
+
+
+def _transfer_x86(bn, ins, f, on_access, m):
     from capstone.x86 import X86_OP_REG, X86_OP_IMM, X86_OP_MEM, X86_REG_RIP
     ops = ins.operands
+    x32 = bn.x32
+    ptrw = bn.ptr
     if m == "call":
+        tgt = _x86_call_target(bn, ins)
+        nxt = ins.address + ins.size
+        if x32 and ops and ops[0].type != X86_OP_IMM:
+            tgt_pop = None                       # indirect: no callee to read `ret imm` from
+        else:
+            tgt_pop = tgt
+        if x32:
+            thunk = _pc_thunk_reg(bn, tgt)
+            spf = f.get("rsp")
+            for r in _X86_CALLER_SAVED["cdecl"]:
+                f.pop(r, None)
+            if tgt == nxt:                       # `call $+5 ; pop reg`: the PIC base
+                f["__pushed"] = ("c", nxt)
+                if spf:
+                    f["rsp"] = _shift(spf, -4, 32) or spf
+                return
+            if thunk:
+                f[thunk] = ("c", nxt)
+            pop = _callee_pop(bn, tgt_pop) if tgt_pop is not None else None
+            _ret_facts(bn, f, tgt)
+            if pop is None:
+                # an indirect call: LLVM re-reserves what an sret/stdcall callee popped with the
+                # `sub esp, N` right after it -- take N as the pop, so the frame stays in sync
+                n = bn.insn(nxt)
+                pop = 0
+                if n is not None and n.mnemonic == "sub" and len(n.operands) == 2 \
+                        and n.operands[0].type == X86_OP_REG and _xc(n.reg_name(n.operands[0].reg)) == "rsp" \
+                        and n.operands[1].type == X86_OP_IMM and 0 < n.operands[1].imm <= 16:
+                    pop = n.operands[1].imm
+            if spf and pop:
+                f["rsp"] = _shift(spf, pop, 32)
+            return
         for r in _X86_CALLER_SAVED[bn.abi]:
             f.pop(r, None)
+        _ret_facts(bn, f, tgt)
         return
+    spf = _sp_fact(bn, f)
     if on_access:
         for i, op in enumerate(ops):
             if op.type == X86_OP_MEM and op.mem.base and op.mem.base != X86_REG_RIP and not op.mem.index \
                     and m not in ("lea", "nop") and not m.startswith("nop"):
                 bc = _xc(ins.reg_name(op.mem.base))
-                bf = ("p", "sp", 0) if bc == "rsp" else f.get(bc)
-                if bf and bf[0] == "p":
-                    store = i == 0 and m in ("mov", "movb", "movw", "movl", "movq") and len(ops) == 2
-                    val = None
+                bf = spf if bc == "rsp" else f.get(bc)
+                if _ptrs(bf):
+                    store = i == 0 and m == "mov" and len(ops) == 2
+                    vals = None
                     if store:
                         src = ops[1]
                         if src.type == X86_OP_IMM:
-                            val = src.imm & _mask(op.size * 8)
+                            vals = {src.imm & _mask(op.size * 8)}
                         elif src.type == X86_OP_REG:
                             sf = f.get(_xc(ins.reg_name(src.reg)))
-                            if sf and (sf[0] == "c" or (sf[0] == "cp" and op.size * 8 <= sf[2])):
-                                val = sf[1] & _mask(op.size * 8)
-                    kind = "store" if store else ("rmw" if i == 0 and m not in ("cmp", "test") else "load")
-                    on_access(ins, kind, bf[1], bf[2] + op.mem.disp, op.size, val)
+                            if sf and sf[0] == "cp" and op.size * 8 <= sf[2]:
+                                vals = {sf[1] & _mask(op.size * 8)}
+                            elif _consts(sf) is not None:
+                                vals = {v & _mask(op.size * 8) for v in _consts(sf)}
+                    kind = "store" if store else ("rmw" if i == 0 and m not in ("cmp", "test", "push") else "load")
+                    _report(on_access, ins, kind, bf, op.mem.disp, op.size, vals)
+    # stack spills: a pointer-sized register/immediate stored to [sp+k] and reloaded later
+    for i, op in enumerate(ops):
+        if op.type == X86_OP_MEM and i == 0 and m not in ("cmp", "test", "lea", "push") \
+                and not m.startswith("nop") and op.mem.base and not op.mem.index and op.mem.base != X86_REG_RIP:
+            bc = _xc(ins.reg_name(op.mem.base))
+            slot = _stack_slot(spf if bc == "rsp" else f.get(bc), op.mem.disp)
+            if slot is not None:
+                _slot_clear(f, slot, max(op.size, 1))
+                if m == "mov" and op.size == ptrw and len(ops) == 2:
+                    src = ops[1]
+                    sv = None
+                    if src.type == X86_OP_REG:
+                        sc = _xc(ins.reg_name(src.reg))
+                        sv = spf if sc == "rsp" else f.get(sc)
+                    elif src.type == X86_OP_IMM:
+                        sv = ("c", src.imm & _mask(8 * ptrw))
+                    if sv is not None:
+                        f[("m", slot)] = sv
+    if x32:
+        if m == "push":
+            if spf:
+                f["rsp"] = _shift(spf, -4, 32)
+            return
+        if m == "pop":
+            if spf:
+                f["rsp"] = _shift(spf, 4, 32)
+            if ops and ops[0].type == X86_OP_REG:
+                d = _xc(ins.reg_name(ops[0].reg))
+                if d != "rsp":
+                    pushed = f.pop("__pushed", None)
+                    if pushed:
+                        f[d] = pushed
+                    else:
+                        f.pop(d, None)
+            return
+        f.pop("__pushed", None)
     if not ops or ops[0].type != X86_OP_REG:
         return
     dst = _xc(ins.reg_name(ops[0].reg))
-    if dst == "rsp":
+    if dst == "rsp" and not x32:
         return
-    if m in ("cmp", "test") or m.startswith("j") or m in ("push",):
+    if m in ("cmp", "test") or m.startswith("j") or m == "push":
         return
     if m == "pop":
         f.pop(dst, None)
@@ -1312,22 +1611,31 @@ def _transfer(bn: _Bin, ins, f, on_access=None):
             old = f.pop(dst, None)
             w = ops[0].size * 8
             if w >= 32:
-                f[dst] = ("c", src.imm & _mask(w))
+                imm = src.imm & _mask(w)
+                if x32 and bn.pe and imm >= bn.img.imagebase and bn.is_data(imm - bn.img.imagebase):
+                    imm -= bn.img.imagebase          # an absolute data VA -> RVA (relocated)
+                f[dst] = ("c", imm)
             elif old and old[0] == "c":           # a partial write merges into a known constant
                 f[dst] = ("c", (old[1] & ~_mask(w)) | (src.imm & _mask(w)))
             else:                                 # only the low `w` bits are known (`mov cl, 3`)
                 f[dst] = ("cp", src.imm & _mask(w), w)
         elif src.type == X86_OP_REG:
             sc = _xc(ins.reg_name(src.reg))
-            sf = ("p", "sp", 0) if sc == "rsp" else f.get(sc)
-            if sf and (ops[0].size == 8 or (sf[0] == "c" and ops[0].size == 4)):
-                f[dst] = sf if ops[0].size == 8 else ("c", sf[1] & _mask(32))
+            sf = spf if sc == "rsp" else f.get(sc)
+            if sf and ops[0].size == ptrw:
+                f[dst] = sf
+            elif sf and ops[0].size == 4 and _consts(sf) is not None:
+                f[dst] = _mkconst({v & _mask(32) for v in _consts(sf)})
             else:
                 f.pop(dst, None)
-        elif src.type == X86_OP_MEM and ops[0].size == 8 and src.mem.base and not src.mem.index \
+        elif src.type == X86_OP_MEM and ops[0].size == ptrw and src.mem.base and not src.mem.index \
                 and src.mem.base != X86_REG_RIP and not src.mem.segment:
             bc = _xc(ins.reg_name(src.mem.base))
-            d = _deref(("p", "sp", 0) if bc == "rsp" else f.get(bc), src.mem.disp)
+            bf = spf if bc == "rsp" else f.get(bc)
+            slot = _stack_slot(bf, src.mem.disp)
+            d = f.get(("m", slot)) if slot is not None else None
+            if d is None:
+                d = _deref(bf, src.mem.disp, x32)
             if d is None:
                 f.pop(dst, None)
             else:
@@ -1339,23 +1647,24 @@ def _transfer(bn: _Bin, ins, f, on_access=None):
         mm = ops[1].mem
         if mm.base == X86_REG_RIP:
             f[dst] = ("c", ins.address + ins.size + mm.disp)
-        elif mm.base and not mm.index and ops[0].size == 8:
+        elif mm.base and not mm.index and ops[0].size == ptrw:
             bc = _xc(ins.reg_name(mm.base))
-            bf = ("p", "sp", 0) if bc == "rsp" else f.get(bc)
-            if bf and bf[0] == "p":
-                f[dst] = ("p", bf[1], bf[2] + mm.disp)
-            else:
+            nf = _shift(spf if bc == "rsp" else f.get(bc), mm.disp, 8 * ptrw)
+            if nf is None:
                 f.pop(dst, None)
+            else:
+                f[dst] = nf
         else:
             f.pop(dst, None)
         return
-    if m in ("add", "sub") and len(ops) == 2 and ops[1].type == X86_OP_IMM and ops[0].size == 8:
-        df = f.get(dst)
+    if m in ("add", "sub") and len(ops) == 2 and ops[1].type == X86_OP_IMM and ops[0].size == ptrw:
+        df = spf if dst == "rsp" else f.get(dst)
         k = ops[1].imm if m == "add" else -ops[1].imm
-        if df and df[0] == "p":
-            f[dst] = ("p", df[1], df[2] + k)
-        else:
+        nf = _shift(df, k, 8 * ptrw)
+        if nf is None:
             f.pop(dst, None)
+        else:
+            f[dst] = nf
         return
     if m == "xor" and len(ops) == 2 and ops[1].type == X86_OP_REG and ops[1].reg == ops[0].reg:
         f[dst] = ("c", 0)
@@ -1364,10 +1673,61 @@ def _transfer(bn: _Bin, ins, f, on_access=None):
         _r, w = ins.regs_access()
         for r in w:
             c = _xc(ins.reg_name(r))
-            if c != "rsp":
+            if c != "rsp" or x32:
                 f.pop(c, None)
     except Exception:
         f.pop(dst, None)
+
+
+def _x86_call_target(bn, ins):
+    """Direct target of an x86 call: rel32, or the function a [rip+slot] / [abs32] slot holds."""
+    from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_RIP
+    op = ins.operands[0] if ins.operands else None
+    if op is None:
+        return None
+    if op.type == X86_OP_IMM:
+        return op.imm
+    if op.type == X86_OP_MEM and not op.mem.index:
+        if op.mem.base == X86_REG_RIP:
+            return bn.read_ptr(ins.address + ins.size + op.mem.disp)
+        if not op.mem.base and bn.x32:
+            slot = op.mem.disp & _mask(32)
+            if bn.pe:
+                slot -= bn.img.imagebase
+            return bn.read_ptr(slot)
+    return None
+
+
+def _noreturn(bn, target):
+    """Does the function at `target` never return (no `ret`, no tail jump out -- a panic helper)?"""
+    cache = bn.__dict__.setdefault("_noret_cache", {})
+    if target in cache:
+        return cache[target]
+    res = False
+    i = bisect.bisect_left(bn.starts, target) if target is not None else 0
+    if target is not None and bn.lo <= target < bn.hi and i < len(bn.starts) and bn.starts[i] == target:
+        lo, hi = bn.fn_bounds(target)
+        res = True
+        n = 0
+        for ins in bn.md.disasm(bn.code[lo - bn.lo:min(hi, lo + 0x4000) - bn.lo], lo):
+            n += 1
+            m = ins.mnemonic
+            if m in ("ret", "retn", "retf", "br") or (m == "jmp" and not ins.op_str.startswith("0x")):
+                res = False
+                break
+            if m in ("jmp", "b") or m.startswith("b.") or m in ("cbz", "cbnz", "tbz", "tbnz"):
+                try:
+                    t = _num(ins.op_str.split(",")[-1].strip().lstrip("#"))
+                except ValueError:
+                    res = False
+                    break
+                if not (lo <= t < hi):
+                    res = False          # a tail call: returns whenever the callee does
+                    break
+        if hi - lo > 0x4000 or n == 0:
+            res = False
+    cache[target] = res
+    return res
 
 
 def _blocks(bn: _Bin, insns, lo, hi, extra_edges):
@@ -1390,6 +1750,8 @@ def _blocks(bn: _Bin, insns, lo, hi, extra_edges):
                 tgts, term = [_num(i.op_str.lstrip("#"))], True
             elif m in ("br", "ret", "brk"):
                 term = True
+            elif m == "bl":
+                term = _noreturn(bn, _num(i.op_str.lstrip("#")))
         else:
             if m.startswith("j"):
                 from capstone.x86 import X86_OP_IMM
@@ -1398,9 +1760,13 @@ def _blocks(bn: _Bin, insns, lo, hi, extra_edges):
                 term = m == "jmp"
             elif m in ("ret", "ud2", "int3", "hlt"):
                 term = True
+            elif m == "call":
+                term = _noreturn(bn, _x86_call_target(bn, i))
         tgts = [t for t in tgts if t in aset]
         tgts += [t for t in extra_edges.get(i.address, ()) if t in aset]
         if tgts or term or m.startswith("b.") or (not bn.arm and m.startswith("j")):
+            # (a call into a function that never returns -- a panic -- ends its block too, so the
+            # registers it clobbers do not flow into the code laid out after it)
             ends[i.address] = (tgts, term)
             leaders.update(tgts)
             leaders.add(i.address + i.size)
@@ -1422,7 +1788,9 @@ def _blocks(bn: _Bin, insns, lo, hi, extra_edges):
     return blocks, succ
 
 
-def _dataflow(bn: _Bin, insns, lo, hi, extra_edges, entry_facts, on_access):
+def _dataflow(bn: _Bin, insns, lo, hi, extra_edges, entry_facts, on_access, cut=None):
+    """Forward dataflow to a fixpoint; returns {insn VA: facts before it}. `cut`: CFG edges
+    (last insn VA of the source block, successor start) to ignore."""
     blocks, succ = _blocks(bn, insns, lo, hi, extra_edges)
     if not blocks:
         return {}
@@ -1430,6 +1798,12 @@ def _dataflow(bn: _Bin, insns, lo, hi, extra_edges, entry_facts, on_access):
     first = min(blocks)
     fin[first] = dict(entry_facts)
     work = [first]
+    if cut:
+        # drop a cut edge only where its target has another way in: a block entered solely
+        # through the dispatch keeps that edge (it would otherwise never be reached)
+        kept = {t for st, ss in succ.items() for t in ss if (blocks[st][-1].address, t) not in cut}
+        succ = {st: [t for t in ss if (blocks[st][-1].address, t) not in cut or t not in kept]
+                for st, ss in succ.items()}
     visits = 0
     budget = 40 * len(blocks) + 100
     while work and visits < budget:
@@ -1514,6 +1888,8 @@ def analyze_function(b: _Bin, anchors, lo, hi):
             boundaries.add(c)
     sites = []
     entry = {r: ("p", f"arg{k}", 0) for k, r in enumerate(b.args)}
+    if b.x32:
+        entry = {"rsp": ("p", "sp", 0)}          # cdecl: the arguments are on the stack
     loads = [(i, w) for i in insns for w in [_is_state_load(b, i)] if w]
     if not loads:
         return []
@@ -1528,7 +1904,7 @@ def analyze_function(b: _Bin, anchors, lo, hi):
             if i.address in done:
                 continue
             f0 = pre.get(i.address) or {}
-            seed = {r: fv[1] for r, fv in f0.items() if fv[0] == "c"}
+            seed = {r: fv[1] for r, fv in f0.items() if isinstance(r, str) and fv[0] == "c"}
             runs = _try_dispatch(b, anchors, i.address, lo, hi, cls_cache, seed)
             if runs is None:
                 continue
@@ -1551,45 +1927,86 @@ def analyze_function(b: _Bin, anchors, lo, hi):
     # dataflow: where is each state field, and who writes it
     accesses = []
 
-    def on_access(ins, kind, root, off, width, val):
-        accesses.append((ins.address, kind, root, off, width, val))
+    def on_access(ins, kind, ptrs, width, vals, may):
+        accesses.append((ins.address, kind, tuple(ptrs), width,
+                         None if vals is None else frozenset(vals), may))
     at = _dataflow(b, insns, lo, hi, edges, entry, on_access)
     for s in sites:
         f = at.get(s["va"], {})
         ins = b.insn(s["va"])
         base, disp = _load_base(b, ins)
-        bf = ("p", "sp", 0) if base in ("rsp", "sp") else f.get(base)
+        bf = _sp_fact(b, f) if base in ("rsp", "sp") else f.get(base)
         if base is None:
             s["field"] = ("reg", disp, s["va"])         # a register: one machine per dispatch site
         elif bf and bf[0] == "p":
             s["field"] = (bf[1], bf[2] + disp)
         else:
-            s["field"] = ("?", disp, s["va"])          # unknown base: its own group
-    # group sites by field
+            s["field"] = ("?", disp, s["va"])          # unknown (or phi) base: its own group
+    # stack slot -> every value spilled there anywhere in the function (flow-insensitive)
+    spills = {}
+    for fa in at.values():
+        for k, v in fa.items():
+            if isinstance(k, tuple) and k[0] == "m":
+                spills.setdefault(k[1], set()).add(v)
+    # memory slot -> constants stored there (pointer-sized), for per-call-site dyn resolution
+    slot_consts = {}
+    for _a, kind, ptrs, w, vals, may in accesses:
+        if kind == "store" and w == b.ptr and vals and not may:
+            slot_consts.setdefault(ptrs[0], set()).update(vals)
+    # group sites by field, then split a group whose sites share no target at all: two inlined
+    # copies of one coroutine whose (overlapping) storage puts both states at the same offset
     groups = {}
     for s in sites:
         groups.setdefault(s["field"], []).append(s)
+    comps = []
+    for field, ss in groups.items():
+        ss.sort(key=lambda s: s["va"])
+        parent = list(range(len(ss)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        # any shared target (a resume block or a panic arm) = one coroutine dispatched from two
+        # code paths (e.g. tokio::select! polling a branch in rotating order) -> keep together
+        live = [set(s["targets"].values()) for s in ss]
+        for i in range(len(ss)):
+            for j in range(i + 1, len(ss)):
+                if live[i] & live[j]:
+                    parent[find(i)] = find(j)
+        by = {}
+        for i in range(len(ss)):
+            by.setdefault(find(i), []).append(ss[i])
+        for part in by.values():
+            comps.append((field, part, len(by) > 1))
     entry_order = _entry_order(b, lo, hi, {s["va"] for s in sites})
     machines = []
     all_sites = {s["va"] for s in sites}
-    for field, ss in groups.items():
-        ss.sort(key=lambda s: s["va"])
+    for field, ss, split in comps:
         width = ss[0]["width"]
-        writes = sorted({(a, val) for a, kind, root, off, w, val in accesses
-                         if kind in ("store", "rmw") and (root, off) == field[:2] and w == width})
+        writes = []
+        for a, kind, ptrs, w, vals, may in accesses:
+            if kind in ("store", "rmw") and w == width and field[:2] in ptrs:
+                may = may or len(ptrs) > 1
+                writes.append({"va": a, "values": None if vals is None else sorted(vals), "may": may})
+        writes.sort(key=lambda x: x["va"])
         main = max(ss, key=lambda s: len(s["targets"]))
         targets = dict(main["targets"])
-        consts = sorted({val for _a, val in writes if val is not None})
-        computed = any(val is None for _a, val in writes)
+        definite = sorted({x["values"][0] for x in writes
+                           if x["values"] and len(x["values"]) == 1 and not x["may"]})
+        computed = any(x["values"] is None and not x["may"] for x in writes)
         notes = []
+        if split:
+            notes.append("state field shared with another inlined copy (disjoint resume targets)")
         if field[0] == "reg":
             computed = True             # a promoted state: its write-backs are register moves
             notes.append(f"state kept in register {field[1]} (coroutine inlined into a loop)")
         n_states = max(targets) + 1
         # writes are the ground truth of which suspend states exist: extend a chain that stopped
         # early on a merged target, and cap a table read that ran past its end
-        if consts:
-            mx = max(consts)
+        if definite and not split:
+            mx = max(definite)
             if mx >= n_states and mx < _MAX_STATES:
                 for v in range(n_states, mx + 1):
                     r = _dispatch_run(b, main["va"], v, lo, hi, main["seed"])
@@ -1604,14 +2021,14 @@ def analyze_function(b: _Bin, anchors, lo, hi):
                     targets.pop(v, None)
                 notes.append("table entries past the highest written state dropped")
         n_states = max(targets) + 1
-        contradicted = any(v >= n_states for v in consts)
-        unseen = [v for v in range(3, n_states) if not any(val == v for _a, val in writes)]
-        consistent = not contradicted
+        seen_vals = {v for x in writes for v in (x["values"] or ())}
+        contradicted = any(v >= n_states for v in definite)
+        unseen = [v for v in range(3, n_states) if v not in seen_vals]
         if contradicted:
             check = "contradicted"
             notes.append("a state value written back is outside the recovered dispatch")
         elif unseen and not computed:
-            check = "partial"        # e.g. a pending write through a pointer phi (merged arms)
+            check = "partial"
         elif unseen:
             check = "computed"
         else:
@@ -1623,7 +2040,8 @@ def analyze_function(b: _Bin, anchors, lo, hi):
             "root": root, "offset": field[1] if root not in ("?", "reg") else None, "width": width,
             "register": field[1] if root == "reg" else None,
             "sites": ss, "targets": targets, "writes": writes, "computed_writes": computed,
-            "consistent": consistent, "check": check, "notes": notes, "location_va": loc,
+            "consistent": not contradicted, "check": check, "unseen": unseen, "notes": notes,
+            "location_va": loc,
             "first_seen": entry_order.get(min(s["va"] for s in ss), 1 << 30),
         })
     # primary = the machine reached first from the entry whose field hangs off an argument
@@ -1637,19 +2055,36 @@ def analyze_function(b: _Bin, anchors, lo, hi):
         if argm:
             prim = min(argm, key=lambda mm: mm["sites"][0]["va"])
     max_off = {}
-    for _a, _k, root, off, w, _v in accesses:
+    for _a, _k, ptrs, w, _v, may in accesses:
+        if may:
+            continue
+        root, off = ptrs[0]
         if root in ("arg0", "arg1") and off >= 0:
             max_off[root] = max(max_off.get(root, 0), off + w)
+    fresh_at = []
+
+    def fresh():
+        """Facts with the dispatch edges cut: what reaches a resume target on the path that set
+        the await up (a value carried around the executor loop joins away otherwise)."""
+        if not fresh_at:
+            cut = set()
+            for s_ in sites:
+                tg = set(s_["targets"].values())
+                for v_ in s_["targets"]:
+                    for pc in _dispatch_run(b, s_["va"], v_, lo, hi, s_["seed"]).path:
+                        cut |= {(pc, t_) for t_ in tg}
+            fresh_at.append(_dataflow(b, insns, lo, hi, edges, entry, None, cut))
+        return fresh_at[0]
     for mm in machines:
         mm["role"] = "poll" if mm is prim else "inlined"
         mm["min_size"] = max_off.get(mm["root"]) if mm is prim else None
         # suspend points: the first poll reached from each resume target
         sus = {}
+        own = {s["va"] for s in mm["sites"]}
         for v, t in sorted(mm["targets"].items()):
             if v < 3:
                 continue
-            others = all_sites - {s["va"] for s in mm["sites"]}
-            ev, _c = _walk(b, t, lo, hi, frozenset(others))
+            ev, _c = _walk(b, t, lo, hi, frozenset(all_sites - own))
             inner = {"kind": "inline_code"}      # the awaited future's poll was inlined here
             for e in ev:
                 if e[0] == "site":
@@ -1658,10 +2093,49 @@ def analyze_function(b: _Bin, anchors, lo, hi):
                 if e[0] == "call":
                     inner = dict(e[2])
                     break
+            via = inner.pop("via", None)
+            if inner["kind"] == "dyn" and via is not None and inner.get("slot_offset") == 3 * b.ptr:
+                cands, src = _dyn_candidates(b, via, at, fresh(), spills, slot_consts)
+                if cands:
+                    inner["vt_candidates"] = cands
+                    inner["vt_from"] = src
             sus[v] = {"resume": t, "inner": inner,
-                      "pending_writes": [a for a, val in mm["writes"] if val == v]}
+                      "pending_writes": [x["va"] for x in mm["writes"] if v in (x["values"] or ())]}
         mm["suspend"] = sus
     return machines
+
+
+def _dyn_candidates(b, via, at, at_fresh, spills, slot_consts):
+    """Valid `dyn Future` vtables that can reach the indirect poll call whose vtable pointer is
+    register via[1] at instruction via[0]. Tried in order of precision: the facts on the path that
+    set the await up (dispatch edges cut), the full fixpoint, then every value that register takes
+    anywhere in the function. Returns (sorted vtable VAs, how they were found)."""
+    def from_fact(fact):
+        out = set()
+        facts = [fact]
+        for r, k in (_ptrs(fact) or ()):
+            slot = _deref_slot(r)
+            if k == 0 and slot and slot[0] == "sp":
+                facts += list(spills.get(slot[1], ()))
+                out |= slot_consts.get(slot, set())
+        for fc in facts:
+            if _consts(fc):
+                out |= _consts(fc)
+            elif fc and fc[0] == "r":
+                out |= _ret_summary(b, fc[1], fc[2]) or set()
+        return {c for c in out if _vtable_at(b, c)}
+    fresh = from_fact(at_fresh.get(via[0], {}).get(via[1]))
+    if len(fresh) == 1:
+        return sorted(fresh), "setup path"
+    full = from_fact(at.get(via[0], {}).get(via[1]))
+    if full:
+        return sorted(full), "fixpoint"
+    if fresh:
+        return sorted(fresh), "setup path"
+    anyw = set()
+    for fa in at.values():
+        anyw |= from_fact(fa.get(via[1]))
+    return sorted(anyw), "register (flow-insensitive)"
 
 
 def _load_base(b, ins):
@@ -1719,19 +2193,66 @@ def _entry_order(b, lo, hi, sites):
 # ----------------------------------------------------------------------------------------------
 # whole binary
 # ----------------------------------------------------------------------------------------------
+# `<registry or vendor dir>/<crate>-<semver>/` in the panic-location paths every Rust binary keeps;
+# one bytes regex over the data sections replaces a full recover_rust_meta pass (its RE_CARGO shape)
+_RT_RE = re.compile(rb"(?:cargo[\\/]registry[\\/]src[\\/][^\\/\x00]{1,80}|[\\/]vendor)[\\/]("
+                    + b"|".join(re.escape(c.encode()) for c in RUNTIMES)
+                    + rb")-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)[\\/]")
+
+
 def _runtime(path, b):
-    found, versions = [], {}
-    try:
-        import recover_rust_meta
-        crates = recover_rust_meta.recover(Path(path)).get("crates", {})
-    except Exception:
-        crates = {}
-    for c in RUNTIMES:
-        if c in crates or c.replace("-", "_") in crates:
-            found.append(c)
-            versions[c] = crates.get(c) or crates.get(c.replace("-", "_")) or []
-    return {"detected": found, "versions": versions,
-            "note": None if found else "no known runtime crate (hand-written executor or stripped paths)"}
+    found = {}
+    for _va, raw, ex, _nm in b.secs:
+        if ex:
+            continue
+        for m in _RT_RE.finditer(raw):
+            found.setdefault(m.group(1).decode(), set()).add(m.group(2).decode())
+    det = [c for c in RUNTIMES if c in found]
+    return {"detected": det, "versions": {c: sorted(found[c]) for c in det},
+            "note": None if det else "no known runtime crate (hand-written executor or stripped paths)"}
+
+
+_ALIGNS = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096}
+
+
+def _vtable_at(b: _Bin, va):
+    """A `dyn Future` vtable header at `va`: [drop_in_place|0, size, align, poll, ...] with drop and
+    poll in code and a sane size/align -> {"va", "size", "align", "poll"}, else None."""
+    if va is None or not b.is_data(va):
+        return None
+    drop, size, align, poll = (b.read_ptr(va + i * b.ptr) for i in range(4))
+    if None in (size, align, poll) or not (b.lo <= poll < b.hi):
+        return None
+    if drop and not (b.lo <= drop < b.hi):
+        return None
+    if align not in _ALIGNS or size > (1 << 20) or size % align:
+        return None
+    return {"va": va, "size": size, "align": align, "poll": poll}
+
+
+def _vtables_for_polls(b: _Bin, polls: set) -> dict:
+    """poll fn -> the dyn Future vtable whose slot 3 is it (a boxed coroutine's vtable): found by
+    looking up pointer slots holding a poll address (relocations, then raw words), not by
+    recovering every vtable in the binary."""
+    out = {}
+    slots = [va for va, v in b.img.patches.items() if (v & _mask(8 * b.ptr)) in polls]
+    if not slots:
+        for base, raw, ex, _nm in b.secs:
+            if ex:
+                continue
+            for p in polls:
+                vv = p + (b.img.imagebase if b.pe else 0)
+                pat = vv.to_bytes(b.ptr, "little")
+                o = raw.find(pat)
+                while o != -1:
+                    if o % b.ptr == 0:
+                        slots.append(base + o)
+                    o = raw.find(pat, o + 1)
+    for slot in slots:
+        vt = _vtable_at(b, slot - 3 * b.ptr)
+        if vt and vt["poll"] in polls:
+            out.setdefault(vt["poll"], vt)
+    return out
 
 
 def recover(path) -> dict:
@@ -1768,29 +2289,40 @@ def recover(path) -> dict:
             machines.extend(analyze_function(b, anchors, lo, hi))
         except Exception as e:      # one odd function must not sink the rest
             res.setdefault("errors", []).append({"function": lo, "error": f"{type(e).__name__}: {e}"})
-    # vtables: a boxed coroutine's dyn Future vtable gives its size; resolves dyn awaits
+    # vtables: a boxed coroutine's dyn Future vtable gives its size; resolves dyn awaits. Read
+    # directly (header [drop, size, align, poll]) only where needed -- no whole-binary vtable scan
     poll_by_fn = {mm["function"]: mm for mm in machines if mm["role"] == "poll"}
-    vt_by_poll, vt_by_va = {}, {}
-    if poll_by_fn:
-        try:
-            import recover_types
-            for vt in recover_types.recover(path)["vtables"]:
-                if vt["methods"] and vt["methods"][0] in poll_by_fn:
-                    vt_by_poll.setdefault(vt["methods"][0], vt)
-                    vt_by_va[vt["va"]] = vt
-        except Exception:
-            pass
+    vt_by_poll = _vtables_for_polls(b, set(poll_by_fn)) if poll_by_fn else {}
     fn_refs = {}
 
     def refs_of(fn_lo, fn_hi):
+        """Valid dyn Future vtables a function materializes (the function-level fallback)."""
         if fn_lo not in fn_refs:
-            fn_refs[fn_lo] = {c for i in b.sweep(fn_lo, fn_hi) for c in [_const_of(b, i)] if c in vt_by_va}
+            vs = {c for i in b.sweep(fn_lo, fn_hi) for c in [_const_of(b, i)] if c is not None}
+            fn_refs[fn_lo] = sorted(c for c in vs if _vtable_at(b, c))
         return fn_refs[fn_lo]
 
     out, ids = [], {}
     for n, mm in enumerate(machines):
         ids[id(mm)] = f"m{n}"
     site_owner = {s["va"]: mm for mm in machines for s in mm["sites"]}
+    # a suspend state with no write-back is expected when the future awaited there can never be
+    # Pending (an inlined coroutine with no await of its own, e.g. tokio's async_trace_leaf):
+    # LLVM deletes the dead store
+    for mm in machines:
+        if mm["check"] != "partial":
+            continue
+        never = []
+        for v in mm["unseen"]:
+            inner = mm["suspend"].get(v, {}).get("inner", {})
+            other = site_owner.get(inner.get("site")) if inner.get("kind") == "inlined" else \
+                (poll_by_fn.get(inner.get("target")) if inner.get("kind") == "direct" else None)
+            if other is not None and not other["suspend"]:
+                never.append(v)
+        if never and len(never) == len(mm["unseen"]):
+            mm["check"] = "confirmed"
+            mm["notes"].append(f"state(s) {never} never written: the future awaited there has no "
+                               "suspend point, so it is never Pending")
     nesting = []
     for mm in machines:
         mid = ids[id(mm)]
@@ -1812,13 +2344,25 @@ def recover(path) -> dict:
                         inner["machine"] = to = ids[id(pm)]
                 elif inner["kind"] == "dyn":
                     inner["dyn_future_poll"] = inner.get("slot_offset") == 3 * b.ptr
+                    raw = inner.pop("vt_candidates", None)
                     if inner["dyn_future_poll"]:
-                        cand = [vt_by_va[r] for r in refs_of(mm["function"], mm["function_end"])]
-                        if len(cand) == 1:
-                            pm = poll_by_fn.get(cand[0]["methods"][0])
-                            inner["vtable"] = cand[0]["va"]
-                            if pm is not None:
-                                inner["machine"] = to = ids[id(pm)]
+                        if raw is None:      # nothing reached the call site: any vtable the fn uses
+                            raw = refs_of(mm["function"], mm["function_end"])
+                            inner["vt_from"] = "function"
+                        cands = []
+                        for va in raw:
+                            vt = _vtable_at(b, va)
+                            if vt:
+                                pm = poll_by_fn.get(vt["poll"])
+                                cands.append({"vtable": va, "poll": vt["poll"], "size": vt["size"],
+                                              "machine": ids[id(pm)] if pm is not None else None})
+                        if len(cands) == 1:
+                            inner["vtable"] = cands[0]["vtable"]
+                            inner["target"] = cands[0]["poll"]
+                            if cands[0]["machine"]:
+                                inner["machine"] = to = cands[0]["machine"]
+                        elif cands:
+                            inner["candidates"] = cands      # ambiguous: every vtable that may reach it
                 st["inner"] = inner
                 st["pending_writes"] = sp["pending_writes"]
                 nesting.append({"from": mid, "state": v, "via": inner["kind"],
@@ -1832,6 +2376,8 @@ def recover(path) -> dict:
         if mm["role"] == "poll" and root == "arg1":
             base = "self"
         vt = vt_by_poll.get(mm["function"]) if mm["role"] == "poll" else None
+        if vt:
+            vt = {"size": vt["size"], "align": vt["align"]}
         loc = _location(b, mm["location_va"]) if mm["location_va"] else None
         out.append({
             "id": mid, "function": mm["function"], "role": mm["role"],
@@ -1842,7 +2388,9 @@ def recover(path) -> dict:
                           "targets": {str(k): t for k, t in sorted(s["targets"].items())}}
                          for s in mm["sites"]],
             "states": states, "suspend_points": len(mm["suspend"]),
-            "state_writes": [{"va": a, "value": val} for a, val in mm["writes"]],
+            "state_writes": [{"va": x["va"], "value": x["values"][0] if x["values"] and len(x["values"]) == 1
+                              and not x["may"] else None, "values": x["values"], "may": x["may"]}
+                             for x in mm["writes"]],
             "validated": mm["consistent"], "writes_check": mm["check"], "notes": mm["notes"],
             "source": loc,
             "size": {"vtable": vt["size"] if vt else None, "align": vt["align"] if vt else None,
@@ -1996,7 +2544,7 @@ def _selftest():
     assert m["sites"][0]["kind"] == "jump_table"
     assert m["suspend"][3]["inner"] == {"kind": "direct", "target": inner1}
     assert m["suspend"][4]["inner"]["target"] == inner2
-    assert m["consistent"] and [v for _a, v in m["writes"]] == [3, 4, 1]
+    assert m["consistent"] and [x["values"] for x in m["writes"]] == [[3], [4], [1]]
 
     # --- AArch64: the compare-chain form (cmp/b.gt/cbnz) ---
     A = []
@@ -2059,8 +2607,32 @@ def _selftest():
     assert m["field"] == ("arg0", 0x38) and m["sites"][0]["kind"] == "compare_chain", m
     assert m["targets"] == {0: s0, 1: l_ret, 2: l_pois, 3: l_s3}, m["targets"]
     assert m["suspend"][3]["inner"] == {"kind": "direct", "target": inner}
-    assert m["consistent"] and [v for _a, v in m["writes"]] == [3]
+    assert m["consistent"] and [x["values"] for x in m["writes"]] == [[3]]
     assert load == m["sites"][0]["va"]
+
+    # --- a pending write through a pointer phi: x21 = self+0x51 on one path, self+0xe9 on the
+    # other, one shared `strb w8, [x21]` -- the store must be attributed to both fields (may)
+    P = []
+
+    def pa(w):
+        P.append(w)
+        return 0x6000 + 4 * (len(P) - 1)
+    c0 = pa(0)                                     # cbz x2, L1
+    pa(0x91014415)                                 # add x21, x0, #0x51
+    b0 = pa(0)                                     # b L2
+    l1 = pa(0x9103a415)                            # L1: add x21, x0, #0xe9
+    l2 = pa(0x52800068)                            # L2: mov w8, #3
+    st_ = pa(0x390002a8)                           # strb w8, [x21]
+    pa(0xd65f03c0)                                 # ret
+    P[(c0 - 0x6000) // 4] = 0xb4000000 | (((l1 - c0) >> 2) << 5) | 2
+    P[(b0 - 0x6000) // 4] = 0x14000000 | ((l2 - b0) >> 2)
+    fp = FakeBin(True, struct.pack(f"<{len(P)}I", *P), 0x6000, b"\x00" * 8, 0x9000)
+    acc = []
+    _dataflow(fp, fp.sweep(0x6000, fp.hi), 0x6000, fp.hi, {}, {"x0": ("p", "arg0", 0)},
+              lambda ins, kind, ptrs, w, vals, may: acc.append((ins.address, kind, ptrs, w, vals, may)))
+    assert acc == [(st_, "store", [("arg0", 0x51), ("arg0", 0xe9)], 1, {3}, True)], acc
+    assert _join({"x1": ("c", 3)}, {"x1": ("c", 4)}) == {"x1": ("cs", frozenset({3, 4}))}
+    assert _join({"x1": ("c", 3)}, {}) == {}
     print("selftest OK")
 
 

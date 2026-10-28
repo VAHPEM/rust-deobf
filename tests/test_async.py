@@ -107,9 +107,9 @@ def _aarch64_target():
         return False
 
 
-def _build(tmp_path, target=None):
+def _build(tmp_path, target=None, program=None):
     src = tmp_path / "hand.rs"
-    src.write_text(PROGRAM.lstrip("\n"))
+    src.write_text((program or PROGRAM).lstrip("\n"))
     out = tmp_path / ("hand_" + (target or "host"))
     cmd = ["rustc", "--edition", "2021", "-O", "-C", "strip=symbols", str(src), "-o", str(out)]
     if target:
@@ -137,9 +137,10 @@ def _check(res, arch):
         assert m["validated"], m["notes"]
         assert {"0", "1", "2"} <= set(m["states"])
         assert m["states"]["1"]["name"] == "Returned" and m["states"]["2"]["name"] == "Panicked"
-    # leaf is inlined three times (into middle, looper and the async block), the rest once
+    # leaf is inlined four times (twice into middle, into looper and into the async block), the
+    # rest once; middle's two copies share one state field but no resume target -> two machines
     count = {ln: sum(m["source"]["line"] == ln for m in ms) for ln in AWAITS}
-    assert count[_line("async fn leaf")] == 3 and len(ms) == 8, count
+    assert count[_line("async fn leaf")] == 4 and len(ms) == 9, count
     # the two coroutines emitted as their own functions are poll functions with self-relative state
     polls = [m for m in ms if m["role"] == "poll"]
     assert {m["source"]["line"] for m in polls} == {_line("async fn middle"), _line("Box::pin(async move")}
@@ -151,10 +152,14 @@ def _check(res, arch):
     inner = boxed["states"]["3"]["inner"]
     assert inner["kind"] == "direct" and inner.get("machine") == middle["id"], inner
     assert boxed["size"]["vtable"] and boxed["size"]["vtable"] >= boxed["size"]["min_from_accesses"]
-    # middle -> two inlined leaf awaits
+    # middle -> two inlined leaf awaits, each its own copy of leaf's machine at the same offset
+    leafs = []
     for k in ("3", "4"):
         i = middle["states"][k]["inner"]
         assert i["kind"] == "inlined" and by_id[i["machine"]]["source"]["line"] == _line("async fn leaf")
+        leafs.append(by_id[i["machine"]])
+    assert leafs[0]["id"] != leafs[1]["id"]
+    assert leafs[0]["state_field"] == leafs[1]["state_field"]
     # top (inlined into block_on/main): middle direct, looper inlined, boxed through the dyn vtable
     top = next(m for m in ms if m["source"]["line"] == _line("async fn top"))
     kinds = [top["states"][str(k)]["inner"] for k in range(3, 7)]
@@ -184,6 +189,81 @@ def test_hand_executor_aarch64(tmp_path):
     if platform.machine().lower() in ("aarch64", "arm64"):
         pytest.skip("host build already covers AArch64")
     _check(RA.recover(_build(tmp_path, "aarch64-unknown-linux-musl")), "aarch64")
+
+
+DYN2 = r"""
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+struct YieldNow(bool);
+impl Future for YieldNow {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.0 { Poll::Ready(()) } else { self.0 = true; cx.waker().wake_by_ref(); Poll::Pending }
+    }
+}
+
+#[inline(never)]
+fn first(n: u64) -> Pin<Box<dyn Future<Output = u64>>> {
+    Box::pin(async move { YieldNow(false).await; n.wrapping_mul(7) })
+}
+
+#[inline(never)]
+fn second(n: u64) -> Pin<Box<dyn Future<Output = u64>>> {
+    Box::pin(async move { YieldNow(false).await; YieldNow(false).await; n ^ 0x99 })
+}
+
+async fn both(n: u64) -> u64 {
+    let a = first(n).await;
+    let b = second(a).await;
+    let c = first(b).await;
+    a ^ b ^ c
+}
+
+fn noop_raw() -> RawWaker {
+    fn clone(_: *const ()) -> RawWaker { noop_raw() }
+    fn noop(_: *const ()) {}
+    static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    RawWaker::new(std::ptr::null(), &VT)
+}
+
+fn block_on<F: Future>(fut: F) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    let waker = unsafe { Waker::from_raw(noop_raw()) };
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) { return v; }
+    }
+}
+
+fn main() {
+    let n = std::env::args().count() as u64 + 2;
+    println!("{}", block_on(both(n)));
+}
+"""
+
+
+@pytest.mark.skipif(not shutil.which("rustc"), reason="rustc not available")
+@pytest.mark.parametrize("target", [None, "aarch64-unknown-linux-musl"])
+def test_dyn_await_resolved_per_call_site(tmp_path, target):
+    """One coroutine awaits two different `Pin<Box<dyn Future>>` types through the same vtable
+    slot: each await resolves to its own boxed coroutine (first, second, first) -- not "ambiguous
+    because the function references two vtables"."""
+    if target and not _aarch64_target():
+        pytest.skip("aarch64-unknown-linux-musl target not installed")
+    exe = _build(tmp_path, target, DYN2)
+    res = RA.recover(exe)
+    by_line = {m["source"]["line"]: m for m in res["machines"]}
+    lines = DYN2.lstrip("\n").splitlines()
+    ln = {k: next(i for i, t in enumerate(lines, 1) if k in t) for k in
+          ("n.wrapping_mul(7)", "n ^ 0x99", "async fn both")}
+    first_m, second_m = by_line[ln["n.wrapping_mul(7)"]], by_line[ln["n ^ 0x99"]]
+    both = by_line[ln["async fn both"]]
+    got = [both["states"][str(k)]["inner"] for k in (3, 4, 5)]
+    assert all(i["kind"] == "dyn" and i["dyn_future_poll"] for i in got), got
+    assert [i.get("machine") for i in got] == [first_m["id"], second_m["id"], first_m["id"]], got
+    assert first_m["size"]["vtable"] and second_m["size"]["vtable"]
 
 
 def test_no_async_no_machines(tmp_path):
