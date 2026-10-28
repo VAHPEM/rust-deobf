@@ -88,13 +88,13 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_apihash.py` | resolve hash-obfuscated API imports (Tier 2) |
 | `recover_imports.py` | PE import reconstruction: IAT map + bind indirect call sites to API names; flag runtime resolution (post-unpack) |
 | `recover_crypto.py` | identify crypto primitives by their constants |
-| `recover_cfg.py` | resolved call graph + code-coverage metric (`_import_sites`/`_indirect`) |
+| `recover_cfg.py` | resolved call graph + code-coverage metric (`_import_sites`/`_indirect`); x86/x86-64/AArch64, PLT/`.plt.sec`/IAT stubs + tail calls resolved, recursive-descent start seeding when metadata has none (stripped PE32) |
 | `recover_behavior.py` | per-function behavior/capability map from imports |
 | `recover_lang.py` | per-function source-language map (mixed-language binaries) |
 | `detect_vm.py` | flag functions hidden behind a bytecode VM |
 | `recover_dynamic.py` / `recover_artifacts.py` | Frida runtime memory-diff recovery |
 | `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals (dynamic, runs the sample) |
-| `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub, carve write-then-executed stage-2 (no host execution; `--entry` to aim at the unpack routine) |
+| `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub (x86-64/x86/AArch64, ELF incl. section-less, PE with headers + import stubs), report the OEP, carve stage-2, and the import table the stub rebuilt + stage-2 call sites bound to it (no host execution; `--entry`, `--follow`) |
 | `unpack.py` | Tier 2: one unpacking command — static (unpack_emulate) first + PE-stage carve; dynamic (dump_unpacked/Frida) only as opt-in fallback behind `--i-understand-this-executes`. Nothing runs a sample by default. |
 
 ### scripts/ — Rust & Go tiers

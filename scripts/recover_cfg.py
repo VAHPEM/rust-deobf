@@ -71,7 +71,10 @@ def _stub_import(img, va, cache):
                 o += 1
             if b[o:o + 2] == b"\xff\x25" and len(b) >= o + 6:
                 d = struct.unpack("<i", b[o + 2:o + 6])[0]
-                slot = (d & 0xffffffff) if img.x32 else va + o + 6 + d
+                if img.x32:   # jmp [abs32]: an absolute VA; the image's space is RVA on PE
+                    slot = (d & 0xffffffff) - (getattr(img, "imagebase", 0) if getattr(img, "pe", False) else 0)
+                else:
+                    slot = va + o + 6 + d
     except Exception:
         slot = None
     cache[va] = slot
@@ -115,6 +118,18 @@ def _disasm_calls(img, starts):
         return v is not None and TRAMP <= v < TRAMP + 16 * len(img.tramp)
 
     stub_cache = {}
+
+    def mem_slot(insn, op):
+        """The GOT/IAT slot a `call/jmp [mem]` reads, in the image's own address space (PE: RVA),
+        or None when the operand is not a fixed slot. x86-64: [rip+disp]; x86-32: [abs32], which on
+        PE is an absolute VA (subtract the image base) and on non-PIE ELF already a VA."""
+        if op.mem.index != 0:
+            return None
+        if op.mem.base in (_X86_RIP, _X86_EIP):
+            return insn.address + insn.size + op.mem.disp
+        if op.mem.base == 0 and img.x32:
+            return ((op.mem.disp & 0xffffffff) - (img.imagebase if img.pe else 0))
+        return None
 
     def direct_target(t, s, ed, imps, tail):
         """Classify a direct branch target. `tail`: a b/jmp (only a jump to ANOTHER function's start
@@ -200,14 +215,9 @@ def _disasm_calls(img, starts):
                     op = insn.operands[0]
                     if op.type == _X86_IMM:
                         direct_target(op.imm & 0xffffffffffffffff, s, ed, imps, tail=True)
-                    elif op.type == _X86_MEM and op.mem.index == 0:
+                    elif op.type == _X86_MEM:
                         # tail call through a GOT/IAT slot: jmp [rip+slot] (x86-64) / jmp [abs] (x86)
-                        if op.mem.base in (_X86_RIP, _X86_EIP):
-                            slot = insn.address + insn.size + op.mem.disp
-                        elif op.mem.base == 0 and img.x32:
-                            slot = op.mem.disp & 0xffffffff
-                        else:
-                            slot = None
+                        slot = mem_slot(insn, op)
                         if slot is not None and is_tramp(img.patches.get(slot)):
                             imps.append(import_name(img.patches[slot]))
                     continue
@@ -216,11 +226,9 @@ def _disasm_calls(img, starts):
                     from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_RIP, X86_REG_EIP
                     if op.type == X86_OP_IMM:
                         direct_target(op.imm & 0xffffffffffffffff, s, ed, imps, tail=False)
-                    elif op.type == X86_OP_MEM and op.mem.base in (X86_REG_RIP, X86_REG_EIP) \
-                            and op.mem.index == 0:
-                        slot = insn.address + insn.size + op.mem.disp
-                        v = img.patches.get(slot)
-                        if v is not None and TRAMP <= v < TRAMP + 16 * len(img.tramp):
+                    elif op.type == X86_OP_MEM and mem_slot(insn, op) is not None:
+                        v = img.patches.get(mem_slot(insn, op))
+                        if is_tramp(v):
                             imps.append(import_name(v))
                         else:
                             ind += 1
@@ -245,11 +253,74 @@ def _disasm_calls(img, starts):
     return edges, import_sites, indirect, taken, vtref
 
 
+def _branch_target(op_str):
+    """Direct branch target from a capstone operand string: the last operand, as an immediate
+    (x86 `0x401000`, AArch64 `#0x1000`, `x0, #0x1000`, `w0, #3, #0x1000`); -1 when indirect."""
+    tok = op_str.split(",")[-1].strip().lstrip("#")
+    try:
+        return int(tok, 0)
+    except ValueError:
+        return -1
+
+
 def _imm(op_str):
     try:
         return int(op_str.split("#", 1)[1].split(",")[0].strip(), 0)
     except Exception:
         return -1
+
+
+_SEED_MAX_FUNCS = 20000
+_SEED_MAX_INSNS = 2_000_000
+
+
+def _seed_starts(img, starts, ep):
+    """Recursive descent from the entry point along direct calls, for binaries whose metadata gives
+    few or no function starts (a stripped 32-bit PE has no .pdata and no symbols). Within a function
+    it follows conditional-branch targets past a `ret`/`jmp`, so multi-exit functions are covered;
+    every `call rel` / `bl` target inside the code region is a new function. Bounded in functions and
+    instructions. Returns the set of discovered starts (including `ep`)."""
+    from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_MODE_32, CS_MODE_64, CS_MODE_LITTLE_ENDIAN
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN) if img.arm else \
+        Cs(CS_ARCH_X86, CS_MODE_32 if img.x32 else CS_MODE_64)
+    lo, hi, code = img.text_va, img.text_end, img.code
+    found = set(starts)
+    work = [ep] if ep is not None and lo <= ep < hi else []
+    work += sorted(starts)
+    seen_fn, budget = set(), _SEED_MAX_INSNS
+    while work and budget > 0 and len(found) < _SEED_MAX_FUNCS:
+        fn = work.pop()
+        if fn in seen_fn or not (lo <= fn < hi):
+            continue
+        seen_fn.add(fn)
+        found.add(fn)
+        pending, done = [fn], set()
+        while pending and budget > 0:
+            pc = pending.pop()
+            if pc in done or not (lo <= pc < hi):
+                continue
+            for insn in md.disasm(code[pc - lo:min(hi - lo, pc - lo + 0x4000)], pc):
+                budget -= 1
+                if insn.address in done:
+                    break
+                done.add(insn.address)
+                m = insn.mnemonic
+                tgt = _branch_target(insn.op_str)
+                if m in ("call", "bl"):
+                    if lo <= tgt < hi and tgt not in seen_fn:
+                        work.append(tgt)
+                elif m.startswith("j") and m != "jmp" or m.startswith("b.") or m in (
+                        "cbz", "cbnz", "tbz", "tbnz", "loop", "jecxz", "jrcxz"):
+                    if lo <= tgt < hi:
+                        pending.append(tgt)
+                elif m in ("ret", "retn", "jmp", "b", "br", "ud2", "int3", "hlt", "brk"):
+                    if m in ("jmp", "b") and lo <= tgt < hi:
+                        if fn <= tgt < fn + 0x10000:
+                            pending.append(tgt)   # an in-function jump (loops jump back >= fn)
+                        elif tgt not in seen_fn:
+                            work.append(tgt)      # a jump before the function's start: a tail call
+                    break
+    return found
 
 
 def build(path) -> dict:
@@ -259,6 +330,17 @@ def build(path) -> dict:
     b = img.binary
     starts = sorted(a for a in gen_runtime_sigs.function_starts(b)
                     if img.text_va <= a < img.text_end)
+    try:
+        ep0 = b.entrypoint - (img.imagebase if img.pe else 0)
+    except Exception:
+        ep0 = None
+    seeded = 0
+    # metadata gave (almost) nothing -- e.g. a stripped PE32 (no .pdata, no symbols), a hand-built or
+    # packed binary: discover starts by recursive descent from the entry point
+    if len(starts) < 8 or (img.pe and img.x32):
+        more = _seed_starts(img, starts, ep0)
+        seeded = len(more) - len(starts)
+        starts = sorted(more)
     edges, import_sites, indirect, taken, vtref = _disasm_calls(img, starts)
     startset = set(starts)
 
@@ -269,6 +351,9 @@ def build(path) -> dict:
 
     # dynamic-dispatch edges from recovered vtables: a function that takes a vtable's address can
     # reach that vtable's methods (dyn Trait dispatch), so add those edges + mark methods reachable.
+    # the direct call graph, before dynamic-dispatch edges are merged in (the naive baseline and the
+    # `direct_edges` count are measured on this)
+    direct = {k: set(v) for k, v in edges.items()}
     dispatch_edges = 0
     vtable_methods = set()
     try:
@@ -284,20 +369,22 @@ def build(path) -> dict:
                 vt = by_va.get(r)
                 if vt:
                     for m in vt["methods"]:
-                        if m in startset:
-                            edges.setdefault(fn, set()).add(m)
-                            dispatch_edges += 1
+                        if m in startset and m not in edges.setdefault(fn, set()):
+                            edges[fn].add(m)
+                            dispatch_edges += 1     # only edges the direct graph did not have
     except Exception:
         by_va = {}
 
     # roots: entry, exported functions, and every address-taken function (incl. main, callbacks,
     # vtable methods). These are where execution can actually start / be entered.
     roots = set()
+    # LIEF gives a PE's entry point as an absolute VA, while .text / function starts are RVAs
     try:
-        if img.text_va <= b.entrypoint < img.text_end:
-            roots.add(b.entrypoint)
+        ep = b.entrypoint - (img.imagebase if img.pe else 0)
     except Exception:
-        pass
+        ep = None
+    if ep is not None and img.text_va <= ep < img.text_end:
+        roots.add(ep)
     try:
         for s in b.symbols:
             va = gen_runtime_sigs.sym_va(b, s)
@@ -311,8 +398,8 @@ def build(path) -> dict:
 
     reachable = _bfs(roots, edges)
     # the naive baseline: direct edges from the entry point only
-    entry_roots = {b.entrypoint} if (hasattr(b, "entrypoint") and b.entrypoint in startset) else set()
-    base_reach = _bfs(entry_roots, {k: {e for e in v} for k, v in edges.items()}) if entry_roots else set()
+    entry_roots = {ep} if ep in startset else set()
+    base_reach = _bfs(entry_roots, direct) if entry_roots else set()
 
     total = len(starts)
     n_import_sites = sum(len(v) for v in import_sites.values())
@@ -321,7 +408,8 @@ def build(path) -> dict:
     return {
         "format": img.fmt, "arch": ("aarch64" if img.arm else ("x86" if img.x32 else "x86_64")),
         "functions_total": total,
-        "direct_edges": sum(len(v) for v in edges.values()),
+        "functions_seeded": seeded,
+        "direct_edges": sum(len(v) for v in direct.values()),
         "dispatch_edges": dispatch_edges,
         "vtables": len(by_va),
         "import_call_sites": n_import_sites,
@@ -410,6 +498,27 @@ def _selftest():
     # x86-32: jmp [abs32]
     th32 = b"\xff\x25" + struct.pack("<I", 0x40a000) + b"\xcc" * 10
     assert _stub_import(_Img(False, True, {0x401000: th32}), 0x401000, {}) == 0x40a000
+    assert _branch_target("0x401000") == 0x401000 and _branch_target("x0, #0x1000") == 0x1000
+    assert _branch_target("w0, #3, #0x1a0") == 0x1a0 and _branch_target("qword ptr [rip + 0x10]") == -1
+    assert _branch_target("rax") == -1
+    # recursive descent seeds function starts from the entry when metadata has none (stripped PE32):
+    #   1000: call 1010 ; 1005: je 100c ; 1007: ret ; ... 100c: call 1020 ; 1011? -- built below
+    code = bytes.fromhex("e80b000000"      # 1000 call 0x1010
+                         "7403"            # 1005 je   0x100a
+                         "c3"              # 1007 ret
+                         "9090"            # 1008 pad
+                         "e811000000"      # 100a call 0x1020   (only reachable past the ret)
+                         "c3"              # 100f ret
+                         "31c0c3"          # 1010 xor eax,eax ; ret
+                         + "90" * 13 +     # 1013..101f
+                         "b801000000c3")   # 1020 mov eax,1 ; ret
+    _seed_img = _Img(False, False, {})
+    _seed_img.text_va, _seed_img.text_end, _seed_img.code = 0x1000, 0x1000 + len(code), code
+    assert _seed_starts(_seed_img, [], 0x1000) == {0x1000, 0x1010, 0x1020}
+    # an entry stub that only tail-jumps backwards (mingw/lld PE32 `jmp main`) reaches the callee
+    stub = code + bytes.fromhex("e9" + (0x1000 - (0x1000 + len(code) + 5) & 0xffffffff).to_bytes(4, "little").hex())
+    _seed_img.code, _seed_img.text_end = stub, 0x1000 + len(stub)
+    assert 0x1000 in _seed_starts(_seed_img, [], 0x1000 + len(code))
     # a W write invalidates the X register it aliases
     assert _arm_xreg("w5") == "x5" and _arm_xreg("x5") == "x5" and _arm_xreg("wzr") == "wzr"
     print("selftest OK: reachability BFS, address-taken root coverage-lift, dispatch-edge reach, "

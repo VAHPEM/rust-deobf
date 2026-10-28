@@ -101,10 +101,26 @@ def run_frida(path: Path, argv, timeout, outdir: Path):
     except ImportError:
         sys.exit("frida not installed: pip install frida frida-tools")
     outdir.mkdir(parents=True, exist_ok=True)
-    dumps, done = [], {"v": False}
     dev = frida.get_local_device()
-    pid = dev.spawn([str(path)] + argv)
-    sess = dev.attach(pid)
+    pid = dev.spawn([str(Path(path).resolve())] + list(argv))
+    sess = None
+    try:
+        sess = dev.attach(pid)
+        return _drive(dev, pid, sess, outdir, timeout)
+    finally:
+        # always detach and kill the spawned sample -- including when attach/load/the wait raises,
+        # which used to leave a suspended process behind
+        for fn in ((sess.detach if sess is not None else None), lambda: dev.kill(pid)):
+            if fn is None:
+                continue
+            try:
+                fn()
+            except Exception:
+                pass
+
+
+def _drive(dev, pid, sess, outdir: Path, timeout):
+    dumps, done = [], {"v": False}
     scr = sess.create_script(FRIDA_JS)
 
     def on_msg(msg, data):
@@ -123,9 +139,6 @@ def run_frida(path: Path, argv, timeout, outdir: Path):
     t0 = time.time()
     while time.time() - t0 < timeout and not done["v"]:
         time.sleep(0.1)
-    for fn in (sess.detach, lambda: dev.kill(pid)):
-        try: fn()
-        except Exception: pass
     return dumps
 
 

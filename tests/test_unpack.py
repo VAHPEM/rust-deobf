@@ -28,7 +28,12 @@ def test_selftest():
 def test_positive_on_real_packed_elf():
     res = U.recover(PACKED)
     assert res["arch"] == "x86_64"
-    assert res["stopped"] == "ret"               # stage-2 ret pops the sentinel: a clean finish
+    # by default emulation stops at the first jump into unpacked code: that address is the OEP
+    assert res["stopped"] == "oep", res["stopped"]
+    carved_va = [r for r in res["_regions"] if r["executed"]][0]["va"]
+    assert res["oep"] == carved_va
+    # --follow keeps going: stage-2's `ret` pops the sentinel, a clean finish
+    assert U.recover(PACKED, follow=True)["stopped"] == "ret"
     assert res["unpacked_detected"] is True
     execd = [r for r in res["unpacked"] if r["executed"]]
     assert execd, res["unpacked"]

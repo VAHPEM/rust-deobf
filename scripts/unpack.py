@@ -41,13 +41,14 @@ def _stages_from_regions(regions):
     return stages
 
 
-def recover(path, entry=None, dynamic=False, ack=False, argv=None, timeout=10.0, outdir=None):
+def recover(path, entry=None, dynamic=False, ack=False, argv=None, timeout=10.0, outdir=None,
+            follow=False):
     """Static-first unpacking. Returns {static, stages, dynamic, recommendation}.
 
     `dynamic` + `ack` are required together to run the sample; without the ack the dynamic branch
     refuses (it executes the target). `_regions` is kept for --dump and stripped from --json.
     """
-    static = unpack_emulate.recover(path, entry)
+    static = unpack_emulate.recover(path, entry, follow=follow)
     regions = static.pop("_regions", [])
     stages = _stages_from_regions(regions)
     out = {
@@ -57,8 +58,16 @@ def recover(path, entry=None, dynamic=False, ack=False, argv=None, timeout=10.0,
         "recommendation": "",
         "_regions": regions,
     }
+    if static.get("error"):
+        out["recommendation"] = f"static emulation could not run: {static['error']}"
+        if not (dynamic and ack):
+            return out
     if static["unpacked_detected"]:
-        out["recommendation"] = "static unpacking succeeded; stage-2 carved by emulation"
+        oep = static.get("oep")
+        out["recommendation"] = ("static unpacking succeeded; stage-2 carved by emulation"
+                                 + (f", original entry point at RVA 0x{oep:x}" if oep is not None else "")
+                                 + (f", {len(static.get('rebuilt_imports', []))} imports rebuilt by the "
+                                    "stub" if static.get("rebuilt_imports") else ""))
         return out
     if not dynamic:
         out["recommendation"] = (
@@ -72,7 +81,12 @@ def recover(path, entry=None, dynamic=False, ack=False, argv=None, timeout=10.0,
         return out
     # dynamic fallback: this RUNS the target (Frida). Caller has acknowledged isolation.
     od = Path(outdir or "unpacked_dumps")
-    dumps = dump_unpacked.run_frida(Path(path), argv or [], timeout, od)
+    try:
+        dumps = dump_unpacked.run_frida(Path(path).resolve(), argv or [], timeout, od)
+    except (Exception, SystemExit) as e:          # no frida, spawn/attach failure: report as JSON
+        out["dynamic"] = {"error": f"dynamic dump failed: {e}"}
+        out["recommendation"] = "dynamic fallback failed; see dynamic.error"
+        return out
     dyn_stages = []
     for d in dumps:
         blob = Path(d).read_bytes()
@@ -89,8 +103,13 @@ def recover(path, entry=None, dynamic=False, ack=False, argv=None, timeout=10.0,
 
 def _print(res):
     s = res["static"]
-    print(f"static: arch={s['arch']} entry=0x{s['entry']:x} stopped={s['stopped']} "
-          f"unpacked_detected={s['unpacked_detected']}")
+    if s.get("error"):
+        print(f"static: error: {s['error']}")
+    else:
+        oep = f" oep=0x{s['oep']:x}" if s.get("oep") is not None else ""
+        print(f"static: arch={s['arch']} entry=0x{s['entry']:x} stopped={s['stopped']}{oep} "
+              f"unpacked_detected={s['unpacked_detected']} rebuilt_imports="
+              f"{len(s.get('rebuilt_imports', []))} import_callsites={len(s.get('import_callsites', []))}")
     for st in res["stages"]:
         pe = f" embedded_pe={len(st['embedded_pe'])}" if st["embedded_pe"] else ""
         print(f"  [{st['source']}] va=0x{st.get('va', 0):x} size={st['size']} "
@@ -125,6 +144,25 @@ def _selftest():
     # this fixture unpacks statically, so dynamic is never reached -- detected True, no dynamic run
     assert r["static"]["unpacked_detected"] is True and r["dynamic"] is None, r
     Path(tmp).unlink()
+
+    # 3. the execute gate cannot be armed by an abbreviation: `--dyn --i` is rejected by argparse
+    import contextlib
+    import io
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            main(["x.bin", "--dyn", "--i"])
+            raise AssertionError("abbreviated execute gate was accepted")
+        except SystemExit as e:
+            assert e.code == 2, e.code
+    # 4. an input emulation cannot load is reported, not raised
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(b"not a binary" * 16)
+        junk = f.name
+    try:
+        r = recover(junk)
+        assert r["static"].get("error") and r["dynamic"] is None and r["stages"] == [], r
+    finally:
+        Path(junk).unlink()
     print("selftest OK: static stage carve finds embedded PE32+; static-first dispatch keeps the "
           "sample from running when emulation already succeeded")
 
@@ -132,10 +170,14 @@ def _selftest():
 def main(argv=None):
     import argparse
     import json
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+    # allow_abbrev=False: argparse would otherwise accept `--i` / `--dyn` as the execute gate
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False,
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("binary", nargs="?")
-    ap.add_argument("--entry", help="start RVA/VA of the unpack routine for static emulation")
+    ap.add_argument("--entry", help="start of the unpack routine for static emulation: an RVA, or a "
+                    "PE VA (>= the image base, rebased automatically)")
+    ap.add_argument("--follow", action="store_true",
+                    help="keep emulating past the jump to the original entry point")
     ap.add_argument("--dump", metavar="DIR", help="write carved static stages to DIR")
     ap.add_argument("--dynamic", action="store_true", help="fallback to the dynamic dumper (runs the sample)")
     ap.add_argument("--i-understand-this-executes", dest="ack", action="store_true",
@@ -145,10 +187,15 @@ def main(argv=None):
     ap.add_argument("--outdir", default="unpacked_dumps")
     ap.add_argument("--json", action="store_true", help="print the result dict as JSON")
     ap.add_argument("--selftest", action="store_true")
-    a = ap.parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    a = ap.parse_args(raw)
     if a.selftest:
         _selftest()
         return 0
+    # belt and braces: the execute gate must be spelled out in full on the command line (before any
+    # --argv pass-through), never inferred
+    cut = raw.index("--argv") if "--argv" in raw else len(raw)
+    a.ack = a.ack and "--i-understand-this-executes" in raw[:cut]
     if not a.binary:
         ap.error("give a binary, or --selftest")
     path = Path(a.binary)
@@ -156,7 +203,7 @@ def main(argv=None):
         ap.error(f"no such file: {path}")
     entry = int(a.entry, 0) if a.entry else None
     res = recover(path, entry, dynamic=a.dynamic, ack=a.ack, argv=a.argv,
-                  timeout=a.timeout, outdir=a.outdir)
+                  timeout=a.timeout, outdir=a.outdir, follow=a.follow)
     if a.dump and res["_regions"]:
         d = Path(a.dump)
         d.mkdir(parents=True, exist_ok=True)
