@@ -44,24 +44,63 @@ _GO_SYM = re.compile(r"^(?:" + "|".join(_GO_PKGS) + r")(?:/[\w.\-]+)*\.[A-Za-z_]
 _OBJC = re.compile(r"^[-+]\[")
 
 
-def classify_symbol(name: str) -> str | None:
-    """The source language of a function symbol, or None if it carries no language signal."""
-    n = name[1:] if name.startswith("__R") or name.startswith("__Z") else name  # Mach-O leading _
-    if n.startswith("_R"):
+_RUST_V0 = re.compile(r"^_R\d*[CMXYNIB]")          # v0: `_R` [instantiating-crate digits] <path tag>
+_ITANIUM = re.compile(r"^_Z(?:[NLSTZ0-9]|n[wa]|d[lav])")   # nested/local/std/special/name; new/delete
+
+
+def classify_symbol(name: str, macho: bool = False) -> str | None:
+    """The source language of a function symbol, or None if it carries no language signal.
+    `macho`: the name is a Mach-O nlist name, which carries one extra leading `_` on EVERY symbol
+    (C `_main`, Rust `__R...`, Itanium `__Z...`, Go `_main.main`); exactly one is stripped first."""
+    n = name[1:] if macho and name.startswith("_") else name
+    if _RUST_V0.match(n):
         return "rust"
-    if n.startswith("_ZN") or n.startswith("_Z"):
+    if _ITANIUM.match(n):
         return "rust" if _RUST_HASH.search(n) else "cpp"
     if n.startswith("?") and ("@@" in n or n.startswith("??")):
         return "cpp"            # MSVC mangling
     if n.startswith("$s") or n.startswith("$S") or n.startswith("_$s"):
         return "swift"
-    if _OBJC.match(name):
+    if _OBJC.match(n):
         return "objc"
     if "." in n and "@" not in n and not n.startswith(("DW.", ".")) and _GO_SYM.match(n):
         return "go"
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", n):
         return "c"              # a plain, unmangled identifier: C (or asm)
     return None
+
+
+def _symbol_kind(b, sym, fmt, exec_ranges):
+    """(kind, address) of a symbol for language attribution. kind is "func" (a code symbol we can
+    place), "data" (an object/import -- counts for presence only) or None (a source-FILE name, a
+    section symbol, a debug stab: never a language signal -- `main.c` is not Go). address is in the
+    binary's own terms (PE: RVA via the COFF section, since a COFF value is section-relative)."""
+    if fmt == "ELF":
+        t = str(getattr(sym, "type", "")).rsplit(".", 1)[-1]
+        if t in ("FUNC", "GNU_IFUNC"):
+            return "func", sym.value
+        if t in ("OBJECT", "TLS", "COMMON"):
+            return "data", sym.value
+        if t == "NOTYPE" and not sym.value:
+            return "data", 0          # an undefined import without a type
+        return None, 0                # FILE, SECTION, defined NOTYPE labels
+    if fmt == "PE":
+        if getattr(sym, "is_file_record", False) or str(getattr(sym, "storage_class", "")).endswith(
+                ("FILE", "SECTION")):
+            return None, 0
+        from gen_runtime_sigs import sym_va
+        va = sym_va(b, sym)
+        if va is None:
+            return "data", 0
+        return ("func" if getattr(sym, "is_function", False) else "data"), va
+    if fmt == "MACHO":
+        if int(getattr(sym, "raw_type", 0)) & 0xe0:      # N_STAB debug entries (N_SO file names)
+            return None, 0
+        va = sym.value
+        if va and any(lo <= va < hi for lo, hi in exec_ranges):
+            return "func", va
+        return "data", va
+    return ("func" if getattr(sym, "is_function", False) else "data"), getattr(sym, "value", 0)
 
 
 # section name -> language it proves present
@@ -101,22 +140,32 @@ def recover(path) -> dict:
     per_fn = {}
     counts = {}
     present = set()            # languages proven present (defined OR imported mangled symbols)
-    macho = b.format.name == "MACHO"
+    fmt = b.format.name
+    macho = fmt == "MACHO"
+    exec_ranges = []
+    if macho:
+        for s in b.sections:
+            if (int(s.flags) & 0x80000400) or s.name in ("__text", "__stubs"):
+                exec_ranges.append((s.virtual_address, s.virtual_address + s.size))
     for sym in b.symbols:
         name = sym.name
         if not name:
             continue
-        lang = classify_symbol(name)
+        try:
+            kind, va = _symbol_kind(b, sym, fmt, exec_ranges)
+        except Exception:
+            continue
+        if kind is None:
+            continue
+        lang = classify_symbol(name, macho=macho)
         if lang is None:
             continue
         # an imported (undefined, va 0) C++/Rust/Swift mangled symbol still proves that language is
         # linked in, even though it is not a function we can place -- a plain C name does not (every
         # binary imports libc), so only the distinctively-mangled ones count for presence.
-        va = getattr(sym, "value", 0)
-        is_fn = macho or getattr(sym, "is_function", False)
         if lang != "c":
             present.add(lang)
-        if is_fn and va:
+        if kind == "func" and va:
             per_fn[va] = lang
             counts[lang] = counts.get(lang, 0) + 1
             present.add(lang)
@@ -169,8 +218,13 @@ def _selftest():
     assert c("github.com/x/y.Handler") == "go"
     assert c("memcpy") == "c" and c("my_helper") == "c"
     assert c("") is None or c(".hidden") is None
-    # Mach-O leading underscore stripped
-    assert c("__RNvCs1_4core") == "rust" and c("__ZN3std3fooEv") == "cpp"
+    # Mach-O: exactly one leading underscore stripped from every name before classifying
+    assert c("__RNvCs1_4core", macho=True) == "rust" and c("__ZN3std3fooEv", macho=True) == "cpp"
+    assert c("_RSA_new", macho=True) == "c" and c("_ZSTD_compress", macho=True) == "c"
+    assert c("_main.main", macho=True) == "go" and c("_main", macho=True) == "c"
+    assert c("_$s4main3fooyyF", macho=True) == "swift"
+    # tightened manglings: a C name that merely starts `_R` / `_Z` is not Rust / C++
+    assert c("_Rfoo") == "c" and c("_Zap") == "c" and c("_Znwm") == "cpp" and c("_ZTV3Foo") == "cpp"
     print("selftest OK: symbol-language classification (rust v0/legacy, c++ Itanium/MSVC, swift, "
           "objc, go, c), Rust-hash disambiguation from C++")
 

@@ -72,3 +72,71 @@ def test_go_detected(tmp_path):
         pytest.skip("go build failed: " + r.stderr.strip()[-200:])
     res = L.recover(tmp_path / "bin")
     assert "go" in res["languages_present"] and res["dominant"] == "go"
+
+
+# ---- regressions (review B): file-name symbols, PE COFF addresses, Mach-O underscore
+
+def _cc():
+    return shutil.which("gcc") or shutil.which("clang")
+
+
+@pytest.mark.skipif(not _cc(), reason="no C compiler")
+def test_c_source_file_names_are_not_go(tmp_path):
+    """An unstripped C program carries STT_FILE symbols `main.c` / `net.c`; they are file names,
+    not Go `pkg.Func` symbols, so a plain C binary must not be reported as mixed C+Go."""
+    (tmp_path / "main.c").write_text("int helper_n(int);int main(int c,char**v){return helper_n(c);}\n")
+    (tmp_path / "net.c").write_text("int helper_n(int x){return x+1;}\n")
+    out = tmp_path / "bin"
+    r = subprocess.run([_cc(), "-O1", "-o", str(out), str(tmp_path / "main.c"), str(tmp_path / "net.c")],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip("cc failed: " + r.stderr[-200:])
+    res = L.recover(out)
+    assert "go" not in res["languages_present"], res["languages_present"]
+    assert res["languages_present"] == ["c"] and not res["mixed"]
+
+
+def _gobuild(tmp_path, goos, goarch, name):
+    import os
+    (tmp_path / "g.go").write_text('package main\nimport "fmt"\nfunc main(){fmt.Println("hi")}\n')
+    out = tmp_path / name
+    r = subprocess.run(["go", "build", "-o", str(out), str(tmp_path / "g.go")], capture_output=True,
+                       text=True, cwd=tmp_path,
+                       env=dict(os.environ, GOOS=goos, GOARCH=goarch, CGO_ENABLED="0"))
+    if r.returncode != 0:
+        pytest.skip("go build failed: " + r.stderr.strip()[-200:])
+    return out
+
+
+@pytest.mark.skipif(not shutil.which("go"), reason="go not available")
+def test_pe_coff_symbol_addresses_are_rvas(tmp_path):
+    """PE COFF symbol values are section-relative; function addresses must be RVAs in .text."""
+    import lief
+    p = _gobuild(tmp_path, "windows", "amd64", "g.exe")
+    b = lief.parse(str(p))
+    text = next(s for s in b.sections if s.name == ".text")
+    res = L.recover(p)
+    vas = [int(k, 16) for k in res["functions"]]
+    assert vas and all(text.virtual_address <= v < text.virtual_address + text.size for v in vas)
+    mm = next(s for s in b.symbols if s.name == "main.main")
+    assert res["functions"][hex(text.virtual_address + mm.value)] == "go"
+
+
+@pytest.mark.skipif(not shutil.which("go"), reason="go not available")
+def test_macho_go_names_classified(tmp_path):
+    """Mach-O prefixes every name with `_`: `_main.main` is Go, and C names are not Rust/C++."""
+    res = L.recover(_gobuild(tmp_path, "darwin", "arm64", "g.macho"))
+    assert res["dominant"] == "go"
+    import lief
+    b = lief.parse(str(tmp_path / "g.macho"))
+    mm = next(s for s in b.symbols if s.name == "_main.main")
+    assert res["functions"].get(hex(mm.value)) == "go"
+
+
+def test_macho_underscore_classifier():
+    c = L.classify_symbol
+    assert c("_RSA_new", macho=True) == "c"              # C `RSA_new`, not Rust v0
+    assert c("_ZSTD_compress", macho=True) == "c"        # C `ZSTD_compress`, not Itanium
+    assert c("_main.main", macho=True) == "go"
+    assert c("__RNvCs1_4core3foo", macho=True) == "rust"
+    assert c("__ZN3foo3barEv", macho=True) == "cpp"
