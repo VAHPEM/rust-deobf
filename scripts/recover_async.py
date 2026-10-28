@@ -1888,7 +1888,8 @@ def _print(res: dict) -> None:
             line = f"      {k:>3} {st['name']:<10} -> {st['target']:#x}"
             if "inner" in st:
                 i = st["inner"]
-                desc = {"direct": lambda: f"polls fn {i.get('target', 0):#x}",
+                desc = {"direct": lambda: (f"polls fn {i['target']:#x}" if i.get("target") is not None
+                                           else "polls an unresolved slot"),
                         "inlined": lambda: f"inlined machine {i.get('machine', '?')}",
                         "dyn": lambda: f"dyn vtable slot {i.get('slot_offset', 0):#x}"
                                        + (f" -> {i['machine']}" if i.get("machine") else ""),
