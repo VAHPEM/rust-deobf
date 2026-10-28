@@ -42,7 +42,12 @@ a timeout, so a native segfault or an OOM is caught as a finding instead of taki
     python3 scripts/fuzz_recover.py --reproduce crash.bin      # replay one saved crashing input
 
 Crashing inputs are written to --crash-dir (default build/fuzz_crashes/) with a .txt repro note.
-Exit codes: 0 no findings, 1 findings written, 2 usage error.
+Findings are grouped by root-cause signature (target, exception type, last 3 traceback frames): one
+representative input per group is saved, with a hit count. The campaign seed is always printed (and
+written into every note), so `--seed N` with the same seeds/targets reproduces a run.
+Portable: Linux, macOS and Windows (temp files come from the OS temp dir; the isolated worker uses
+forkserver where it exists, else spawn; the address-space rlimit is POSIX-only and best-effort).
+Exit codes: 0 no findings, 1 findings written, 2 usage error, 130 interrupted (Ctrl-C).
 """
 from __future__ import annotations
 
@@ -51,9 +56,12 @@ import faulthandler
 import hashlib
 import io
 import os
+import queue
 import random
+import re
 import struct
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -62,6 +70,12 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
+EXIT_INTERRUPTED = 130            # conventional 128 + SIGINT
+
+# Every target name _targets() can produce (whether or not its engine imports here). --targets is
+# validated against this, so a typo is a usage error instead of a silent empty campaign.
+KNOWN_TARGETS = ("detect", "run", "image", "emulate", "meta", "strings", "stackstrings", "callsite",
+                 "arm64", "cryptify", "detect_vm", "triage")
 
 # Per-input wall-clock budget for the isolated worker. The emulate/run targets get a tiny time
 # budget of their own; this is the backstop for a hang in parsing or an infinite loop.
@@ -155,7 +169,9 @@ _CONTROLLED_NAMES = {"UnsupportedInput"}
 # NOTE: RecursionError is a RuntimeError subclass but is NOT controlled -- unbounded recursion on a
 # crafted input is a real robustness bug. OverflowError from a bad size field is tolerated only as a
 # clean rejection; the isolated worker still catches the version that allocates before overflowing.
-_UNCONTROLLED = (MemoryError, RecursionError, SystemError, KeyboardInterrupt)
+# KeyboardInterrupt is deliberately NOT here: Ctrl-C is the operator stopping the campaign, never a
+# property of the input, so run_targets re-raises it instead of recording it as a finding.
+_UNCONTROLLED = (MemoryError, RecursionError, SystemError)
 
 
 def classify(name: str, hardened: bool, exc: BaseException) -> str | None:
@@ -170,41 +186,65 @@ def classify(name: str, hardened: bool, exc: BaseException) -> str | None:
     return f"unexpected {type(exc).__name__}: {exc}"
 
 
+def _last_frames(tb, n: int = 3) -> list[str]:
+    """The innermost `n` frames of a traceback as 'file:function:line' (file = basename, so a
+    signature does not depend on where the repo is checked out). Outermost first, innermost last."""
+    return [f"{os.path.basename(f.filename)}:{f.name}:{f.lineno}"
+            for f in traceback.extract_tb(tb)[-n:]]
+
+
 def run_targets(data: bytes, time_budget: float = 1.0, tmp: Path | None = None,
-                active: set | None = None) -> list[dict]:
+                active: set | None = None, targets_fn=None) -> list[dict]:
     """Run every target on `data` in-process; return a list of finding dicts (empty = clean).
 
     This catches Python-level robustness bugs. It cannot catch a native segfault or a true hang --
-    `run_isolated` wraps this in a child with an rlimit and a timeout for those."""
-    findings = []
+    `run_isolated` wraps the same loop in a child with an rlimit and a timeout for those.
+    `targets_fn(time_budget, active)` replaces the target table (a test seam). A KeyboardInterrupt
+    propagates: it stops the run, it is not a finding."""
     own_tmp = tmp is None
-    path = tmp or _mktemp()
+    path = _mktemp() if own_tmp else Path(tmp)
     try:
         path.write_bytes(data)
-        for name, fn, hardened in _targets(time_budget, active):
-            try:
-                fn(path)
-            except BaseException as exc:  # noqa: BLE001 - classification is the whole point
-                reason = classify(name, hardened, exc)
-                if reason is not None:
-                    findings.append({"target": name, "reason": reason,
-                                     "traceback": traceback.format_exc()})
+        return _run_on_path(path, time_budget, active, targets_fn)
     finally:
         if own_tmp:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            _unlink(path)
+
+
+def _run_on_path(path: Path, time_budget: float, active: set | None, targets_fn=None,
+                 progress=None) -> list[dict]:
+    findings = []
+    for name, fn, hardened in (targets_fn or _targets)(time_budget, active):
+        if progress is not None:
+            progress(name)
+        try:
+            fn(path)
+        except KeyboardInterrupt:
+            raise                       # the operator pressed Ctrl-C: stop, don't record a finding
+        except BaseException as exc:  # noqa: BLE001 - classification is the whole point
+            reason = classify(name, hardened, exc)
+            if reason is not None:
+                findings.append({"target": name, "reason": reason, "exc_type": type(exc).__name__,
+                                 "frames": _last_frames(exc.__traceback__),
+                                 "traceback": traceback.format_exc()})
     return findings
 
 
-_TMP_COUNTER = [0]
+def _mktemp(suffix: str = ".bin") -> Path:
+    """A fresh, empty temp file in the OS temp dir (tempfile.gettempdir(): $TMPDIR / %TEMP% / ...,
+    so this works on Windows, where a hard-coded /tmp does not exist). mkstemp creates it with
+    O_EXCL, mode 0600 and an unpredictable name, so a pre-planted symlink cannot redirect the write.
+    The caller owns the file and must unlink it."""
+    fd, name = tempfile.mkstemp(prefix=".fuzz_recover_", suffix=suffix)
+    os.close(fd)
+    return Path(name)
 
 
-def _mktemp() -> Path:
-    d = Path(os.environ.get("TMPDIR", "/tmp"))
-    _TMP_COUNTER[0] += 1
-    return d / f".fuzz_recover_{os.getpid()}_{_TMP_COUNTER[0]}.bin"
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:                     # already gone, or (Windows) still held by a dying child
+        pass
 
 
 # --------------------------------------------------------------------------------------------
@@ -212,13 +252,13 @@ def _mktemp() -> Path:
 # finding, not a dead fuzzer.
 # --------------------------------------------------------------------------------------------
 def _isolation_ctx():
-    """Use a forkserver where available, else spawn -- NOT a plain fork. A fork inherits the
-    parent's memory, so if the parent has already instantiated Unicorn (e.g. this runs inside a
-    pytest process that emulated in an earlier test), the child inherits poisoned JIT state and
-    fails with "Could not allocate dynamic translator buffer". A forkserver forks from its own clean
-    server process (which only imported the preloaded engines, never created a Uc), so children are
-    clean and cheap; spawn is the safe fallback. Both give the child a fresh interpreter state for
-    Unicorn, which is what matters for correctness."""
+    """Use a forkserver where available (Linux, macOS), else spawn (Windows has only spawn) -- NOT a
+    plain fork. A fork inherits the parent's memory, so if the parent has already instantiated
+    Unicorn (e.g. this runs inside a pytest process that emulated in an earlier test), the child
+    inherits poisoned JIT state and fails with "Could not allocate dynamic translator buffer". A
+    forkserver forks from its own clean server process (which only imported the preloaded engines,
+    never created a Uc), so children are clean and cheap; spawn is the portable fallback. Both give
+    the child a fresh interpreter state for Unicorn, which is what matters for correctness."""
     import multiprocessing as mp
     methods = mp.get_all_start_methods()
     if "forkserver" in methods:
@@ -231,51 +271,185 @@ def _isolation_ctx():
     return mp.get_context("spawn")
 
 
+_POLL = 0.1             # how often the parent checks a silent worker for death
+_EXIT_GRACE = 5.0       # how long a worker that has reported may take to exit
+_HANG = object()        # sentinel: the worker is still running at the deadline
+
+
 def run_isolated(data: bytes, time_budget: float, timeout: float, rlimit_mb: int,
-                 active: set | None = None) -> list[dict]:
+                 active: set | None = None, targets_fn=None) -> list[dict]:
+    """Run the targets on `data` in a child process with an address-space cap and a wall-clock
+    timeout, so a native crash, an OOM or a hang becomes a finding instead of killing the fuzzer.
+
+    The PARENT owns both temp files -- the input and the worker's log (target-progress lines plus a
+    faulthandler dump on a fatal signal or just before the timeout, used to attribute a native
+    crash/hang to a target and stack) -- creating them with mkstemp and unlinking them in `finally`,
+    so a worker killed mid-run leaks nothing. `targets_fn` must be a picklable module-level function
+    when given (it crosses the process boundary)."""
     ctx = _isolation_ctx()
+    inp = _mktemp(".bin")
+    log = _mktemp(".log")
     q = ctx.Queue()
-    proc = ctx.Process(target=_isolated_entry, args=(data, time_budget, rlimit_mb, q, active))
-    proc.start()
-    proc.join(timeout)
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(5)
-        if proc.is_alive():
-            proc.kill()
-            proc.join()
-        return [{"target": "?", "reason": f"hang (> {timeout:.0f}s wall clock)", "traceback": ""}]
+    proc = None
     try:
-        findings = q.get_nowait()
-    except Exception:
-        findings = None
-    if findings is None:
-        # The worker died without reporting: a native crash (segfault/abort) or the OOM killer.
-        code = proc.exitcode
-        sig = -code if code is not None and code < 0 else None
-        reason = (f"worker killed by signal {sig}" if sig
-                  else f"worker exited {code} with no result (native crash / OOM)")
-        return [{"target": "?", "reason": reason, "traceback": ""}]
-    return findings
+        inp.write_bytes(data)
+        proc = ctx.Process(target=_isolated_entry,
+                           args=(str(inp), str(log), time_budget, timeout, rlimit_mb, q, active,
+                                 targets_fn))
+        proc.start()
+        # Read the result BEFORE joining: a worker blocks at exit until its queue feeder thread has
+        # pushed the whole pickled result into the pipe, so join()-then-read deadlocks on any result
+        # bigger than the pipe buffer (~64 KB) and misreports a finished worker as a hang.
+        findings = _await_result(proc, q, timeout)
+        if findings is _HANG:
+            _stop(proc)
+            return [_postmortem(log, f"hang (> {timeout:.0f}s wall clock)", "hang")]
+        if findings is None:
+            # The worker died without reporting: a native crash (segfault/abort) or the OOM killer.
+            proc.join(_EXIT_GRACE)
+            code = proc.exitcode
+            sig = -code if code is not None and code < 0 else None
+            reason = (f"worker killed by signal {sig}" if sig
+                      else f"worker exited {code} with no result (native crash / OOM)")
+            return [_postmortem(log, reason, f"signal {sig}" if sig else "native exit")]
+        proc.join(_EXIT_GRACE)
+        if proc.is_alive():
+            _stop(proc)
+            findings = list(findings) + [_postmortem(log, "worker hung on exit after reporting",
+                                                     "hang")]
+        return findings
+    finally:
+        if proc is not None and proc.is_alive():      # Ctrl-C or an error while waiting
+            _stop(proc)
+        q.close()
+        if proc is not None:
+            try:
+                proc.close()
+            except ValueError:
+                pass
+        _unlink(inp)
+        _unlink(log)
 
 
-def _isolated_entry(data: bytes, time_budget: float, rlimit_mb: int, q, active=None) -> None:
-    # Cap address space so an allocate-gigabytes bug raises MemoryError (a finding) instead of
-    # thrashing the host. Best-effort: not all platforms honour RLIMIT_AS.
+def _await_result(proc, q, timeout: float):
+    """Wait up to `timeout` s for the worker's findings. Returns the findings list, None if the
+    worker died without reporting, or _HANG if it is still running at the deadline."""
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _HANG
+        try:
+            return q.get(timeout=min(_POLL, remaining))
+        except queue.Empty:
+            pass
+        if not proc.is_alive():
+            # it may have exited right after its result reached the pipe: one last short read
+            try:
+                return q.get(timeout=1.0)
+            except queue.Empty:
+                return None
+
+
+def _stop(proc) -> None:
+    proc.terminate()
+    proc.join(5)
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+
+
+_FH_THREAD = re.compile(r"^(Current thread|Thread) 0x[0-9a-fA-F]+")
+_FH_FRAME = re.compile(r'^\s*File "(.*)", line (\d+) in (\S+)')
+
+
+def _postmortem(log: Path, reason: str, exc_type: str) -> dict:
+    """A finding for a worker that crashed natively or hung, attributed from its log: the last
+    `TARGET <name>` line names the target that was running, and the faulthandler dump that follows
+    it (fatal signal, or the pre-timeout watchdog) gives the innermost frames. Without this every
+    native crash would share one signature and distinct bugs would be grouped together."""
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    lines = text.splitlines()
+    target, start = "?", 0
+    for i, line in enumerate(lines):
+        if line.startswith("TARGET "):
+            target, start = line[len("TARGET "):].strip() or "?", i + 1
+    dump = lines[start:]
+    # split the dump into per-thread blocks; prefer the thread that was running a target
+    blocks, cur = [], None
+    for line in dump:
+        if _FH_THREAD.match(line):
+            cur = []
+            blocks.append(cur)
+        elif cur is not None:
+            m = _FH_FRAME.match(line)
+            if m:
+                cur.append(f"{os.path.basename(m.group(1))}:{m.group(3)}:{m.group(2)}")
+    chosen = next((b for b in blocks if any(":_run_on_path:" in f for f in b)),
+                  blocks[0] if blocks else [])
+    # faulthandler prints most-recent-call-first; keep the innermost 3, outermost first
+    frames = list(reversed(chosen[:3]))
+    return {"target": target, "reason": reason, "exc_type": exc_type, "frames": frames,
+            "traceback": "\n".join(dump).strip()}
+
+
+def _apply_rlimit(rlimit_mb: int) -> None:
+    """Cap the worker's address space so an allocate-gigabytes bug raises MemoryError (a finding)
+    instead of thrashing the host. POSIX only and best-effort: Windows has no `resource` module and
+    macOS largely ignores RLIMIT_AS. rlimit_mb <= 0 means no cap."""
+    if rlimit_mb <= 0:
+        return
     try:
         import resource
+    except ImportError:
+        return
+    try:
         soft = rlimit_mb * 1024 * 1024
         _, hard = resource.getrlimit(resource.RLIMIT_AS)
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard if hard != resource.RLIM_INFINITY else soft))
-    except Exception:
+        if hard == resource.RLIM_INFINITY:
+            hard = soft
+        else:
+            soft = min(soft, hard)      # asking for more than the hard limit would raise
+        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+    except (ValueError, OSError, AttributeError):
         pass
-    faulthandler.enable()               # dump a native stack on a C-level crash
+
+
+def _isolated_entry(path: str, log: str, time_budget: float, timeout: float, rlimit_mb: int, q,
+                    active=None, targets_fn=None) -> None:
+    _apply_rlimit(rlimit_mb)
     try:
-        q.put(run_targets(data, time_budget=time_budget, active=active))
-    except BaseException:               # noqa: BLE001
-        # A MemoryError or the like escaping run_targets itself is still a finding.
-        q.put([{"target": "?", "reason": f"worker exception {sys.exc_info()[0].__name__}",
-                "traceback": traceback.format_exc()}])
+        logf = open(log, "w", encoding="utf-8")
+    except OSError:
+        logf = None
+    if logf is not None:
+        faulthandler.enable(file=logf, all_threads=True)    # native stack on a C-level crash
+        # watchdog: dump the stack shortly before the parent's deadline so a hang carries frames
+        faulthandler.dump_traceback_later(max(0.5, timeout * 0.8), exit=False, file=logf)
+    else:
+        faulthandler.enable()
+
+    def progress(name):
+        if logf is not None:
+            logf.write(f"TARGET {name}\n")
+            logf.flush()
+
+    try:
+        result = _run_on_path(Path(path), time_budget, active, targets_fn, progress)
+    except KeyboardInterrupt:
+        return              # Ctrl-C hit the whole process group; the parent is stopping too
+    except BaseException as exc:        # noqa: BLE001
+        # A MemoryError or the like escaping the target loop itself is still a finding.
+        result = [{"target": "?", "reason": f"worker exception {type(exc).__name__}",
+                   "exc_type": type(exc).__name__, "frames": _last_frames(exc.__traceback__),
+                   "traceback": traceback.format_exc()}]
+    finally:
+        if logf is not None:
+            faulthandler.cancel_dump_traceback_later()
+    q.put(result)
 
 
 # --------------------------------------------------------------------------------------------
@@ -432,56 +606,121 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def _save_crash(crash_dir: Path, data: bytes, findings: list[dict], origin: str) -> Path:
+def _signature(f: dict) -> tuple:
+    """Root-cause signature of one finding: (target, exception type, innermost 3 frames). The
+    exception *message* is left out on purpose -- it usually embeds input-dependent values."""
+    return (f.get("target", "?"), f.get("exc_type") or f.get("reason", "?"),
+            tuple(f.get("frames") or ()))
+
+
+def _sig_id(sig: tuple) -> str:
+    return hashlib.sha256(repr(sig).encode()).hexdigest()[:12]
+
+
+def _note_text(name: str, size: int, findings: list[dict], origin: str, meta: dict | None,
+               counts: dict | None) -> str:
+    note = io.StringIO()
+    note.write(f"origin: {origin}\nsize: {size} bytes\nsha256[:16]: {name}\n")
+    for k, v in (meta or {}).items():
+        note.write(f"{k}: {v}\n")
+    note.write("\n")
+    for f in findings:
+        sig = _signature(f)
+        note.write(f"[{f['target']}] {f['reason']}\n")
+        note.write(f"signature: {_sig_id(sig)}  ({f.get('exc_type', '?')} @ "
+                   f"{' > '.join(sig[2]) or 'no frames'})\n")
+        if counts is not None and sig in counts:
+            note.write(f"hits: {counts[sig]} input(s) with this signature\n")
+        if f.get("traceback"):
+            note.write(f["traceback"].rstrip() + "\n")
+        note.write("\n")
+    return note.getvalue()
+
+
+def _save_crash(crash_dir: Path, data: bytes, findings: list[dict], origin: str,
+                meta: dict | None = None, counts: dict | None = None) -> Path:
     crash_dir.mkdir(parents=True, exist_ok=True)
     name = _digest(data)
     path = crash_dir / f"crash_{name}.bin"
     path.write_bytes(data)
-    note = io.StringIO()
-    note.write(f"origin: {origin}\nsize: {len(data)} bytes\nsha256[:16]: {name}\n\n")
-    for f in findings:
-        note.write(f"[{f['target']}] {f['reason']}\n")
-        if f.get("traceback"):
-            note.write(f["traceback"].rstrip() + "\n")
-        note.write("\n")
-    (crash_dir / f"crash_{name}.txt").write_text(note.getvalue())
+    (crash_dir / f"crash_{name}.txt").write_text(
+        _note_text(name, len(data), findings, origin, meta, counts), encoding="utf-8")
     return path
 
 
 def campaign(seeds: list[bytes], runs: int, deadline: float | None, rng: random.Random,
              time_budget: float, isolate: bool, timeout: float, rlimit_mb: int,
-             crash_dir: Path, verbose: bool, active: set | None = None) -> list[dict]:
-    """Mutate seeds, run the targets, collect and save findings. Returns a list of {hash, findings}
-    for the distinct crashing inputs."""
-    seen_crashes: dict[str, dict] = {}
+             crash_dir: Path, verbose: bool, active: set | None = None,
+             meta: dict | None = None, targets_fn=None) -> list[dict]:
+    """Mutate seeds, run the targets, collect and save findings.
+
+    Findings are de-duplicated by root-cause signature (_signature), not by input hash -- one bug
+    hit by 50 different mutants is one finding, not 50 files. The first input that shows a new
+    signature is saved as that group's representative; the group's hit count is written into its
+    note when the campaign ends. `meta` (seed, targets, budgets, isolate) goes into every note so a
+    finding can be replayed. Returns one dict per signature group. A KeyboardInterrupt stops the
+    campaign: the notes are finalised and the interrupt is re-raised to the caller."""
+    groups: dict[tuple, dict] = {}
     n = 0
     base_inputs = list(seeds) + [data for _, data in synthetic_corpus()]
-    while True:
-        if runs and n >= runs:
-            break
-        if deadline and time.monotonic() >= deadline:
-            break
-        n += 1
-        parent = rng.choice(base_inputs) if base_inputs else b""
-        # half the inputs keep the header intact (reach the deep loader/emulator code), half smash
-        # everything (stress the header parsers and the early-reject paths)
-        data = mutate_body(parent, rng) if rng.random() < 0.5 else mutate(parent, rng)
-        if isolate:
-            findings = run_isolated(data, time_budget, timeout, rlimit_mb, active)
-        else:
-            findings = run_targets(data, time_budget=time_budget, active=active)
-        if findings:
-            h = _digest(data)
-            if h not in seen_crashes:
-                _save_crash(crash_dir, data, findings, origin=f"mutation #{n}")
-                seen_crashes[h] = {"hash": h, "findings": findings}
-                tgt = ", ".join(sorted({f["target"] for f in findings}))
-                print(f"  FINDING #{len(seen_crashes)} [{h}] targets={tgt}: "
-                      f"{findings[0]['reason']}", flush=True)
-        elif verbose and n % 500 == 0:
-            print(f"  ...{n} inputs, {len(seen_crashes)} findings", flush=True)
-    print(f"ran {n} inputs, {len(seen_crashes)} distinct findings")
-    return list(seen_crashes.values())
+    interrupted = False
+    try:
+        while True:
+            if runs and n >= runs:
+                break
+            if deadline and time.monotonic() >= deadline:
+                break
+            n += 1
+            parent = rng.choice(base_inputs) if base_inputs else b""
+            # half the inputs keep the header intact (reach the deep loader/emulator code), half
+            # smash everything (stress the header parsers and the early-reject paths)
+            data = mutate_body(parent, rng) if rng.random() < 0.5 else mutate(parent, rng)
+            if isolate:
+                findings = run_isolated(data, time_budget, timeout, rlimit_mb, active, targets_fn)
+            else:
+                findings = run_targets(data, time_budget=time_budget, active=active,
+                                       targets_fn=targets_fn)
+            if not findings:
+                if verbose and n % 500 == 0:
+                    print(f"  ...{n} inputs, {len(groups)} findings", flush=True)
+                continue
+            new = []
+            for f in findings:
+                sig = _signature(f)
+                g = groups.get(sig)
+                if g is None:
+                    g = {"num": len(groups) + 1, "id": _sig_id(sig), "target": sig[0],
+                         "exc_type": sig[1], "reason": f["reason"],
+                         "frames": list(sig[2]), "count": 0, "hash": None, "size": 0,
+                         "origin": None, "findings": None}
+                    groups[sig] = g
+                    new.append(g)
+                g["count"] += 1
+            if new:
+                h = _digest(data)
+                for g in new:
+                    g.update(hash=h, size=len(data), origin=f"mutation #{n}", findings=findings)
+                _save_crash(crash_dir, data, findings, origin=f"mutation #{n}", meta=meta)
+                for g in new:
+                    print(f"  FINDING #{g['num']} [{g['id']}] target={g['target']}: "
+                          f"{g['reason'][:200]} -> crash_{h}.bin", flush=True)
+    except KeyboardInterrupt:
+        interrupted = True
+    # refresh each representative's note with the final per-signature hit counts
+    counts = {sig: g["count"] for sig, g in groups.items()}
+    for g in {g["hash"]: g for g in groups.values()}.values():
+        note = crash_dir / f"crash_{g['hash']}.txt"
+        try:
+            note.write_text(_note_text(g["hash"], g["size"], g["findings"], g["origin"], meta,
+                                       counts), encoding="utf-8")
+        except OSError:
+            pass
+    hits = sum(g["count"] for g in groups.values())
+    print(f"{'interrupted after' if interrupted else 'ran'} {n} inputs, {hits} finding hit(s) in "
+          f"{len(groups)} distinct signature group(s)")
+    if interrupted:
+        raise KeyboardInterrupt
+    return list(groups.values())
 
 
 # --------------------------------------------------------------------------------------------
@@ -495,8 +734,30 @@ def atheris_main(libfuzzer_args: list[str], time_budget: float, active: set | No
               file=sys.stderr)
         return EXIT_USAGE
 
+    # Instrument BEFORE Setup, or libFuzzer gets no Python coverage edges and degrades to blind
+    # mutation. The engines are imported lazily by _targets, so import them inside
+    # instrument_imports() (instruments just what the targets pull in); older atheris without it
+    # falls back to instrument_all() over everything already loaded.
+    if hasattr(atheris, "instrument_imports"):
+        with atheris.instrument_imports():
+            targets = _targets(time_budget, active)
+    else:
+        targets = _targets(time_budget, active)
+        if hasattr(atheris, "instrument_all"):
+            atheris.instrument_all()
+        else:
+            print("fuzz_recover: this atheris has no instrument_imports/instrument_all; "
+                  "coverage feedback will be missing", file=sys.stderr)
+    if not targets:
+        print("fuzz_recover: no fuzz target is available (engine imports failed)", file=sys.stderr)
+        return EXIT_USAGE
+
+    def fixed_targets(_tb, _active):
+        return targets
+
     def one(raw: bytes):
-        findings = run_targets(raw, time_budget=time_budget, active=active)
+        findings = run_targets(raw, time_budget=time_budget, active=active,
+                               targets_fn=fixed_targets)
         if findings:
             # make libFuzzer treat it as a crash so it saves the input and minimises it
             raise AssertionError(f"{findings[0]['target']}: {findings[0]['reason']}")
@@ -529,6 +790,10 @@ def _selftest():
     assert bad == 0, f"synthetic corpus produced {bad} finding(s) -- a regression; run without " \
                      "--selftest to see them"
 
+    # 2b. --targets validation covers every target the table can produce
+    names = {name for name, _fn, _h in _targets(0.5)}
+    assert names <= set(KNOWN_TARGETS), names - set(KNOWN_TARGETS)
+
     # 3. the mutation engine is deterministic for a fixed seed and never returns empty
     rng = random.Random(1234)
     sample = b"\x7fELF" + bytes(range(60))
@@ -536,9 +801,24 @@ def _selftest():
         m = mutate(sample, rng)
         assert isinstance(m, bytes) and len(m) >= 1
 
-    # 4. a short, fully in-process mini-campaign over the synthetic corpus stays clean and the
-    #    crash-saving path round-trips a hand-made finding
-    import tempfile
+    # 4. Ctrl-C is not a finding: it propagates out of run_targets
+    def interrupting(_tb, _active):
+        def stop(_p):
+            raise KeyboardInterrupt
+        return [("image", stop, False)]
+    try:
+        run_targets(b"\x7fELF", targets_fn=interrupting)
+        raise AssertionError("KeyboardInterrupt was swallowed as a finding")
+    except KeyboardInterrupt:
+        pass
+
+    # 5. a short, fully in-process mini-campaign over the synthetic corpus stays clean, the
+    #    crash-saving path round-trips a hand-made finding, and one root cause hit by many mutants
+    #    is ONE saved finding with a hit count (not one file per input)
+    def one_bug(_tb, _active):
+        def boom(_p):
+            raise MemoryError
+        return [("image", boom, False)]
     with tempfile.TemporaryDirectory() as d:
         res = campaign(seeds=[data for _, data in synthetic_corpus()], runs=120, deadline=None,
                        rng=random.Random(7), time_budget=0.3, isolate=False, timeout=5.0,
@@ -548,8 +828,17 @@ def _selftest():
                               "traceback": "Traceback...\n"}], origin="selftest")
         assert saved.exists() and saved.with_suffix(".txt").exists()
         assert b"demo" in saved.read_bytes()
+        grouped = campaign(seeds=[b"\x7fELF" + bytes(600)], runs=25, deadline=None,
+                           rng=random.Random(1), time_budget=0.1, isolate=False, timeout=5.0,
+                           rlimit_mb=DEFAULT_RLIMIT_MB, crash_dir=Path(d) / "g", verbose=False,
+                           meta={"seed": 1}, targets_fn=one_bug)
+        assert len(grouped) == 1 and grouped[0]["count"] == 25, grouped
+        assert len(list((Path(d) / "g").glob("*.bin"))) == 1
+        note = next((Path(d) / "g").glob("*.txt")).read_text(encoding="utf-8")
+        assert "seed: 1" in note and "hits: 25" in note, note
     print(f"selftest OK: classifier, {len(synthetic_corpus())} malformed inputs run clean through "
-          f"all targets, mutation + crash-save round-trip ({len(res)} campaign findings)")
+          f"all targets, mutation + crash-save round-trip, Ctrl-C propagates, signature dedup "
+          f"({len(res)} campaign findings)")
 
 
 def main(argv=None) -> int:
@@ -562,12 +851,13 @@ def main(argv=None) -> int:
                     help="extra seed directory (repeatable); the committed fixtures are always seeds")
     ap.add_argument("--no-fixture-seeds", action="store_true", help="do not seed from tests/fixtures")
     ap.add_argument("--targets", default="", metavar="A,B",
-                    help="comma-separated target names to run (default all); e.g. "
+                    help="comma-separated target names to run (default all; known: "
+                         + ",".join(KNOWN_TARGETS) + "); e.g. "
                          "'detect,image,meta,strings,callsite,arm64,cryptify,stackstrings,detect_vm' "
                          "for the fast parser surface, or 'emulate,run,triage' for the slow one")
     ap.add_argument("--isolate", dest="isolate", action="store_true", default=None,
                     help="run each input in a child with an rlimit + timeout (catches native "
-                         "crashes/hangs/OOM); default on unless --no-isolate")
+                         "crashes/hangs/OOM); default on for a campaign, off for --reproduce")
     ap.add_argument("--no-isolate", dest="isolate", action="store_false",
                     help="run in-process (faster; misses native crashes and true hangs)")
     ap.add_argument("--time-budget", type=float, default=1.0,
@@ -575,11 +865,14 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                     help=f"per-input wall-clock timeout for an isolated worker (default {DEFAULT_TIMEOUT:.0f}s)")
     ap.add_argument("--rlimit-mb", type=int, default=DEFAULT_RLIMIT_MB,
-                    help=f"address-space cap for an isolated worker in MB (default {DEFAULT_RLIMIT_MB})")
+                    help=f"address-space cap for an isolated worker in MB (default {DEFAULT_RLIMIT_MB}; "
+                         "0 = none; POSIX only)")
     ap.add_argument("--crash-dir", default=str(ROOT.parent / "build" / "fuzz_crashes"),
                     help="where to write crashing inputs (default build/fuzz_crashes/)")
-    ap.add_argument("--seed", type=int, default=None, help="RNG seed for a reproducible campaign")
-    ap.add_argument("--reproduce", metavar="FILE", help="replay one saved input and print its findings")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="RNG seed for a reproducible campaign (default: random, printed)")
+    ap.add_argument("--reproduce", metavar="FILE", help="replay one saved input and print its findings "
+                    "(in-process; add --isolate [--timeout S] to catch a native crash or hang)")
     ap.add_argument("--atheris", action="store_true", help="drive libFuzzer via Atheris (if installed)")
     ap.add_argument("-v", "--verbose", action="store_true", help="progress every 500 inputs")
     ap.add_argument("libfuzzer", nargs="*", help="args passed through to libFuzzer after -- (with --atheris)")
@@ -590,35 +883,67 @@ def main(argv=None) -> int:
         return EXIT_OK
 
     active = {t.strip() for t in a.targets.split(",") if t.strip()} or None
+    unknown = sorted((active or set()) - set(KNOWN_TARGETS))
+    if unknown:
+        print(f"fuzz_recover: unknown --targets name(s): {', '.join(unknown)} "
+              f"(known: {', '.join(KNOWN_TARGETS)})", file=sys.stderr)
+        return EXIT_USAGE
 
-    if a.reproduce:
-        data = Path(a.reproduce).read_bytes()
-        findings = run_targets(data, time_budget=a.time_budget, active=active)
-        if not findings:
-            print(f"{a.reproduce}: no findings in-process (try --isolate for a native crash/hang)")
-            return EXIT_OK
-        for f in findings:
-            print(f"[{f['target']}] {f['reason']}")
-            if f.get("traceback"):
-                print(f["traceback"].rstrip())
-        return EXIT_FINDINGS
+    if a.timeout <= 0 or a.time_budget <= 0:
+        print("fuzz_recover: --timeout and --time-budget must be > 0", file=sys.stderr)
+        return EXIT_USAGE
 
-    if a.atheris:
+    if a.atheris:                   # before anything imports the engines (see atheris_main)
         return atheris_main(a.libfuzzer, a.time_budget, active)
 
-    isolate = True if a.isolate is None else a.isolate
-    seed_dirs = [Path(s) for s in a.seeds] + ([] if a.no_fixture_seeds else fixture_dirs())
-    seeds = load_seeds(seed_dirs)
-    print(f"fuzz_recover: {len(seeds)} seed(s) from {len(seed_dirs)} dir(s); "
-          f"isolate={isolate}; {'time ' + str(a.time) + 's' if a.time else str(a.runs) + ' runs'}")
-    rng = random.Random(a.seed)
-    deadline = (time.monotonic() + a.time) if a.time else None
-    results = campaign(seeds, runs=(0 if a.time else a.runs), deadline=deadline, rng=rng,
-                       time_budget=a.time_budget, isolate=isolate, timeout=a.timeout,
-                       rlimit_mb=a.rlimit_mb, crash_dir=Path(a.crash_dir), verbose=a.verbose,
-                       active=active)
+    available = [name for name, _fn, _h in _targets(a.time_budget, active)]
+    if not available:
+        print("fuzz_recover: none of the selected targets is available here (their engine "
+              "imports failed)", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        if a.reproduce:
+            try:
+                data = Path(a.reproduce).read_bytes()
+            except OSError as e:
+                print(f"fuzz_recover: cannot read {a.reproduce}: {e}", file=sys.stderr)
+                return EXIT_USAGE
+            if a.isolate:
+                findings = run_isolated(data, a.time_budget, a.timeout, a.rlimit_mb, active)
+            else:
+                findings = run_targets(data, time_budget=a.time_budget, active=active)
+            if not findings:
+                print(f"{a.reproduce}: no findings "
+                      + (f"in an isolated worker (timeout {a.timeout:g}s)" if a.isolate
+                         else "in-process (try --isolate for a native crash/hang)"))
+                return EXIT_OK
+            for f in findings:
+                print(f"[{f['target']}] {f['reason']}")
+                if f.get("traceback"):
+                    print(f["traceback"].rstrip())
+            return EXIT_FINDINGS
+
+        isolate = True if a.isolate is None else a.isolate
+        seed = a.seed if a.seed is not None else random.SystemRandom().randrange(1 << 32)
+        seed_dirs = [Path(s) for s in a.seeds] + ([] if a.no_fixture_seeds else fixture_dirs())
+        seeds = load_seeds(seed_dirs)
+        budget = f"time {a.time:g}s" if a.time else f"{a.runs} runs"
+        print(f"fuzz_recover: seed={seed}; {len(seeds)} seed input(s) from {len(seed_dirs)} dir(s); "
+              f"targets={','.join(available)}; isolate={isolate}; {budget}")
+        meta = {"seed": seed, "targets": ",".join(available), "time_budget": a.time_budget,
+                "isolate": isolate, "timeout": a.timeout, "rlimit_mb": a.rlimit_mb,
+                "budget": budget, "seed_dirs": ", ".join(str(d) for d in seed_dirs) or "(none)"}
+        deadline = (time.monotonic() + a.time) if a.time else None
+        results = campaign(seeds, runs=(0 if a.time else a.runs), deadline=deadline,
+                           rng=random.Random(seed), time_budget=a.time_budget, isolate=isolate,
+                           timeout=a.timeout, rlimit_mb=a.rlimit_mb, crash_dir=Path(a.crash_dir),
+                           verbose=a.verbose, active=active, meta=meta)
+    except KeyboardInterrupt:
+        print("fuzz_recover: interrupted", file=sys.stderr)
+        return EXIT_INTERRUPTED
     if results:
-        print(f"\n{len(results)} distinct finding(s) saved to {a.crash_dir}")
+        print(f"\n{len(results)} distinct finding(s) saved to {a.crash_dir} (replay with --seed {seed})")
         return EXIT_FINDINGS
     return EXIT_OK
 

@@ -65,3 +65,177 @@ def test_classifier_contract():
     class UnsupportedInput(Exception):
         pass
     assert fuzz_recover.classify("triage", False, UnsupportedInput("not a binary")) is None
+
+
+# ------------------------------------------------------------------------------------------------
+# harness regressions (Oct 2026 review): isolation, temp files, Ctrl-C, dedup, CLI validation
+# ------------------------------------------------------------------------------------------------
+import os  # noqa: E402
+import random  # noqa: E402
+import tempfile  # noqa: E402
+import time  # noqa: E402
+
+import fuzz_helpers  # noqa: E402
+
+
+@pytest.fixture
+def own_tmpdir(tmp_path, monkeypatch):
+    """Point the OS temp dir at a private directory so leaked temp files are visible."""
+    d = tmp_path / "osTemp"
+    d.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(d))
+    return d
+
+
+def test_isolated_large_result_is_read_not_misreported_as_hang():
+    # a >64 KB result used to deadlock (join before reading the queue) and come back as a "hang"
+    t = time.monotonic()
+    r = fuzz_recover.run_isolated(b"\x7fELF", time_budget=0.5, timeout=20.0, rlimit_mb=0,
+                                  targets_fn=fuzz_helpers.big_result)
+    assert time.monotonic() - t < 15, "worker result was not read before join"
+    assert len(r) == 1 and r[0]["exc_type"] == "MemoryError" and "hang" not in r[0]["reason"], r
+
+
+def test_isolated_hang_is_attributed_and_leaks_no_temp_files(own_tmpdir):
+    r = fuzz_recover.run_isolated(b"\x7fELF" + b"A" * 1000, time_budget=0.5, timeout=2.0,
+                                  rlimit_mb=0, targets_fn=fuzz_helpers.hang)
+    assert len(r) == 1 and r[0]["reason"].startswith("hang"), r
+    assert r[0]["target"] == "meta", r                 # attributed from the worker's progress log
+    assert any("stuck_in_parser" in f for f in r[0]["frames"]), r[0]   # watchdog stack dump
+    # the killed worker could not clean up; the parent owns and removes both temp files
+    assert sorted(os.listdir(own_tmpdir)) == []
+
+
+def test_isolated_native_crash_is_attributed(own_tmpdir):
+    r = fuzz_recover.run_isolated(b"\x7fELF", time_budget=0.5, timeout=20.0, rlimit_mb=0,
+                                  targets_fn=fuzz_helpers.native_abort)
+    assert len(r) == 1 and r[0]["target"] == "strings", r
+    assert "signal" in r[0]["reason"] or "exited" in r[0]["reason"], r
+    assert sorted(os.listdir(own_tmpdir)) == []
+
+
+def test_isolated_clean_run_has_no_findings(own_tmpdir):
+    assert fuzz_recover.run_isolated(b"x", 0.5, 20.0, 0, targets_fn=fuzz_helpers.clean) == []
+    assert sorted(os.listdir(own_tmpdir)) == []
+
+
+def test_temp_files_use_os_temp_dir_not_slash_tmp(own_tmpdir):
+    # Windows has no /tmp: the old hard-coded fallback raised FileNotFoundError '\\tmp\\...'
+    p = fuzz_recover._mktemp()
+    try:
+        assert p.parent == own_tmpdir and p.name.startswith(".fuzz_recover_")
+    finally:
+        p.unlink()
+    fuzz_recover.run_targets(b"\x7fELF", targets_fn=fuzz_helpers.clean)
+    assert sorted(os.listdir(own_tmpdir)) == []
+    assert '"/tmp"' not in (ROOT / "scripts" / "fuzz_recover.py").read_text()
+
+
+def test_isolation_falls_back_to_spawn_without_forkserver(monkeypatch):
+    import multiprocessing as mp
+    monkeypatch.setattr(mp, "get_all_start_methods", lambda: ["spawn"])     # e.g. Windows
+    assert fuzz_recover._isolation_ctx().get_start_method() == "spawn"
+
+
+def test_rlimit_is_skipped_without_resource_module(monkeypatch):
+    monkeypatch.setitem(sys.modules, "resource", None)       # Windows: no `resource`
+    fuzz_recover._apply_rlimit(64)                            # must not raise
+
+
+def _interrupting(_tb, _active):
+    def stop(_p):
+        raise KeyboardInterrupt
+    return [("image", stop, False)]
+
+
+def test_ctrl_c_is_not_a_finding_and_stops_the_campaign(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        fuzz_recover.run_targets(b"\x7fELF", targets_fn=_interrupting)
+    with pytest.raises(KeyboardInterrupt):
+        fuzz_recover.campaign([b"\x7fELF"], runs=10, deadline=None, rng=random.Random(1),
+                              time_budget=0.1, isolate=False, timeout=5, rlimit_mb=0,
+                              crash_dir=tmp_path / "c", verbose=False, targets_fn=_interrupting)
+    assert not (tmp_path / "c").exists() or not list((tmp_path / "c").iterdir())
+    assert KeyboardInterrupt not in fuzz_recover._UNCONTROLLED
+
+
+def _two_bugs(_tb, _active):
+    def by_first_byte(p):
+        if p.read_bytes()[:1] in (b"A",):
+            raise MemoryError
+        raise RecursionError
+    return [("image", by_first_byte, False)]
+
+
+def test_findings_grouped_by_root_cause_not_input_hash(tmp_path):
+    rng = random.Random(3)
+    res = fuzz_recover.campaign([b"A" + bytes(600), b"B" + bytes(600)], runs=40, deadline=None,
+                                rng=rng, time_budget=0.1, isolate=False, timeout=5, rlimit_mb=0,
+                                crash_dir=tmp_path, verbose=False, meta={"seed": 3},
+                                targets_fn=_two_bugs)
+    kinds = sorted(g["exc_type"] for g in res)
+    assert kinds == ["MemoryError", "RecursionError"], res     # 2 root causes, not ~40 inputs
+    assert sum(g["count"] for g in res) == 40
+    assert len(list(tmp_path.glob("*.bin"))) == 2
+    notes = "".join(p.read_text(encoding="utf-8") for p in tmp_path.glob("*.txt"))
+    assert "seed: 3" in notes and "hits:" in notes
+
+
+def test_seed_is_chosen_printed_and_recorded(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fuzz_recover, "_targets", _two_bugs)
+    rc = fuzz_recover.main(["--runs", "3", "--no-fixture-seeds", "--no-isolate",
+                            "--crash-dir", str(tmp_path)])
+    assert rc == fuzz_recover.EXIT_FINDINGS
+    out = capsys.readouterr().out
+    import re
+    m = re.search(r"seed=(\d+)", out)
+    assert m, out
+    note = next(tmp_path.glob("*.txt")).read_text(encoding="utf-8")
+    assert f"seed: {m.group(1)}" in note and "isolate: False" in note and "time_budget:" in note
+    assert "targets: image" in note
+
+
+def test_unknown_target_name_is_a_usage_error(capsys):
+    rc = fuzz_recover.main(["--targets", "imgae", "--runs", "1", "--no-fixture-seeds"])
+    assert rc == fuzz_recover.EXIT_USAGE
+    assert "imgae" in capsys.readouterr().err
+
+
+def test_reproduce_honours_isolate_and_timeout(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_isolated(data, time_budget, timeout, rlimit_mb, active=None, targets_fn=None):
+        seen.update(timeout=timeout, data=data)
+        return [{"target": "meta", "reason": "hang (> 2s wall clock)", "traceback": ""}]
+    monkeypatch.setattr(fuzz_recover, "run_isolated", fake_isolated)
+    monkeypatch.setattr(fuzz_recover, "run_targets",
+                        lambda *a, **k: pytest.fail("--isolate replay ran in-process"))
+    f = tmp_path / "in.bin"
+    f.write_bytes(b"\x7fELF")
+    rc = fuzz_recover.main(["--reproduce", str(f), "--isolate", "--timeout", "2"])
+    assert rc == fuzz_recover.EXIT_FINDINGS and seen == {"timeout": 2.0, "data": b"\x7fELF"}
+
+
+def test_atheris_instruments_before_setup(monkeypatch):
+    import contextlib
+    import types
+    calls = []
+
+    @contextlib.contextmanager
+    def instrument_imports():
+        calls.append("instrument")
+        yield
+    fake = types.SimpleNamespace(instrument_imports=instrument_imports,
+                                 Setup=lambda argv, fn: calls.append("Setup"),
+                                 Fuzz=lambda: calls.append("Fuzz"))
+    monkeypatch.setitem(sys.modules, "atheris", fake)
+    assert fuzz_recover.atheris_main([], 0.1, {"detect"}) == fuzz_recover.EXIT_OK
+    assert calls == ["instrument", "Setup", "Fuzz"]
+
+    calls.clear()
+    old = types.SimpleNamespace(instrument_all=lambda: calls.append("instrument_all"),
+                                Setup=lambda argv, fn: calls.append("Setup"),
+                                Fuzz=lambda: calls.append("Fuzz"))
+    monkeypatch.setitem(sys.modules, "atheris", old)
+    assert fuzz_recover.atheris_main([], 0.1, {"detect"}) == fuzz_recover.EXIT_OK
+    assert calls == ["instrument_all", "Setup", "Fuzz"]
