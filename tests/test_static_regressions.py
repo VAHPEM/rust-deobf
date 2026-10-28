@@ -202,3 +202,53 @@ def test_macho_literals_recovered_classic_and_chained(name):
     # a chained-fixup pointer is an encoded fixup, not the address; decoding it recovers BOTH
     # literals (only one came through before, and none in an executable with a non-zero base)
     assert {"alpha-literal-one", "bravo-literal-two"} <= strs, (name, strs)
+
+
+# --- recover_rust_meta: Location record addresses (panic_locations) ---------------------------
+
+def test_location_structs_with_va_absolute_and_relocated():
+    """with_va=True returns each record's own address; the default return shape is unchanged."""
+    fn = b"src/main.rs"
+    base = 0x1000
+    blob = bytearray(fn + b"\x00" * (16 - len(fn)))
+    rec = len(blob)
+    blob += struct.pack("<QQII", base, len(fn), 12, 5)          # absolute pointer (PE/non-PIE)
+    rel = len(blob)
+    blob += struct.pack("<QQII", 0, len(fn), 40, 9)             # PIE: pointer is a relocation
+    secs = [(base, bytes(blob))]
+    src = M.find_source_paths(secs)
+    relocs = [(base + rel, base)]
+    assert M.find_location_structs(secs, 8, src, relocs) == [("src/main.rs", 12, 5),
+                                                              ("src/main.rs", 40, 9)]
+    assert M.find_location_structs(secs, 8, src, relocs, with_va=True) == [
+        ("src/main.rs", 12, 5, base + rec), ("src/main.rs", 40, 9, base + rel)]
+
+
+def test_recover_reports_panic_locations_with_addresses():
+    path = ROOT / "tests" / "fixtures" / "vm" / "benign_rust_std.x64"
+    r = M.recover(path)
+    locs = r["panic_locations"]
+    assert [(p["file"], p["line"], p["col"]) for p in locs] == \
+        [(p["file"], p["line"], p["col"]) for p in r["panic_sites"]]
+    b = lief.parse(str(path))
+    spans = [(s.virtual_address, s.virtual_address + s.size) for s in b.sections if s.virtual_address]
+    for p in locs:
+        assert any(lo <= p["va"] < hi for lo, hi in spans)
+        # the record really is {ptr|reloc, len, line, col} at that address
+        sec = next(s for s in b.sections if s.virtual_address <= p["va"] < s.virtual_address + s.size)
+        off = p["va"] - sec.virtual_address
+        ln, col = struct.unpack_from("<II", bytes(sec.content), off + 16)
+        assert (ln, col) == (p["line"], p["col"])
+
+
+def test_panic_locations_are_rvas_for_pe(monkeypatch):
+    """recover_rust_meta reads PE sections at imagebase+RVA; the new key follows the toolkit's
+    PE convention (RVAs)."""
+    fn = b"src/lib.rs"
+    ib = 0x140000000
+    blob = bytearray(fn + b"\x00" * (16 - len(fn)))
+    blob += struct.pack("<QQII", ib + 0x3000, len(fn), 7, 3)
+    monkeypatch.setattr(M, "read_sections", lambda p: (ib, 8, [(ib + 0x3000, bytes(blob))], [], []))
+    r = M.recover("unused.exe")
+    assert r["panic_locations"] == [{"va": 0x3010, "file": "src/lib.rs", "line": 7, "col": 3}]
+    assert r["panic_sites"] == [{"file": "src/lib.rs", "line": 7, "col": 3}]

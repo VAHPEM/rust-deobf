@@ -241,7 +241,7 @@ def find_source_paths(secs):
     return out
 
 
-def find_location_structs(secs, ptr, src_by_va, relocs=None):
+def find_location_structs(secs, ptr, src_by_va, relocs=None, with_va=False):
     """Recover core::panic::Location records = {ptr(filename), len(usize)==len(filename),
     u32 line, u32 col}. Two layouts:
 
@@ -251,7 +251,8 @@ def find_location_structs(secs, ptr, src_by_va, relocs=None):
       real VA lives in the relocation addend. For each reloc whose addend is a known .rs
       string VA, read len/line/col from the struct bytes that follow the relocated field.
 
-    Returns [(file, line, col)]."""
+    Returns [(file, line, col)], or [(file, line, col, record_va)] with with_va=True (the address
+    of the first record found for each (file, line, col), in `secs`' address space)."""
     import bisect
     locs = []
     # rodata strings are not NUL-separated, so the path regex can glue the tail of a preceding
@@ -293,7 +294,7 @@ def find_location_structs(secs, ptr, src_by_va, relocs=None):
             s, ln = hit
             line, col = struct.unpack_from("<II", data, off + 2 * ptr)
             if 0 < line < 2_000_000 and 0 < col < 100_000:
-                locs.append((s, line, col))
+                locs.append((s, line, col, base + off))
     for addr, addend in (relocs or []):
         rl = va_read(secs, addr + ptr, ptr)
         if len(rl) < ptr:
@@ -307,12 +308,12 @@ def find_location_structs(secs, ptr, src_by_va, relocs=None):
             continue
         line, col = struct.unpack_from("<II", lc, 0)
         if 0 < line < 2_000_000 and 0 < col < 100_000:
-            locs.append((s, line, col))
+            locs.append((s, line, col, addr))
     # de-dup, keep deterministic order
     seen, uniq = set(), []
     for t in locs:
-        if t not in seen:
-            seen.add(t); uniq.append(t)
+        if t[:3] not in seen:
+            seen.add(t[:3]); uniq.append(t if with_va else t[:3])
     return uniq
 
 
@@ -364,7 +365,8 @@ def recover(path: Path):
     image_base, ptr, secs, syms, relocs = read_sections(path)
     raw_text = b"\n".join(d for _, d in secs).decode("latin-1", "ignore")
     src = find_source_paths(secs)
-    locs = find_location_structs(secs, ptr, src, relocs)
+    locs_va = find_location_structs(secs, ptr, src, relocs, with_va=True)
+    locs = [t[:3] for t in locs_va]
     # Rust-mangled symbols only: v0 (`_R...`), or legacy (`_ZN...`) carrying the `17h<hex>E` hash.
     # A bare `_ZN...E` is also how C++ (Itanium) mangles, so matching that alone made every
     # unstripped C++ binary look like Rust -- require the hash for the legacy form.
@@ -415,6 +417,9 @@ def recover(path: Path):
         "crates": {c: sorted(v) for c, v in sorted(crates.items())},
         "capabilities": caps,
         "panic_sites": [{"file": f, "line": l, "col": c} for f, l, c in locs],
+        # the same records with their own address (PE: RVA, like the rest of the toolkit)
+        "panic_locations": [{"va": va - image_base, "file": f, "line": l, "col": c}
+                            for f, l, c, va in locs_va],
         "panic_messages": panic_msgs,
         "demangled_symbols": sorted(set(rust_syms))[:400],
         "counts": {"source_files": len(src), "panic_sites": len(locs),
