@@ -316,11 +316,20 @@ def main():
     as_json = "--json" in sys.argv
     targets = [a for a in sys.argv[1:] if a != "--json"]
     results = []
+    failed = 0
     for t in targets:
-        r = recover(t, can)
+        # one bad target must not lose the whole batch: it becomes an {"target", "error"} row
+        try:
+            r = recover(t, can)
+        except Exception as e:  # noqa: BLE001 - reported per target, not fatal to the batch
+            r = {"error": f"{type(e).__name__}: {e}"}
+            failed += 1
         r["target"] = str(t)
         results.append(r)
         if as_json:
+            continue
+        if "recall" not in r:
+            print(f"{Path(t).name:<30} ERR {r['error']}")
             continue
         print(f"{Path(t).name:<30} recall {r['recall']}/{r['n']}  decoders={r.get('decoders')}"
               + ("  ERR " + r['error'] if r.get('error') else ""))
@@ -328,7 +337,8 @@ def main():
             print("   +", s)
     if as_json:
         print(json.dumps(results[0] if len(results) == 1 else results, indent=2))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -619,19 +619,41 @@ def main():
         targets = [f"build/xor_custom__{f}__{p}__{s}" + (".exe" if f=="pe" else "")
                    for f in ("elf","pe") for p in ("debug","release") for s in ("nostrip","strip")]
     rows=[]
+    failed = 0
     for t in targets:
-        r = recover(ROOT/t, can); r["target"]=str(t); rows.append(r)
+        # one bad target (missing, not a binary, a parser crash) must not lose the whole batch:
+        # it becomes an {"target", "error"} row and the rest still run
+        try:
+            r = recover(_resolve_target(t), can)
+        except Exception as e:  # noqa: BLE001 - reported per target, not fatal to the batch
+            r = {"error": f"{type(e).__name__}: {e}"}
+            failed += 1
+        r["target"] = str(t); rows.append(r)
         if as_json:
+            continue
+        if "recall" not in r:
+            print(f"{Path(t).name:<42} ERR {r['error']}")
             continue
         print(f"{Path(t).name:<42} recall {r['recall']}/{r['n']}  decoders={r.get('decoders')}"
               + ("  ERR "+r['error'] if r.get('error') else ""))
         for s in r.get("recovered", []): print("     +", s)
     if as_json:
         print(json.dumps(rows[0] if len(rows) == 1 else rows, indent=2))
-        return
+        return 1 if failed else 0
     out = ROOT/"build"/"recover_callsite_results.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(json.dumps(r) for r in rows)+"\n")
+    return 1 if failed else 0
+
+
+def _resolve_target(t) -> Path:
+    """A target path as the user typed it: relative to the current directory first; only a
+    relative path that does not exist there falls back to the repo root (the default targets are
+    repo-relative `build/...` names, so they work from any cwd)."""
+    p = Path(t)
+    if p.is_absolute() or p.exists():
+        return p
+    return ROOT / p
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
