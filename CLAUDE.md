@@ -120,8 +120,11 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 also `annotations` / `push_annotations`) · `decompiler_bridge.py` (facts → neutral annotation list
 `{address, kind: comment|rename|bookmark, scope, text, source_tier, function}`, pushed into a running
 GhidraMCP 2.x/1.x or ida-pro-mcp over its loopback HTTP API; mapping verified on function starts,
-sha256 identity check, idempotent; tests use `tests/decompiler_mocks.py`, which cites the plugin
-source each stand-in follows) ·
+sha256 identity check; existing comments read back and only `[rust-deobf]` lines rewritten:
+GhidraMCP EOL by default, IDA via ida-pro-mcp's `py_eval`; tests use `tests/decompiler_mocks.py`,
+which cites the plugin source each stand-in follows) · `decompiler_selfcheck.py` (run on the VM
+against a REAL GhidraMCP / ida-pro-mcp: mapping on N function starts, identity, `--write-test`
+comment write/read-back/restore; PASS/FAIL report) ·
 `ghidra_annotate.py` + `ghidra_run.sh` / `ghidra_dump_annotations.py` (Ghidra) ·
 `redblue_loop.py` (RustCloak hide ↔ rust-deobf recover regression; exit 3 = no round was
 evaluable, e.g. every build failed or the plugin hid nothing) · `fuzz_recover.py` (fuzz our own
@@ -190,7 +193,10 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   imagebase for a non-PIE ELF is NOT verified here (no IDA in the lab). `decompiler_bridge.resolve_mapping`
   therefore probes the entry point / function starts (reported base, then "addresses as linked")
   instead of trusting a reported base — keep it that way.
-  GhidraMCP cannot read PRE comments back (replace semantics) and has no bookmark endpoint.
+  GhidraMCP 2.0 has no read path for PRE comments (only `/disassemble_function` returns comments,
+  EOL ones) and no bookmark endpoint: EOL is the default and bookmarks become EOL lines.
+  ida-pro-mcp reads comments/bookmark slots only through `py_eval` (exec with separate locals:
+  send top-level statements only, data as one JSON string literal).
 - **VALIDATION.md** uses numbered round sections; append the next `§N` rather than editing old ones.
 
 ## Maintenance: a new rustc release does NOT mean a rewrite
