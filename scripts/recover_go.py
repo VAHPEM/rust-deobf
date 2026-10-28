@@ -165,6 +165,11 @@ def parse_pclntab(raw: bytes, text_start=None):
         if name:
             funcs[entry] = name
     info["functions"] = funcs
+    # the functab ends with one extra entry: the end PC of the last function (= runtime.etext), so
+    # a consumer can tell Go text from C code linked around it (cgo / external linking)
+    endb = functab + nfunc * ent
+    if endb + ent <= len(raw):
+        info["text_end"] = tstart + u32(endb) if magic in (_V118, _V120) else up(endb)
     return info
 
 
@@ -207,10 +212,13 @@ def recover(path) -> dict:
     except Exception:
         va, raw, named, parsed = None, None, False, None
     funcs = parsed["functions"] if parsed else {}
+    text_end = parsed.get("text_end") if parsed else None
     if pe and funcs:
         # the pclntab stores absolute VAs (textStart / entry); report RVAs like the rest of the
         # toolkit (lief section addresses, recover_imports, recover_cfg are RVA-based for PE)
         funcs = {k - imagebase if k >= imagebase else k: v for k, v in funcs.items()}
+        if text_end is not None and text_end >= imagebase:
+            text_end -= imagebase
     # Go only on strong evidence: a named pclntab section, a `go1.x` version string, or a scan-found
     # table that parsed into a substantial set of Go-shaped names -- so a chance magic match in a
     # non-Go binary is not reported as Go.
@@ -227,6 +235,8 @@ def recover(path) -> dict:
         "function_count": len(funcs),
         "functions": {hex(k): v for k, v in sorted(funcs.items())},
     }
+    if funcs and text_end is not None and text_end > min(funcs):
+        out["text_end"] = hex(text_end)
     if parsed and parsed.get("truncated"):
         out["truncated"] = True
     return out
@@ -270,6 +280,7 @@ def _build_pclntab(funcs, text_start=0x401000, magic=_V120, ptr=8):
         for i, (e, nm) in enumerate(funcs):
             struct.pack_into(pk, out, hlen + 2 * i * ptr, text_start + e)
             struct.pack_into(pk, out, hlen + 2 * i * ptr + ptr, fs_base + fsz * i)
+        struct.pack_into(pk, out, hlen + 2 * len(funcs) * ptr, text_start + funcs[-1][0] + 0x10)
         for e, nm in funcs:
             out += struct.pack(pk, text_start + e) + struct.pack("<i", names_base + name_off[nm])
         return bytes(out + funcnametab)
@@ -291,6 +302,11 @@ def _build_pclntab(funcs, text_start=0x401000, magic=_V120, ptr=8):
         else:
             struct.pack_into(pk, out, pcln + i * ent, text_start + e)
             struct.pack_into(pk, out, pcln + i * ent + ptr, foff)
+    end = funcs[-1][0] + 0x10                          # the functab's trailing end-PC entry
+    if new:
+        struct.pack_into("<I", out, pcln + len(funcs) * ent, end)
+    else:
+        struct.pack_into(pk, out, pcln + len(funcs) * ent, text_start + end)
     for e, nm in funcs:
         out += (struct.pack("<Ii", e, name_off[nm]) if new
                 else struct.pack(pk, text_start + e) + struct.pack("<i", name_off[nm]))
@@ -307,6 +323,7 @@ def _selftest():
             got = parsed["functions"]
             want = {ts + e: n for e, n in funcs}
             assert got == want, (hex(magic), ptr, got)
+            assert parsed["text_end"] == ts + funcs[-1][0] + 0x10, (hex(magic), ptr)
     # a truncated / non-Go buffer is handled without raising
     assert parse_pclntab(b"not a pclntab") is None
     assert parse_pclntab(struct.pack("<I", 0xdeadbeef) + b"\x00" * 100) is None
