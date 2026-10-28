@@ -97,6 +97,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_dynamic.py` / `recover_artifacts.py` | Frida runtime memory-diff recovery |
 | `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals (dynamic, runs the sample): EXEC flips, the main module's in-memory image at exit (+ a file-layout `.fixed.exe`), MZ sweeps; sample stdio piped away |
 | `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub (x86-64/x86/AArch64, ELF incl. section-less, PE with headers + import stubs), report the OEP, carve stage-2, and the import table the stub rebuilt + stage-2 call sites bound to it (no host execution; `--entry`, `--follow`) |
+| `emu_backend.py` | emulator-backend helpers: `fast_hook_add(uc, ...)` = drop-in for `uc.hook_add` (block/code/mem-access/invalid-mem) with one Python frame per event instead of three; same exception/`hook_del`/return semantics. icicle-emu evaluated and deliberately not wired in (no Python hooks; see `bench_emu.py`) |
 | `unpack.py` | Tier 2: one unpacking command — static (unpack_emulate) first + PE-stage carve; dynamic (dump_unpacked/Frida) only as opt-in fallback behind `--i-understand-this-executes`. Nothing runs a sample by default. |
 
 ### scripts/ — Rust & Go tiers
@@ -147,7 +148,9 @@ container magics, the PE/ELF overlay, and a bounded second-pass search for heade
 (EOF tail, ends of zero padding, around >= 6.0-bit regions; <= 8192 starts/file) → annotate with
 recover_crypto's candidate primitives; honest that encrypted blobs need a key).
 Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `heldout_eval.py`,
-`measure_fp.py`, `measure_rust_meta.py`, `run_floss.py`, `parse_gallery.py`, `disasm.py`.
+`measure_fp.py`, `measure_rust_meta.py`, `run_floss.py`, `parse_gallery.py`, `disasm.py`,
+`bench_emu.py` (emulation-engine benchmark: Unicorn vs optional icicle-emu, and Unicorn hook layouts, on
+equal checked work — `--workload loop|hooks|unpack|setup|funcs`, `--json`; re-run it before any engine decision).
 
 ### premium/ — Tier 4 deobfuscation (AGPL/commercial; each needs its own test)
 `deobf_cff.py` (detect control-flow flattening) · `deobf_deflatten.py` (recover flattened CF) ·
@@ -214,6 +217,17 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
 - **recover_libfuncs' short labels drop the last v0 segment** of non-generic symbols
   (`panic_bounds_check` → `core::panicking`); relabel from the match's `sym` (recover_idioms does
   via `_readable`). Its signature DB is rustc-1.97 x86-64 only — AArch64 / i386 / PE get no hits.
+- **Emulation time is Python hooks, not the engine** (bench_emu.py): recover_emulate's run ~2% engine,
+  unpack_emulate's UPX run ~4%. A faster engine (icicle-emu: 5-14x on hook-free loops) buys ~1%;
+  cut hook cost instead (`emu_backend.fast_hook_add`, narrower hook ranges, page-protection write
+  tracking). icicle 0.0.11 has no hooks in Python, wedges on self-modifying code (even host
+  `mem_write` to a page it has translated raises `SelfModifyingCode`), costs 0.1-0.3 s per instance.
+- **Unicorn write-protection tracking:** in a `UC_HOOK_MEM_WRITE_PROT` hook, unprotect the page and
+  return **False**, then resume `emu_start` at the faulting PC. Returning True after unprotecting
+  silently DROPS the faulting store on Unicorn 2.1 (one wrong byte per page).
+- **Never key per-frame state by `id(dict)`** (recover_emulate.run's fault counter does; fix in INTEGRATION.patch): CPython reuses a
+  freed frame's address, so a new callee inherited an old one's fault count and results depended on
+  allocation patterns (any unrelated change -- e.g. fewer hook frames -- moved them).
 - **VALIDATION.md** uses numbered round sections; append the next `§N` rather than editing old ones.
 
 ## Maintenance: a new rustc release does NOT mean a rewrite
