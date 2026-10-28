@@ -124,7 +124,7 @@ def test_dedup_keeps_cross_function_indicators_drops_same_function_views():
     assert "C:\\ProgramData\\NorthwindSvc\\state.db" in out
 
 
-_BUILT = ["null64", "vt32", "ct64", "ct32", "tls.so", "heap.so"]
+_BUILT = ["null64", "vt32", "ct64", "ct32", "tls.so", "heap.so", "tls2_a64.so", "bigbss64"]
 
 
 def _elf_shape(path):

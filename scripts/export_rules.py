@@ -27,6 +27,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -523,10 +524,16 @@ def _selftest():
     nums = api_rule["rule"]["features"][0]["or"]
     assert any(n["number"] == "0x726774c" for n in nums)
     # adversarial sample name: YARA meta escaped with \xHH only, identifiers bounded and valid
-    hostile = dict(facts, file="/x/" + "\u00e9\x07\"\\" * 60 + ".exe")
-    for rname, body in binary_yara(hostile):
-        assert _YARA_IDENT_RE.fullmatch(rname) and len(rname) <= YARA_IDENT_MAX
-        assert "\\u" not in body and "\\b" not in body and "\\xc3\\xa9\\x07\\\"\\\\" in body
+    # (backslash is a path separator on Windows, so the backslash case is POSIX-only)
+    hostiles = [("/x/" + "\u00e9\x07\"" * 60 + ".exe", "\\xc3\\xa9\\x07\\\"")]
+    if os.sep == "/":
+        hostiles.append(("/x/" + "\u00e9\x07\"\\" * 60 + ".exe", "\\xc3\\xa9\\x07\\\"\\\\"))
+    for path, expect in hostiles:
+        hostile = dict(facts, file=path)
+        for rname, body in binary_yara(hostile):
+            assert _YARA_IDENT_RE.fullmatch(rname) and len(rname) <= YARA_IDENT_MAX
+            assert "\\u" not in body and "\\b" not in body
+            assert _yara_escape(Path(path).name) in body and expect in body, (path, body[:200])
     if yaml is not None:
         for _, rule in bcr:
             doc = yaml.safe_load(render_capa(rule))

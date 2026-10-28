@@ -33,21 +33,31 @@ for tool in clang ld.lld; do
   fi
 done
 
-CC=(clang -O1 -fuse-ld=lld)
+# explicit target triples: the fixtures are x86 / AArch64 whatever the build host is (on an ARM64
+# host, `-m32` would mean 32-bit ARM, not i386 -- measured on ARM64 Kali)
+X64=(clang -O1 -fuse-ld=lld --target=x86_64-linux-gnu)
+X86=(clang -O1 -fuse-ld=lld --target=i386-linux-gnu)
 set -x
-"${CC[@]}"      -nostdlib -fpie -pie                 -o "$out/null64"  "$here/null.c"
-"${CC[@]}" -m32 -nostdlib -fpie -pie -Wl,-z,notext   -o "$out/vt32"    "$here/vt.c"
-"${CC[@]}"      -nostdlib -fpie -pie                 -o "$out/ct64"    "$here/ct.c"
-"${CC[@]}" -m32 -nostdlib -fpie -pie                 -o "$out/ct32"    "$here/ct.c"
-"${CC[@]}"      -nostdlib -shared -fpic -ftls-model=initial-exec -o "$out/tls.so" "$here/tls.c"
-"${CC[@]}"      -nostdlib -shared -fpic              -o "$out/heap.so" "$here/heap.c"
-# tls2.so / tls2_32.so use the default (bfd) linker: its GOT order puts T2 before T1, the order in
-# which a fixed 8-byte stride overlapped the struct on x86 (lld orders them the other way)
-small=(-Wl,-z,noseparate-code -Wl,-z,max-page-size=0x1000)
-clang -O1 -shared -fpic -nostdlib "${small[@]}" -s       -o "$out/tls2.so"    "$here/tls2.c"
-clang -O1 -m32 -shared -fpic -nostdlib "${small[@]}"     -o "$out/tls2_32.so" "$here/tls2.c"
+"${X64[@]}" -nostdlib -fpie -pie                 -o "$out/null64"  "$here/null.c"
+"${X86[@]}" -nostdlib -fpie -pie -Wl,-z,notext   -o "$out/vt32"    "$here/vt.c"
+"${X64[@]}" -nostdlib -fpie -pie                 -o "$out/ct64"    "$here/ct.c"
+"${X86[@]}" -nostdlib -fpie -pie                 -o "$out/ct32"    "$here/ct.c"
+"${X64[@]}" -nostdlib -shared -fpic -ftls-model=initial-exec -o "$out/tls.so" "$here/tls.c"
+"${X64[@]}" -nostdlib -shared -fpic              -o "$out/heap.so" "$here/heap.c"
 clang -O1 --target=aarch64-linux-gnu -shared -fpic -nostdlib -fuse-ld=lld -o "$out/tls2_a64.so" "$here/tls2.c"
-"${CC[@]}"      -nostdlib -static                    -o "$out/bigbss64" "$here/bigbss.c"
+"${X64[@]}" -nostdlib -static                    -o "$out/bigbss64" "$here/bigbss.c"
 { set +x; } 2>/dev/null
+# tls2.so / tls2_32.so need the x86 BFD linker: its GOT order puts T2 before T1, the order in which
+# a fixed 8-byte stride overlapped the struct on x86 (lld orders them the other way). Only an x86
+# host (or one with x86 binutils) has it; elsewhere they stay as committed.
+if [ "$(uname -m)" = x86_64 ]; then
+  small=(-Wl,-z,noseparate-code -Wl,-z,max-page-size=0x1000)
+  set -x
+  clang -O1 -shared -fpic -nostdlib "${small[@]}" -s       -o "$out/tls2.so"    "$here/tls2.c"
+  clang -O1 -m32 -shared -fpic -nostdlib "${small[@]}"     -o "$out/tls2_32.so" "$here/tls2.c"
+  { set +x; } 2>/dev/null
+else
+  echo "note: tls2.so / tls2_32.so not rebuilt (need the x86 BFD linker; host is $(uname -m))"
+fi
 echo "built null64 vt32 ct64 ct32 tls.so heap.so tls2.so tls2_32.so tls2_a64.so bigbss64 in $out"
 echo "note: pe64.exe and the Mach-O fixtures are committed (need lld-link / ld64 to rebuild)"
