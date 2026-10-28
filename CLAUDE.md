@@ -110,7 +110,8 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_go.py` | Go function names from the pclntab (Go's metadata analog) |
 | `recover_antianalysis.py` | anti-analysis technique inventory + build provenance |
 | `recover_enums.py` | enum discriminant/niche layout; variant names via DWARF (pyelftools, optional) else a capstone dispatch-site heuristic (x86-64 + ARM64) |
-| `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
+| `recover_embedded.py` | embedded artifacts: nested exes/archives (magic; LZ4/aPLib/BriefLZ containers header-validated), high-entropy blobs, base64 payloads (file offsets) |
+| `decompress.py` | strict pure-Python LZ4 (frame/legacy/block), aPLib (raw/AP32), BriefLZ (raw/blzpack), LZNT1 decoders: output-capped, linear, never raise; headerless decodes need full consumption + expansion + "interesting" output (validated magic / text / literal-entropy drop). Encoders for tests in `tests/_compress.py` |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
 ### scripts/ — front ends, export, orchestration
@@ -120,7 +121,8 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 `redblue_loop.py` (RustCloak hide ↔ rust-deobf recover regression; exit 3 = no round was
 evaluable, e.g. every build failed or the plugin hid nothing) · `fuzz_recover.py` (fuzz our own
 analysis path on malformed binaries; findings grouped by root cause, seed always printed) · `recover_blobs.py` (triage pipeline: carve blobs via
-recover_embedded → keyless recovery = decompression + magic-anchored single-byte-XOR → annotate with
+recover_embedded → keyless recovery = decompression (zlib family + `decompress.py`) + magic-anchored
+single-byte-XOR, also at exact starts: container magics and the PE/ELF overlay → annotate with
 recover_crypto's candidate primitives; honest that encrypted blobs need a key).
 Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `heldout_eval.py`,
 `measure_fp.py`, `measure_rust_meta.py`, `run_floss.py`, `parse_gallery.py`, `disasm.py`.

@@ -38,7 +38,13 @@ _MAGICS = [
     ("rar", b"Rar!\x1a\x07", 8),
     ("cab", b"MSCF", 8),
     ("7z", b"7z\xbc\xaf\x27\x1c", 8),
+    # compressed containers (decompress.py decodes them; header fields validated in _find_magics)
+    ("lz4", b"\x04\x22\x4d\x18", 3),          # LZ4 frame: FLG, BD, header checksum
+    ("lz4_legacy", b"\x02\x21\x4c\x18", 4),   # legacy LZ4 frame: first block size
+    ("aplib", b"AP32", 20),                      # aPLib aPsafe header
+    ("brieflz", b"blz\x1a", 20),                # BriefLZ blzpack block header
 ]
+_CONTAINERS = {"lz4", "lz4_legacy", "aplib", "brieflz"}
 
 _B64_RUN = re.compile(rb"[A-Za-z0-9+/]{40,}={0,2}")
 _WIN = 512          # entropy window (small windows undershoot Shannon on random data)
@@ -95,6 +101,10 @@ def _find_magics_capped(data: bytes, self_skip=0, exclude=()):
             if name == "elf":     # validate e_ident class/data/version to drop coincidental \x7fELF
                 cls, dat, ver = data[i + 4], data[i + 5], data[i + 6]
                 if cls not in (1, 2) or dat not in (1, 2) or ver != 1:
+                    continue
+            if name in _CONTAINERS:   # a bare 4-byte magic (e.g. an LZ4 constant in code) is not a
+                import decompress     # container: its header fields must be well formed
+                if not decompress.header_ok(name, data, i):
                     continue
             if n >= _MAX_HITS:
                 capped.append(name)

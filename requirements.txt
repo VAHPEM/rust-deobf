@@ -11,3 +11,6 @@ pyelftools>=0.31
 # capa rule validation (export_rules.py --selftest parses its capa YAML back; skipped without it)
 pyyaml>=5.4
 # dynamic recovery (recover_dynamic.py, sandbox only) is optional: pip install frida frida-tools
+# TEST-ONLY, optional: python-lz4 gives independent LZ4 frame/block vectors for
+# tests/test_decompress.py (skipped without it); decompress.py itself is pure Python
+# lz4>=4

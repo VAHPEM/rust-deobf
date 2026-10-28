@@ -4,8 +4,12 @@ annotate with the cryptographic primitives the binary carries.
 
 Pipeline (all defensive, benign inputs): recover_embedded.py carves high-entropy blobs, embedded
 executables/archives and base64 payloads; for each blob we try the recoveries that need NO key --
-decompression (zlib/gzip/bz2/lzma) and single-byte-XOR brute (the classic keyless config
-obfuscation) -- and recover_crypto.py lists the cipher/hash primitives present as *candidates*.
+decompression (zlib/gzip/bz2/lzma, then decompress.py's strict LZ4 frame/legacy/block, aPLib,
+BriefLZ and LZNT1 decoders) and single-byte-XOR brute (the classic keyless config obfuscation) --
+and recover_crypto.py lists the cipher/hash primitives present as *candidates*. Exact stream starts
+the 256-byte entropy grid cannot give are tried as `streams`: each validated compressed-container
+magic (LZ4 frame/legacy, aPLib 'AP32', BriefLZ blzpack) and a PE/ELF overlay (droppers append a
+compressed core/config at EOF, often headerless).
 
 Honest about limits: a blob encrypted with a real cipher cannot be decrypted without its key, which
 a static tool does not have. This surfaces the keyless wins and names the candidate algorithms for
@@ -17,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+import decompress  # noqa: E402
 import recover_crypto  # noqa: E402
 import recover_embedded  # noqa: E402
 
@@ -38,18 +43,9 @@ def _known_magic(b: bytes):
     return None
 
 
-def _validated_magic(b: bytes):
-    """A file magic at offset 0 that is strong enough to prove a decode: recover_embedded's
-    validated hit (PE needs e_lfanew -> PE\\0\\0, ELF a sane e_ident) for any signature of at least
-    4 bytes, or the validated PE. A bare 2-3 byte magic ("MZ", gzip's 1f8b08, "BZh") is hit by ~1 in
-    700 random blobs across 255 XOR keys, so it proves nothing on its own."""
-    sigs = {name: sig for name, sig, _need in recover_embedded._MAGICS}
-    for h in recover_embedded._find_magics(b, 0):
-        if h["offset"] != 0:
-            continue
-        if h["kind"] == "pe" or len(sigs.get(h["kind"], b"")) >= 4:
-            return h["kind"]
-    return None
+# a file magic at offset 0 strong enough to prove a decode (>= 4-byte signature or validated PE);
+# shared with decompress.py's evidence gate
+_validated_magic = decompress.validated_magic
 
 
 def _inflate(make, blob: bytes):
@@ -73,8 +69,11 @@ def _inflate(make, blob: bytes):
 
 def _try_decompress(blob: bytes):
     """Keyless: a compressed payload decompresses with no key. Try the common codecs, each capped at
-    MAX_OUT bytes of output (a zip bomb is reported truncated, not inflated). Returns
-    (name, out, truncated) or (None, None, False)."""
+    MAX_OUT bytes of output (a zip bomb is reported truncated, not inflated): zlib/gzip/bz2/lzma,
+    then decompress.py's strict LZ4 / aPLib / BriefLZ / LZNT1 decoders (containers first; the
+    headerless formats only with full consumption + expansion + an "interesting" output, see
+    decompress.py). Returns (name, out, truncated, extra) or (None, None, False, {}); `extra` carries
+    `consumed` and, for a headerless format, the `evidence` that made the decode believable."""
     import bz2
     import lzma
     import zlib
@@ -95,8 +94,14 @@ def _try_decompress(blob: bytes):
             continue
         out, truncated = r
         if out and len(out) >= 8:
-            return name, out, truncated
-    return None, None, False
+            return name, out, truncated, {}
+    d = decompress.try_all(blob, MAX_OUT)
+    if d is not None:
+        extra = {"consumed": d["consumed"]}
+        if d.get("evidence"):
+            extra["evidence"] = d["evidence"]
+        return d["format"], d["out"], d["truncated"], extra
+    return None, None, False, {}
 
 
 def _xor1_break(blob: bytes):
@@ -124,10 +129,10 @@ _XOR_TABLES = [bytes(b ^ k for b in range(256)) for k in range(256)]
 
 def _keyless(blob: bytes):
     """What can be recovered from `blob` with no key: decompression first, then XOR-1 brute."""
-    name, out, truncated = _try_decompress(blob)
+    name, out, truncated, extra = _try_decompress(blob)
     if out is not None:
         r = {"method": name, "out_size": len(out), "out_magic": _known_magic(out),
-             "preview": out[:48].decode("latin-1", "replace")}
+             "preview": out[:48].decode("latin-1", "replace"), **extra}
         if truncated:
             r["truncated_at"] = MAX_OUT      # output cap hit: out_size is a floor, not the real size
         return r
@@ -140,12 +145,106 @@ def _keyless(blob: bytes):
     return None
 
 
+_MAX_STREAMS = 64        # magic-anchored container decodes per file (each is bounded by MAX_OUT)
+
+
+def _overlay_offset(data: bytes):
+    """File offset where a PE's or ELF's own structure ends (sections, segments, header tables), if
+    bytes follow it: an appended overlay. Droppers append a compressed core/config there, often in
+    a headerless format whose start the entropy carve (256-byte grid) cannot pin down. None when
+    there is no overlay or the header does not parse; never raises."""
+    import struct
+    try:
+        n = len(data)
+        hi = 0
+        if data[:4] == b"\x7fELF" and data[4] in (1, 2) and data[5] in (1, 2):
+            e = "<" if data[5] == 1 else ">"
+            if data[4] == 2:
+                phoff, shoff = struct.unpack_from(e + "QQ", data, 0x20)
+                phes, phn, shes, shn = struct.unpack_from(e + "HHHH", data, 0x36)
+                hi = 64
+            else:
+                phoff, shoff = struct.unpack_from(e + "II", data, 0x1c)
+                phes, phn, shes, shn = struct.unpack_from(e + "HHHH", data, 0x2a)
+                hi = 52
+            wide = data[4] == 2
+            if (phn and phoff + phn * phes > n) or (shn and shoff + shn * shes > n):
+                return None                                    # header tables outside the file
+            if phoff and phn:
+                hi = max(hi, phoff + phn * phes)
+                for k in range(min(phn, 4096)):
+                    p = phoff + k * phes
+                    off, size = (struct.unpack_from(e + "Q", data, p + 8)[0],
+                                 struct.unpack_from(e + "Q", data, p + 32)[0]) if wide else \
+                        (struct.unpack_from(e + "I", data, p + 4)[0], struct.unpack_from(e + "I", data, p + 16)[0])
+                    if size:
+                        hi = max(hi, off + size)
+            if shoff and shn:
+                hi = max(hi, shoff + shn * shes)
+                for k in range(min(shn, 4096)):
+                    p = shoff + k * shes
+                    typ = struct.unpack_from(e + "I", data, p + 4)[0]
+                    off, size = struct.unpack_from(e + ("QQ" if wide else "II"), data, p + (24 if wide else 16))
+                    if typ != 8 and size:                      # SHT_NOBITS occupies no file bytes
+                        hi = max(hi, off + size)
+        elif data[:2] == b"MZ" and n >= 0x40:
+            lfa = struct.unpack_from("<I", data, 0x3c)[0]
+            if data[lfa:lfa + 4] != b"PE\x00\x00":
+                return None
+            nsec, = struct.unpack_from("<H", data, lfa + 6)
+            optsz, = struct.unpack_from("<H", data, lfa + 20)
+            hi = struct.unpack_from("<I", data, lfa + 24 + 60)[0]    # SizeOfHeaders
+            sec = lfa + 24 + optsz
+            for k in range(min(nsec, 96)):
+                rawsize, rawptr = struct.unpack_from("<II", data, sec + 40 * k + 16)
+                if rawsize:
+                    hi = max(hi, rawptr + rawsize)
+        else:
+            return None
+        return hi if 0 < hi < n else None
+    except (struct.error, IndexError, OverflowError):
+        return None
+
+
+def _streams(data: bytes, emb: dict, blobs: list):
+    """Keyless recovery at exact stream starts the entropy carve cannot give: (1) every validated
+    compressed-container magic recover_embedded found (LZ4 frame / legacy, aPLib AP32, BriefLZ
+    blzpack), decoded from the magic; (2) a PE/ELF overlay, tried with the whole keyless chain."""
+    out = []
+    view = memoryview(data)
+    for h in emb["embedded"]:
+        fmt = decompress.CONTAINER_KINDS.get(h["kind"])
+        if not fmt:
+            continue
+        if len(out) >= _MAX_STREAMS:
+            break
+        r = decompress.try_all(view[h["offset"]:], MAX_OUT, formats=[fmt])
+        k = None
+        if r is not None:
+            o = r["out"]
+            k = {"method": fmt, "consumed": r["consumed"], "out_size": len(o),
+                 "out_magic": _known_magic(o), "preview": o[:48].decode("latin-1", "replace")}
+            if r["truncated"]:
+                k["truncated_at"] = MAX_OUT
+        out.append({"offset": h["offset"], "size": r["consumed"] if r else None,
+                    "anchor": f"magic:{h['kind']}", "keyless": k})
+    ov = _overlay_offset(data)
+    if ov is not None:
+        covered = {b["offset"] for b in blobs if b["offset"] + b["size"] == len(data)}
+        covered |= {s["offset"] for s in out}
+        if ov not in covered:
+            out.append({"offset": ov, "size": len(data) - ov, "anchor": "overlay",
+                        "keyless": _keyless(data[ov:])})
+    return out
+
+
 def recover(path) -> dict:
     """Carve blobs from `path`, attempt keyless recovery of each, and list crypto candidates.
 
     Returns {file_size, crypto_candidates, blobs:[{offset,size,entropy,keyless|None}],
-    embedded, base64, counts}. Offsets are file offsets (feed a carver directly).
-    """
+    streams:[{offset,size,anchor,keyless|None}], embedded, base64, counts}. `streams` are exact
+    stream starts (a compressed-container magic, or a PE/ELF overlay) tried on top of the
+    entropy-carved blobs. Offsets are file offsets (feed a carver directly)."""
     data = Path(path).read_bytes()
     emb = recover_embedded.recover(path)
     crypto = recover_crypto.recover(path).get("algorithms", [])
@@ -154,39 +253,47 @@ def recover(path) -> dict:
         b = data[h["offset"]:h["offset"] + h["size"]]
         blobs.append({"offset": h["offset"], "size": h["size"], "entropy": h["entropy"],
                       "sha256": h["sha256"], "keyless": _keyless(b)})
+    streams = _streams(data, emb, blobs)
     # "plain" is a blob that needed no recovery (its bytes already carry a magic), not a recovery
-    recovered = sum(1 for x in blobs if x["keyless"] and x["keyless"]["method"] != "plain")
+    recovered = sum(1 for x in blobs + streams if x["keyless"] and x["keyless"]["method"] != "plain")
     return {
         "file_size": len(data),
         "crypto_candidates": crypto,
         "blobs": blobs,
+        "streams": streams,
         "embedded": emb["embedded"],
         "base64": emb["base64"],
-        "counts": {"blobs": len(blobs), "keyless_recovered": recovered,
+        "counts": {"blobs": len(blobs), "streams": len(streams), "keyless_recovered": recovered,
                    "embedded": len(emb["embedded"]), "base64": len(emb["base64"]),
                    "crypto_candidates": len(crypto)},
     }
 
 
+def _describe(k) -> str:
+    if not k:
+        return "opaque (encrypted?); no keyless recovery"
+    if k["method"] == "plain":
+        return f"plain {k['magic']} (not encoded)"
+    if k["method"] == "xor8":
+        return f"single-byte XOR key=0x{k['key']:02x} reveals {k['magic']}"
+    cut = f" (truncated at the {k['truncated_at']}B cap)" if k.get("truncated_at") else ""
+    ev = f" evidence={k['evidence']}" if k.get("evidence") else ""
+    return (f"decompressed via {k['method']} -> {k['out_size']}B{cut} magic={k['out_magic']}{ev} "
+            f"{k['preview']!r}")
+
+
 def _print(res):
     c = res["counts"]
-    print(f"file_size={res['file_size']}  blobs={c['blobs']} (keyless_recovered={c['keyless_recovered']})  "
-          f"embedded={c['embedded']}  base64={c['base64']}  crypto_candidates={c['crypto_candidates']}")
+    print(f"file_size={res['file_size']}  blobs={c['blobs']} streams={c['streams']} "
+          f"(keyless_recovered={c['keyless_recovered']})  embedded={c['embedded']}  base64={c['base64']}  "
+          f"crypto_candidates={c['crypto_candidates']}")
     if res["crypto_candidates"]:
         print(f"  candidate algorithms present (need a key to decrypt): {', '.join(res['crypto_candidates'])}")
     for b in res["blobs"]:
-        k = b["keyless"]
-        if k and k["method"] == "plain":
-            print(f"  [blob 0x{b['offset']:x} {b['size']}B H={b['entropy']}] plain {k['magic']} (not encoded)")
-        elif k and k["method"] != "xor8":
-            cut = f" (truncated at the {k['truncated_at']}B cap)" if k.get("truncated_at") else ""
-            print(f"  [blob 0x{b['offset']:x} {b['size']}B H={b['entropy']}] decompressed via {k['method']} "
-                  f"-> {k['out_size']}B{cut} magic={k['out_magic']} {k['preview']!r}")
-        elif k:
-            print(f"  [blob 0x{b['offset']:x} {b['size']}B H={b['entropy']}] single-byte XOR key=0x{k['key']:02x} "
-                  f"reveals {k['magic']}")
-        else:
-            print(f"  [blob 0x{b['offset']:x} {b['size']}B H={b['entropy']}] opaque (encrypted?); no keyless recovery")
+        print(f"  [blob 0x{b['offset']:x} {b['size']}B H={b['entropy']}] {_describe(b['keyless'])}")
+    for s in res["streams"]:
+        size = f" {s['size']}B" if s["size"] is not None else ""
+        print(f"  [stream 0x{s['offset']:x}{size} {s['anchor']}] {_describe(s['keyless'])}")
 
 
 def _selftest():
