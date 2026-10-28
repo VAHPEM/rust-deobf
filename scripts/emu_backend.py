@@ -27,7 +27,8 @@ from __future__ import annotations
 import ctypes
 import sys
 
-from unicorn import (UC_HOOK_BLOCK, UC_HOOK_CODE, UC_HOOK_MEM_FETCH, UC_HOOK_MEM_FETCH_PROT,
+from unicorn import (UC_HOOK_BLOCK, UC_HOOK_CODE, UC_HOOK_INSN, UC_HOOK_INTR, UC_HOOK_MEM_FETCH,
+                     UC_HOOK_MEM_FETCH_PROT,
                      UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ, UC_HOOK_MEM_READ_AFTER,
                      UC_HOOK_MEM_READ_PROT, UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE,
                      UC_HOOK_MEM_WRITE_PROT, UC_HOOK_MEM_WRITE_UNMAPPED, UcError)
@@ -37,10 +38,16 @@ try:                                          # binding internals (unicorn 2.1's
     _CODE_CF = _ub.HOOK_CODE_CFUNC
     _ACCESS_CF = _ub.HOOK_MEM_ACCESS_CFUNC
     _INVALID_CF = _ub.HOOK_MEM_INVALID_CFUNC
+    _INTR_CF = _ub.HOOK_INTR_CFUNC
     _hook_add = _ub.uclib.uc_hook_add
     _hook_h = _ub.uc_hook_h
 except Exception:                             # another binding layout: always use uc.hook_add
     _ub = None
+try:
+    from unicorn.unicorn_py3.arch.intel import HOOK_INSN_SYSCALL_CFUNC as _SYSCALL_CF
+    from unicorn.x86_const import UC_X86_INS_SYSCALL as _INS_SYSCALL
+except Exception:
+    _SYSCALL_CF = None
 
 _CODE_TYPES = (UC_HOOK_BLOCK, UC_HOOK_CODE)
 _ACCESS_MASK = UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE | UC_HOOK_MEM_FETCH | UC_HOOK_MEM_READ_AFTER
@@ -58,9 +65,13 @@ def _fail(uc, e):
         pass
 
 
-def _kind(htype):
+def _kind(htype, aux1=0):
     if htype in _CODE_TYPES:
         return "code"
+    if htype == UC_HOOK_INTR:
+        return "intr"
+    if htype == UC_HOOK_INSN:
+        return "syscall" if (_SYSCALL_CF is not None and aux1 == _INS_SYSCALL) else None
     if htype and not htype & ~_ACCESS_MASK:
         return "access"
     if htype and not htype & ~_INVALID_MASK:
@@ -68,41 +79,78 @@ def _kind(htype):
     return None
 
 
-def fast_hook_add(uc, htype, callback, user_data=None, begin=1, end=0):
-    """`uc.hook_add(htype, callback, user_data, begin, end)` with one Python frame per event.
+def fast_hook_add(uc, htype, callback, user_data=None, begin=1, end=0, aux1=0):
+    """`uc.hook_add(htype, callback, user_data, begin, end, aux1)` with one Python frame per event.
     Returns the hook handle (usable with uc.hook_del)."""
-    kind = _kind(htype)
-    if _ub is None or kind is None or not hasattr(uc, "_uch") or not hasattr(uc, "_callbacks"):
-        return uc.hook_add(htype, callback, user_data, begin, end)
+    kind = _kind(htype, aux1)
+    if (_ub is None or kind is None or not hasattr(uc, "_uch") or not hasattr(uc, "_callbacks")
+            or (kind == "syscall" and not _is_x86(uc))):
+        return uc.hook_add(htype, callback, user_data, begin, end, aux1) if aux1 else \
+            uc.hook_add(htype, callback, user_data, begin, end)
+    # the callback reaches uc through a box that release() empties: the ctypes callback objects
+    # form reference cycles of their own, and holding uc in them would keep a dead emulator alive
+    # until the next full garbage collection
+    boxes = uc.__dict__.setdefault("_fast_boxes", [])
+    box = [uc]
+    boxes.append(box)
+    extra = ()
     if kind == "code":
         def cb(_h, address, size, _key):
             try:
-                callback(uc, address, size, user_data)
+                callback(box[0], address, size, user_data)
             except BaseException as e:
-                _fail(uc, e)
+                _fail(box[0], e)
         fptr = _CODE_CF(cb)
     elif kind == "access":
         def cb(_h, access, address, size, value, _key):
             try:
-                callback(uc, access, address, size, value, user_data)
+                callback(box[0], access, address, size, value, user_data)
             except BaseException as e:
-                _fail(uc, e)
+                _fail(box[0], e)
         fptr = _ACCESS_CF(cb)
-    else:
+    elif kind == "invalid":
         def cb(_h, access, address, size, value, _key):
             try:
-                return bool(callback(uc, access, address, size, value, user_data))
+                return bool(callback(box[0], access, address, size, value, user_data))
             except BaseException as e:
-                _fail(uc, e)
+                _fail(box[0], e)
                 return False
         fptr = _INVALID_CF(cb)
+    elif kind == "intr":
+        def cb(_h, intno, _key):
+            try:
+                callback(box[0], intno, user_data)
+            except BaseException as e:
+                _fail(box[0], e)
+        fptr = _INTR_CF(cb)
+    else:                                     # x86 `syscall` instruction
+        def cb(_h, _key):
+            try:
+                callback(box[0], user_data)
+            except BaseException as e:
+                _fail(box[0], e)
+        fptr = _SYSCALL_CF(cb)
+        extra = (ctypes.c_int(aux1),)
     handle = _hook_h()
     err = _hook_add(uc._uch, ctypes.byref(handle), htype, ctypes.cast(fptr, ctypes.c_void_p),
-                    ctypes.c_void_p(0), ctypes.c_uint64(begin), ctypes.c_uint64(end))
+                    ctypes.c_void_p(0), ctypes.c_uint64(begin), ctypes.c_uint64(end), *extra)
     if err:
         raise UcError(err)
     uc._callbacks[handle.value] = fptr        # keeps the ctypes callback alive; hook_del drops it
     return handle.value
+
+
+def _is_x86(uc):
+    from unicorn import UC_ARCH_X86
+    return getattr(uc, "_arch", None) == UC_ARCH_X86
+
+
+def release(uc):
+    """Done with `uc`: cut the references fast_hook_add's callbacks hold to it, so dropping the
+    last reference frees the emulator (and its translation cache) at once, without a garbage
+    collection. Emulating on `uc` after release() is an error (its hooks see no emulator)."""
+    for box in uc.__dict__.pop("_fast_boxes", ()):
+        box[0] = None
 
 
 def _selftest():

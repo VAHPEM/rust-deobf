@@ -97,7 +97,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_dynamic.py` / `recover_artifacts.py` | Frida runtime memory-diff recovery |
 | `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals (dynamic, runs the sample): EXEC flips, the main module's in-memory image at exit (+ a file-layout `.fixed.exe`), MZ sweeps; sample stdio piped away |
 | `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub (x86-64/x86/AArch64, ELF incl. section-less, PE with headers + import stubs), report the OEP, carve stage-2, and the import table the stub rebuilt + stage-2 call sites bound to it (no host execution; `--entry`, `--follow`) |
-| `emu_backend.py` | emulator-backend helpers: `fast_hook_add(uc, ...)` = drop-in for `uc.hook_add` (block/code/mem-access/invalid-mem) with one Python frame per event instead of three; same exception/`hook_del`/return semantics. icicle-emu evaluated and deliberately not wired in (no Python hooks; see `bench_emu.py`) |
+| `emu_backend.py` | emulator-backend helpers: `fast_hook_add(uc, ...)` = drop-in for `uc.hook_add` (block/code/mem-access/invalid-mem/intr/x86 `syscall`) with one Python frame per event instead of three; same exception/`hook_del`/return semantics; `release(uc)` cuts the hooks' references so a discarded emulator is freed by refcount (no `gc.collect()`). icicle-emu evaluated and deliberately not wired in (no Python hooks; see `bench_emu.py`) |
 | `unpack.py` | Tier 2: one unpacking command — static (unpack_emulate) first + PE-stage carve; dynamic (dump_unpacked/Frida) only as opt-in fallback behind `--i-understand-this-executes`. Nothing runs a sample by default. |
 
 ### scripts/ — Rust & Go tiers
@@ -225,9 +225,17 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
 - **Unicorn write-protection tracking:** in a `UC_HOOK_MEM_WRITE_PROT` hook, unprotect the page and
   return **False**, then resume `emu_start` at the faulting PC. Returning True after unprotecting
   silently DROPS the faulting store on Unicorn 2.1 (one wrong byte per page).
-- **Never key per-frame state by `id(dict)`** (recover_emulate.run's fault counter does; fix in INTEGRATION.patch): CPython reuses a
-  freed frame's address, so a new callee inherited an old one's fault count and results depended on
-  allocation patterns (any unrelated change -- e.g. fewer hook frames -- moved them).
+- **Never key per-frame state by `id(dict)`** (recover_emulate.run's fault counter did, until the
+  count moved onto the frame): CPython reuses a freed frame's address, so a new callee inherited an
+  old one's fault count and results depended on allocation patterns (any unrelated change -- e.g.
+  fewer hook frames -- moved them). `tests/test_emulate_determinism.py` guards it.
+- **Emulation perf changes must keep outputs identical:** `tests/test_emu_equivalence.py` compares a
+  `tests/emu_equiv.py` dump (525 functions' runs + explore, recover(), unpack on the pack fixtures)
+  with `tests/fixtures/emu/equiv_golden.json.gz`; `python3 tests/emu_equiv.py compare A B` diffs
+  two dumps. Regenerate the golden file only for an intended output change.
+- **Unicorn 2.1 PC writes from a hook:** only a single `uc_reg_write` of the PC makes Unicorn leave the
+  current block; `uc_reg_write_batch` including the PC does not (runs silently diverge). Batch the
+  other registers, write the PC alone, last.
 - **VALIDATION.md** uses numbered round sections; append the next `§N` rather than editing old ones.
 
 ## Maintenance: a new rustc release does NOT mean a rewrite

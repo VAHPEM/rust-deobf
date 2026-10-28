@@ -65,11 +65,14 @@ from unicorn import x86_const as X
 from unicorn import arm64_const as A
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from emu_backend import fast_hook_add  # noqa: E402  (one Python frame per hook event)
+from emu_backend import fast_hook_add, release  # noqa: E402  (one Python frame per hook event)
 
 ROOT = Path(__file__).resolve().parent.parent
 _SIGS = Path(__file__).resolve().parent / "data" / "runtime_sigs.json"
 _PRINTABLE_RUN = re.compile(rb"[\x20-\x7e]{6,}")
+_PRINTABLE_BYTE = re.compile(rb"[\x20-\x7e]")
+_CALL_KINDS = frozenset(("call", "icall", "icall_rip"))
+_MASK64 = (1 << 64) - 1
 PRINT = set(bytes(string.printable, "ascii")) - set(b"\x0b\x0c")
 
 BASE = 0x0                # map image at native VAs (PIE-safe: obfstr's xref pointer math matches)
@@ -90,6 +93,11 @@ _TLS_VAR_CAP = 0x4000
 TRAMP = 0x7e000000        # one 16-byte `ret` trampoline per import
 TRAMP_SIZE = 0x100000
 BRK = 0x60000000          # program break for brk()
+# zero-filled buffers _reset writes every run (built once, not per run)
+_ZERO_PAGE = bytes(0x1000)
+_ZERO_STACK = bytes(STACK_SIZE)
+_ZERO_SCRATCH = bytes(0x20000)
+_ZERO_TLS = bytes(TLS_SIZE)
 # the return address the top frame returns to, where emu_start stops. It must NOT be 0: a call
 # through a null pointer sets PC=0, and with until=0 Unicorn stops there cleanly -- looking like a
 # normal top-level return -- so everything the function did after that null call was lost. With a
@@ -862,11 +870,29 @@ class _Writes:
         self.pages = {}       # page -> array of (capture generation + 1) of each byte's last write
         self.dirty = []
         self.gen = 1
+        self.fills = {}       # n -> array("I", [gen]) * n for the current generation (hot-path cache)
+        self.overflow = False  # a store went untracked (page cap): the next reset clears everything
+
+    def fill(self, n):
+        f = self.fills.get(n)
+        if f is None:
+            f = self.fills[n] = array("I", [self.gen]) * n
+        return f
 
     def add(self, address, size):
         if size <= 0 or size > 4096:
             return
         self.dirty.append((address, size))
+        o = address & 0xfff
+        if o + size <= 4096:                       # within one page: the common case
+            pg = self.pages.get(address >> 12)
+            if pg is None:
+                if len(self.pages) > 1 << 12:      # 16 MB of written pages: stop tracking
+                    self.overflow = True
+                    return
+                pg = self.pages[address >> 12] = array("I", bytes(4 * 4096))
+            pg[o:o + size] = self.fill(size)
+            return
         end = address + size
         a = address
         g = self.gen
@@ -874,6 +900,7 @@ class _Writes:
             pg = self.pages.get(a >> 12)
             if pg is None:
                 if len(self.pages) > 1 << 12:      # 16 MB of written pages: stop tracking
+                    self.overflow = True
                     return
                 pg = self.pages[a >> 12] = array("I", bytes(4 * 4096))
             o = a & 0xfff
@@ -907,6 +934,7 @@ class _Writes:
             pg = self.pages.get(a >> 12)
             if pg is None:
                 if len(self.pages) > 1 << 12:
+                    self.overflow = True
                     return
                 pg = self.pages[a >> 12] = array("I", bytes(4 * 4096))
             pg[a & 0xfff:(a & 0xfff) + k] = gens[i:i + k]
@@ -928,6 +956,7 @@ class _Writes:
         spans = sorted(self.dirty)
         self.dirty = []
         self.gen += 1
+        self.fills = {}
         merged = []
         for a, n in spans:
             if merged and a <= merged[-1][1]:
@@ -1097,7 +1126,10 @@ def _fast_access(uc):
     one_p = ctypes.byref(one)
     buf = ctypes.create_string_buffer(4096)
     string_at = ctypes.string_at
-    slow_mem_read = uc.mem_read
+    # the unbound method + a weak reference: a bound uc.mem_read stored on uc itself would be a
+    # reference cycle, keeping a discarded emulator alive until a full garbage collection
+    import weakref
+    slow_read, uc_ref = type(uc).mem_read, weakref.ref(uc)
     batches = {}
 
     def reg_read(reg_id, aux=None):
@@ -1111,7 +1143,7 @@ def _fast_access(uc):
             raise UcError(UC_ERR_ARG)
 
     def reg_read_batch(ids):
-        key = tuple(ids)
+        key = ids if type(ids) is tuple else tuple(ids)
         b = batches.get(key)
         if b is None:
             n = len(key)
@@ -1121,17 +1153,35 @@ def _fast_access(uc):
         regs, vals, ptrs, n = b
         if uclib.uc_reg_read_batch(h, regs, ptrs, n):
             raise UcError(UC_ERR_ARG)
-        return tuple(vals)
+        return vals[:]
 
     def mem_read(address, size):
         if size > 4096:
-            return slow_mem_read(address, size)
+            return slow_read(uc_ref(), address, size)
         err = mr(h, address, buf, size)
         if err:
             raise UcError(err)
         return string_at(buf, size)
 
+    wbatches = {}
+
+    def reg_write_batch(ids, values):
+        """Write registers in order, in one call (frame unwinding writes ~11 at once)."""
+        key = tuple(ids)
+        b = wbatches.get(key)
+        if b is None:
+            n = len(key)
+            vals = (ctypes.c_uint64 * n)()
+            ptrs = (ctypes.c_void_p * n)(*[ctypes.addressof(vals) + 8 * i for i in range(n)])
+            b = wbatches[key] = ((ctypes.c_int * n)(*key), vals, ptrs, ctypes.c_int(n))
+        regs, vals, ptrs, n = b
+        for i, v in enumerate(values):
+            vals[i] = v & 0xffffffffffffffff
+        if uclib.uc_reg_write_batch(h, regs, ptrs, n):
+            raise UcError(UC_ERR_ARG)
+
     uc.reg_read, uc.reg_write, uc.reg_read_batch, uc.mem_read = reg_read, reg_write, reg_read_batch, mem_read
+    uc.reg_write_batch = reg_write_batch
 
 
 class _Abort(Exception):
@@ -1176,14 +1226,21 @@ class Emulator:
                           X.UC_X86_REG_R14, X.UC_X86_REG_R15]
             if img.pe:
                 self.SAVED += [X.UC_X86_REG_RSI, X.UC_X86_REG_RDI]
+        self.SAVED = tuple(self.SAVED)       # (tuples: the batch accessors key their buffers on them)
+        self._ARGS6 = tuple(self.ARGS[:6])
         self._fresh()
 
     # ---- machine setup ---------------------------------------------------------------------
 
     def _fresh(self):
         if self.uc is not None:
-            self.uc = None
-            gc.collect()
+            import weakref
+            old, self.uc = self.uc, None
+            alive = weakref.ref(old)
+            release(old)                   # (no hook holds it now: the last reference frees it)
+            del old
+            if alive() is not None:
+                gc.collect()               # still referenced from some cycle: free it the slow way
         if self.arm:
             uc = self.uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
         else:
@@ -1231,9 +1288,9 @@ class Emulator:
         fast_hook_add(uc, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
                       self._on_unmapped)
         if self.arm or self.x32:
-            uc.hook_add(UC_HOOK_INTR, self._on_intr)        # i386 syscalls / svc are int/svc
+            fast_hook_add(uc, UC_HOOK_INTR, self._on_intr)  # i386 syscalls / svc are int/svc
         else:
-            uc.hook_add(UC_HOOK_INSN, self._on_syscall, None, 1, 0, X.UC_X86_INS_SYSCALL)
+            fast_hook_add(uc, UC_HOOK_INSN, self._on_syscall, None, 1, 0, X.UC_X86_INS_SYSCALL)
         self.runs_on_this_uc = 0
         self.auto_pages = []
 
@@ -1281,7 +1338,7 @@ class Emulator:
         dirty = set(prev.pages) if prev is not None else set()
         dirty |= self.touched
         self.touched = set()
-        z = b"\x00" * 4096
+        z = _ZERO_PAGE
         for pg in dirty:
             try:
                 uc.mem_write(pg << 12, self._orig.get(pg, z))
@@ -1292,8 +1349,12 @@ class Emulator:
                 uc.mem_write(va, blob)
             except UcError:
                 pass
-        for region, size in ((self.STACK, STACK_SIZE), (SCRATCH, 0x20000)):
-            uc.mem_write(region, b"\x00" * size)
+        # every page the previous run stored to (write hook) or the stubs wrote (touched) was just
+        # restored, so the stack and scratch window are already clean -- unless tracking hit its
+        # page cap and missed stores: then clear them whole (the first run of an emulator too)
+        if prev is None or prev.overflow:
+            uc.mem_write(self.STACK, _ZERO_STACK)
+            uc.mem_write(SCRATCH, _ZERO_SCRATCH)
         if getattr(self, "heap_top", HEAP) > HEAP:
             uc.mem_write(HEAP, b"\x00" * (min(self.heap_top, HEAP + HEAP_SIZE) - HEAP))
         if self._primed_heap is not None:
@@ -1312,7 +1373,7 @@ class Emulator:
         # thread-local storage: Rust reads thread-locals (the current thread, panic count, output
         # capture) through the thread pointer; with it at 0 the first access faults
         tp = TLS + TLS_SIZE // 2
-        uc.mem_write(TLS, b"\x00" * TLS_SIZE)
+        uc.mem_write(TLS, _ZERO_TLS)
         if self.arm:
             uc.reg_write(A.UC_ARM64_REG_TPIDR_EL0, tp)
         elif self.x32:
@@ -1516,6 +1577,7 @@ class Emulator:
             if n == "posix_memalign":
                 p = self._alloc(arg(2))
                 uc.mem_write(arg(0), struct.pack(self.pfmt, p & self.pmask))   # 4-byte ptr on x86-32
+                self._touch(arg(0), self.ptr)
                 return 0
             if n in ("memcpy", "memmove", "memcpy_chk", "memmove_chk"):
                 d, s, k = arg(0), arg(1), arg(2)
@@ -1640,20 +1702,29 @@ class Emulator:
     # ---- hooks -----------------------------------------------------------------------------
 
     def _on_write(self, uc, access, address, size, value, _):
-        self.writes.add(address, size)
+        # (hot: one call per store) _Writes.add's single-page case, inlined
+        w = self.writes
+        o = address & 0xfff
+        if 0 < size and o + size <= 4096:
+            w.dirty.append((address, size))
+            pg = w.pages.get(address >> 12)
+            if pg is None:
+                if len(w.pages) <= 1 << 12:
+                    pg = w.pages[address >> 12] = array("I", bytes(4 * 4096))
+                else:
+                    w.overflow = True
+            if pg is not None:
+                f = w.fills.get(size)
+                pg[o:o + size] = f if f is not None else w.fill(size)
+        else:
+            w.add(address, size)
         self.wrote += size
         # did printable text get written? (a new (pointer, length) string needs some)
-        if size > 8:
-            self.text_writes += 1          # the hook sees only 8 bytes of a wider store
+        if size > 8 or (size > 0 and _PRINTABLE_BYTE.search(
+                (value & _MASK64).to_bytes(8, "little")[:size])):
+            # (a store wider than 8 bytes counts as text: the hook sees only 8 bytes of it)
+            self.text_writes += 1
             self.last_text_at = self.count
-        else:
-            v = value & ((1 << (8 * size)) - 1)
-            while v:
-                if 0x20 <= (v & 0xff) <= 0x7e:
-                    self.text_writes += 1
-                    self.last_text_at = self.count
-                    break
-                v >>= 8
         if self.wrote > WRITE_BUDGET:
             # `rep stos`/`rep movs` over a fake length counts as one instruction but writes
             # megabytes, one hook call per element: stop the run instead
@@ -1727,7 +1798,7 @@ class Emulator:
             return
         self._args_left -= 1
         self._args_gen = self.writes.gen
-        regs = list(uc.reg_read_batch(self.ARGS[:6]))
+        regs = uc.reg_read_batch(self._ARGS6)
         if self.x32:
             # x86-32 is cdecl: the &str (ptr,len) pair is passed on the stack, not in registers
             # (ARGS is only ecx/edx), so used/exact were never set on i386. Read the first stack
@@ -1776,15 +1847,10 @@ class Emulator:
 
     def _abandon(self):
         """The outermost callee overran FRAME_BUDGET: unwind to its caller, return 0."""
-        uc = self.uc
         frame = self.frames[0]
         self.frames = []
         self._capture()
-        for r, v in zip(self.SAVED, frame["regs"]):
-            uc.reg_write(r, v)
-        uc.reg_write(self.SP, frame["sp"])
-        uc.reg_write(self.RET, 0)
-        uc.reg_write(self.PC, frame["ret"])
+        self._unwind(frame)
 
     def _enter_or_skip(self, address):
         """First instruction after a call: decide whether the callee runs."""
@@ -1881,11 +1947,18 @@ class Emulator:
         return hit
 
     def _unwind(self, frame):
+        """Return 0 from `frame`'s callee: restore its caller's saved registers, SP and PC."""
         uc = self.uc
-        for r, v in zip(self.SAVED, frame["regs"]):
-            uc.reg_write(r, v)
-        uc.reg_write(self.SP, frame["sp"])
-        uc.reg_write(self.RET, 0)
+        regs = list(zip(self.SAVED, frame["regs"]))
+        regs += [(self.SP, frame["sp"]), (self.RET, 0)]
+        batch = getattr(uc, "reg_write_batch", None)
+        if batch is not None:                   # one call, same order as the writes below
+            batch([r for r, _ in regs], [v for _, v in regs])
+        else:
+            for r, v in regs:
+                uc.reg_write(r, v)
+        # PC always on its own and last: only a single uc_reg_write of the PC from inside a hook
+        # makes Unicorn 2.1 leave the current block (uc_reg_write_batch does not -- measured)
         uc.reg_write(self.PC, frame["ret"])
 
     def _block_info(self, address, size):
@@ -1927,7 +2000,7 @@ class Emulator:
                 sp = uc.reg_read(self.SP)
                 self.call = {"ret": pa + pn, "start": self.count,
                              "sp": sp if self.arm else sp + self.ptr,
-                             "regs": list(uc.reg_read_batch(self.SAVED))}
+                             "regs": uc.reg_read_batch(self.SAVED)}
                 if self._enter_or_skip(address):
                     return
             elif kind == "ret":
@@ -1978,43 +2051,51 @@ class Emulator:
                 # return 0 from it and let its caller -- the decoder -- carry on
                 self._unwind(self.frames.pop())
                 return
-        if TRAMP <= address < TRAMP + TRAMP_SIZE:
-            i = (address - TRAMP) // 16
-            self._capture()
-            self._capture_args()
-            uc.reg_write(self.RET, self._stub(self.img.tramp[i] if i < len(self.img.tramp) else "")
-                         & 0xffffffffffffffff)
-            self.count += 1
-            self.prev = ("ret", 0, address, 1, not self.frames)   # the trampoline's `ret` runs next
-            return
-        name = self.img.named.get(address)
-        if name is not None:
-            # malloc/memcpy/... linked into .text (static builds): model it, return to the caller
-            self._capture()
-            self._capture_args()
-            uc.reg_write(self.RET, self._stub(name) & 0xffffffffffffffff)
-            if self.arm:
-                uc.reg_write(self.PC, uc.reg_read(A.UC_ARM64_REG_X30))
-            else:
-                sp = uc.reg_read(self.SP)
-                uc.reg_write(self.PC, struct.unpack(self.pfmt, uc.mem_read(sp, self.ptr))[0])
-                uc.reg_write(self.SP, sp + self.ptr)
-            self._on_return()
-            return
-        if not (self.img.text_va <= address < self.img.text_end) and not self.img.executable(address):
-            # running data or an unmapped page (a jump through an unset pointer): inside a callee,
-            # give up on that callee and return 0 to its caller; in the function itself, stop
-            self._capture()
-            if self.frames:
-                self._unwind(self.frames.pop())
-            else:
-                uc.emu_stop()
-            return
-        n, kind, val, la, ln = self._block_info(address, size)
+        # A block already in _blk passed the checks below (a trampoline, a modelled runtime function,
+        # non-executable memory), which depend only on its address and never change: skip them.
+        info = self._blk.get((address, size))
+        if info is None:
+            if TRAMP <= address < TRAMP + TRAMP_SIZE:
+                i = (address - TRAMP) // 16
+                self._capture()
+                self._capture_args()
+                uc.reg_write(self.RET, self._stub(self.img.tramp[i] if i < len(self.img.tramp)
+                                                  else "") & 0xffffffffffffffff)
+                self.count += 1
+                # the trampoline's `ret` runs next
+                self.prev = ("ret", 0, address, 1, not self.frames)
+                return
+            name = self.img.named.get(address)
+            if name is not None:
+                # malloc/memcpy/... linked into .text (static builds): model it, return to the caller
+                self._capture()
+                self._capture_args()
+                uc.reg_write(self.RET, self._stub(name) & 0xffffffffffffffff)
+                if self.arm:
+                    uc.reg_write(self.PC, uc.reg_read(A.UC_ARM64_REG_X30))
+                else:
+                    sp = uc.reg_read(self.SP)
+                    uc.reg_write(self.PC, struct.unpack(self.pfmt, uc.mem_read(sp, self.ptr))[0])
+                    uc.reg_write(self.SP, sp + self.ptr)
+                self._on_return()
+                return
+            if not (self.img.text_va <= address < self.img.text_end) and \
+                    not self.img.executable(address):
+                # running data or an unmapped page (a jump through an unset pointer): inside a
+                # callee, give up on that callee and return 0 to its caller; in the function
+                # itself, stop
+                self._capture()
+                if self.frames:
+                    self._unwind(self.frames.pop())
+                else:
+                    uc.emu_stop()
+                return
+            info = self._block_info(address, size)
+        n, kind, val, la, ln = info
         self.count += n
-        if kind in ("call", "icall", "icall_rip"):
+        if kind in _CALL_KINDS:
             self.prev = ("call", val, la, ln, not self.frames)
-        elif kind in ("ret", "jcc"):
+        elif kind == "ret" or kind == "jcc":
             self.prev = (kind, val, la, ln, not self.frames)
 
     # ---- running a function ----------------------------------------------------------------

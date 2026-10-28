@@ -29,8 +29,77 @@ def test_hook_kinds():
     assert EB._kind(UC_HOOK_MEM_READ_UNMAPPED) == "invalid"
     # mixed families and non-memory hooks go through the binding
     assert EB._kind(UC_HOOK_MEM_WRITE | UC_HOOK_MEM_READ_UNMAPPED) is None
-    assert EB._kind(UC_HOOK_INTR) is None
+    assert EB._kind(UC_HOOK_INTR) == "intr"
+    from unicorn import UC_HOOK_INSN
+    from unicorn.x86_const import UC_X86_INS_SYSCALL, UC_X86_INS_CPUID
+    assert EB._kind(UC_HOOK_INSN, UC_X86_INS_SYSCALL) == "syscall"
+    assert EB._kind(UC_HOOK_INSN, UC_X86_INS_CPUID) is None      # other insn hooks: the binding
     assert EB._kind(0) is None
+
+
+def test_syscall_and_interrupt_hooks_match_the_binding():
+    import struct
+    from unicorn import UC_ARCH_X86, UC_MODE_64, UC_HOOK_INSN, Uc
+    from unicorn.x86_const import UC_X86_INS_SYSCALL, UC_X86_REG_RAX, UC_X86_REG_RSP
+    # mov eax,7 ; syscall ; int 0x80 ; syscall ; ret
+    code = bytes.fromhex("b8070000000f05cd800f05c3")
+    seen = {}
+    for mode in ("binding", "fast"):
+        uc = Uc(UC_ARCH_X86, UC_MODE_64)
+        uc.mem_map(0x1000, 0x1000)
+        uc.mem_write(0x1000, code)
+        uc.mem_map(0x8000, 0x1000)
+        uc.mem_write(0x8800, struct.pack("<Q", 0x9000))
+        uc.reg_write(UC_X86_REG_RSP, 0x8800)
+        ev = seen[mode] = []
+
+        def sysc(u, d):
+            ev.append(("sys", u.reg_read(UC_X86_REG_RAX), d))
+            u.reg_write(UC_X86_REG_RAX, u.reg_read(UC_X86_REG_RAX) + 1)
+
+        def intr(u, n, d):
+            ev.append(("int", n, d))
+        if mode == "binding":
+            uc.hook_add(UC_HOOK_INSN, sysc, "s", 1, 0, UC_X86_INS_SYSCALL)
+            uc.hook_add(UC_HOOK_INTR, intr, "i")
+        else:
+            EB.fast_hook_add(uc, UC_HOOK_INSN, sysc, "s", 1, 0, UC_X86_INS_SYSCALL)
+            EB.fast_hook_add(uc, UC_HOOK_INTR, intr, "i")
+        uc.emu_start(0x1000, 0x9000, count=10)
+    assert seen["fast"] == seen["binding"] and len(seen["fast"]) == 3, seen
+
+
+def test_release_frees_the_emulator_without_gc():
+    import gc
+    import weakref
+    from unicorn import UC_ARCH_X86, UC_MODE_64, Uc
+    uc = Uc(UC_ARCH_X86, UC_MODE_64)
+    EB.fast_hook_add(uc, UC_HOOK_BLOCK, lambda *a: None)
+    EB.fast_hook_add(uc, UC_HOOK_MEM_WRITE, lambda *a: None)
+    EB.fast_hook_add(uc, UC_HOOK_INTR, lambda *a: None)
+    alive = weakref.ref(uc)
+    gc.disable()
+    try:
+        EB.release(uc)
+        del uc
+        assert alive() is None            # freed by refcount: no cycle left through the hooks
+    finally:
+        gc.enable()
+
+
+@pytest.mark.skipif(not BENIGN.is_file(), reason="benign fixture missing")
+def test_recover_emulate_frees_old_emulators_without_gc(monkeypatch):
+    import weakref
+    import recover_emulate as R
+    img = R.Image(BENIGN)
+    emu = R.Emulator(img)
+    for fva, size in img.functions()[:4]:
+        emu.run(fva, size)
+    alive = weakref.ref(emu.uc)
+    calls = []
+    monkeypatch.setattr(R.gc, "collect", lambda *a: calls.append(1))
+    emu._fresh()
+    assert alive() is None and not calls
 
 
 @pytest.mark.skipif(not BENIGN.is_file(), reason="benign fixture missing")
