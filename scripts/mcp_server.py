@@ -25,7 +25,9 @@ Tools (each takes a `path` to a local ELF/PE/Mach-O; nothing is executed -- stat
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import sys
 import traceback
 from pathlib import Path
@@ -188,14 +190,40 @@ def _error(req_id, code, message):
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
-def handle(request: dict):
-    """Process one JSON-RPC request; return a response dict, or None for a notification (no id)."""
-    if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
-        return _error(None, INVALID_REQUEST, "not a JSON-RPC 2.0 request")
-    method = request.get("method")
+def _valid_id(v) -> bool:
+    # JSON-RPC 2.0: an id is a string, a number or null (bool is an int subclass in Python: exclude;
+    # json.loads accepts NaN/Infinity, which could not be echoed back as valid JSON)
+    if isinstance(v, float):
+        return math.isfinite(v)
+    return v is None or (isinstance(v, (str, int)) and not isinstance(v, bool))
+
+
+def handle(request):
+    """Process one parsed JSON-RPC message; return a response dict, or None for a notification.
+
+    Order matters: a structurally invalid message is an Invalid Request (-32600) even without an
+    id (it is not a valid notification either); a valid notification (no `id` member) NEVER gets a
+    response, whatever its method or params; only then are params checked (-32602) and the method
+    dispatched (-32601 if unknown)."""
+    if not isinstance(request, dict):
+        return _error(None, INVALID_REQUEST, "not a JSON-RPC 2.0 request object")
     req_id = request.get("id")
-    is_notification = "id" not in request
-    params = request.get("params") or {}
+    if not _valid_id(req_id):
+        return _error(None, INVALID_REQUEST, "id must be a string, a number or null")
+    if request.get("jsonrpc") != "2.0":
+        return _error(req_id, INVALID_REQUEST, "not a JSON-RPC 2.0 request")
+    method = request.get("method")
+    if not isinstance(method, str):
+        return _error(req_id, INVALID_REQUEST, "missing or non-string 'method'")
+    params = request.get("params")
+    if params is not None and not isinstance(params, (dict, list)):
+        return _error(req_id, INVALID_REQUEST, "'params' must be an object or an array")
+    if "id" not in request:
+        return None          # a notification: no response, ever (nothing here has side effects)
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return _error(req_id, INVALID_PARAMS, "'params' must be an object (named parameters)")
 
     if method == "initialize":
         return _result(req_id, {
@@ -203,8 +231,6 @@ def handle(request: dict):
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
         })
-    if method in ("notifications/initialized", "initialized"):
-        return None
     if method == "ping":
         return _result(req_id, {})
     if method == "tools/list":
@@ -214,7 +240,13 @@ def handle(request: dict):
         ]})
     if method == "tools/call":
         name = params.get("name")
-        args = params.get("arguments") or {}
+        args = params.get("arguments")
+        if args is None:
+            args = {}
+        if not isinstance(name, str):
+            return _error(req_id, INVALID_PARAMS, "'name' must be a string")
+        if not isinstance(args, dict):
+            return _error(req_id, INVALID_PARAMS, "'arguments' must be an object")
         tool = TOOLS.get(name)
         if tool is None:
             return _error(req_id, INVALID_PARAMS, f"unknown tool: {name}")
@@ -230,28 +262,38 @@ def handle(request: dict):
         except Exception as e:  # noqa: BLE001 - an engine failed; surface it as a tool error
             return _result(req_id, {"content": [{"type": "text",
                            "text": f"{type(e).__name__}: {e}"}], "isError": True})
-    if is_notification:
-        return None
     return _error(req_id, METHOD_NOT_FOUND, f"method not found: {method}")
 
 
 def serve(stdin=None, stdout=None) -> None:
-    """Read newline-delimited JSON-RPC from stdin, write responses to stdout (the MCP stdio loop)."""
-    stdin = stdin or sys.stdin
+    """Read newline-delimited JSON-RPC from stdin, write responses to stdout (the MCP stdio loop).
+
+    stdin is read as BYTES (sys.stdin.buffer) and each line decoded with errors="replace" inside the
+    per-line guard: a strict text stdin would raise UnicodeDecodeError on one bad byte and kill the
+    server. A text stream (str lines, e.g. io.StringIO in tests) is accepted too. While a request is
+    handled, sys.stdout points at stderr so a chatty engine cannot corrupt the protocol stream."""
+    if stdin is None:
+        stdin = getattr(sys.stdin, "buffer", sys.stdin)
     stdout = stdout or sys.stdout
-    for line in stdin:
-        line = line.strip()
-        if not line:
-            continue
+    for raw in stdin:
+        request = None
         try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
-            _write(stdout, _error(None, PARSE_ERROR, "invalid JSON"))
-            continue
-        try:
-            response = handle(request)
+            line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+            except ValueError:          # JSONDecodeError, and e.g. a lone surrogate in a \u escape
+                _write(stdout, _error(None, PARSE_ERROR, "invalid JSON"))
+                continue
+            with contextlib.redirect_stdout(sys.stderr):
+                response = handle(request)
         except Exception:  # noqa: BLE001 - never let one request kill the server
-            response = _error(request.get("id") if isinstance(request, dict) else None,
+            req_id = request.get("id") if isinstance(request, dict) else None
+            if isinstance(request, dict) and "id" not in request:
+                continue                # a notification gets no response, not even an error
+            response = _error(req_id if _valid_id(req_id) else None,
                               INTERNAL_ERROR, traceback.format_exc().splitlines()[-1])
         if response is not None:
             _write(stdout, response)
@@ -286,6 +328,20 @@ def _selftest():
     miss = handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                    "params": {"name": "detect", "arguments": {"path": "/no/such/file"}}})
     assert miss["result"]["isError"] and "no such file" in miss["result"]["content"][0]["text"]
+
+    # every notification is silent (even to a request-style method); malformed requests get the
+    # specific JSON-RPC code; a bad UTF-8 line is a parse error and the loop keeps serving
+    assert handle({"jsonrpc": "2.0", "method": "ping"}) is None
+    assert handle({"jsonrpc": "2.0", "method": "tools/list"}) is None
+    assert handle({"jsonrpc": "2.0", "id": 20, "method": "tools/call",
+                   "params": ["detect"]})["error"]["code"] == INVALID_PARAMS
+    assert handle({"jsonrpc": "2.0", "id": 21})["error"]["code"] == INVALID_REQUEST
+    assert handle({"jsonrpc": "2.0", "id": float("nan"),
+                   "method": "ping"})["error"]["code"] == INVALID_REQUEST
+    out0 = io.StringIO()
+    serve(io.BytesIO(b'\xff{"x"\n{"jsonrpc":"2.0","id":22,"method":"ping"}\n'), out0)
+    l0 = [json.loads(ln) for ln in out0.getvalue().splitlines()]
+    assert l0[0]["error"]["code"] == PARSE_ERROR and l0[1] == _result(22, {})
 
     # end to end on a committed fixture: detect + metadata + recover over the stdio loop
     sample = ROOT.parent / "tests" / "fixtures" / "macho" / "litcrypt.arm64"
