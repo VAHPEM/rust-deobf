@@ -14,7 +14,9 @@ Two kinds of signature:
     alphabet: matched as exact substrings;
   * constant sets -- SHA/MD5 round + init constants, the CRC32 polynomial, BLAKE2 IV: each algorithm
     has a set of 32/64-bit magic words; we scan the file for them as little-endian values and flag
-    the algorithm when enough distinct ones are present (order- and padding-independent).
+    the algorithm when enough distinct ones are present (order- and padding-independent). Shared IV
+    words (MD5/SHA-1, SHA-256 = halves of SHA-512) never make a "high" hit alone: that needs one of
+    the algorithm's own round constants. On AArch64, constants built by movz/movk are decoded too.
 
     python3 scripts/recover_crypto.py path/to/binary            # human-readable
     python3 scripts/recover_crypto.py path/to/binary --json
@@ -52,24 +54,88 @@ _BYTE_SIGS = [
 ]
 
 # --- constant-set signatures (32/64-bit magic words, scanned as little-endian) --------------
+# Each set is split into INIT words (IVs -- several algorithms share them: MD5 and SHA-1 start from
+# the same four words; the SHA-256 IV is the high halves of the SHA-512/BLAKE2b IV) and ROUND
+# constants (unique to one algorithm). "high" confidence needs at least one round constant; an
+# init-only match is "medium" and is dropped entirely when another algorithm's match with round
+# constants already explains every word it found.
 _CONST_SIGS = {
-    "SHA-256": {"width": 4, "min": 4, "consts": [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1]},
-    "SHA-1": {"width": 4, "min": 3, "consts": [0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6,
-                                               0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476]},
-    "MD5": {"width": 4, "min": 4, "consts": [
-        0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
-        0xf57c0faf, 0x4787c62a]},
-    "SHA-512/BLAKE2b": {"width": 8, "min": 3, "consts": [
-        0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-        0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179]},
-    "CRC32": {"width": 4, "min": 1, "consts": [0xedb88320, 0x04c11db7, 0x82f63b78]},  # poly (refl/norm/C)
+    "SHA-256": {"width": 4, "min": 4,
+                "init": [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19],
+                "round": [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+                          0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5]},
+    "SHA-1": {"width": 4, "min": 3,
+              "init": [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0],
+              "round": [0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6]},
+    "MD5": {"width": 4, "min": 4,
+            "init": [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476],
+            "round": [0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+                      0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501]},
+    "SHA-512/BLAKE2b": {"width": 8, "min": 3,
+                        "init": [0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b,
+                                 0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f,
+                                 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179],
+                        "round": [0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f,
+                                  0xe9b5dba58189dbbc, 0x3956c25bf348b538, 0x59f111f1b605d019]},
+    "CRC32": {"width": 4, "min": 1, "init": [],
+              "round": [0xedb88320, 0x04c11db7, 0x82f63b78]},  # poly (refl/norm/Castagnoli)
 }
+# every 64-bit word whose 32-bit halves would otherwise read as SHA-256 init/round constants
+_WIDE = frozenset(_CONST_SIGS["SHA-512/BLAKE2b"]["init"] + _CONST_SIGS["SHA-512/BLAKE2b"]["round"])
 
 
-def scan(data: bytes) -> list[dict]:
-    """All crypto-constant hits in `data` (file offsets)."""
+def _half_of_wide(data: bytes, off: int) -> bool:
+    """Is the 32-bit word at `off` one half of a known 64-bit constant (LE) in `data`?"""
+    for base in (off - 4, off):
+        if 0 <= base and base + 8 <= len(data) and struct.unpack_from("<Q", data, base)[0] in _WIDE:
+            return True
+    return False
+
+
+def arm64_immediates(code: bytes, file_off: int = 0):
+    """Constants an AArch64 code blob builds with `movz`/`mov` + `movk` (a 32/64-bit value split into
+    16-bit chunks, so it never appears as contiguous little-endian bytes). Yields
+    (value, width, file_offset_of_the_movz). Only movk's to the same register within a short window
+    after the movz are folded in; a 64-bit (x-register) value is reported at width 8, and also at
+    width 4 when it fits in 32 bits."""
+    n = len(code) // 4
+    words = struct.unpack_from(f"<{n}I", code) if n else ()
+    for i, w in enumerate(words):
+        if (w & 0x7f800000) != 0x52800000:              # MOVZ (32/64-bit)
+            continue
+        sf, rd = w >> 31, w & 0x1f
+        hw = (w >> 21) & 3
+        if not sf and hw > 1:
+            continue
+        val = ((w >> 5) & 0xffff) << (16 * hw)
+        chunks = 1
+        for j in range(i + 1, min(n, i + 9)):
+            x = words[j]
+            if (x & 0x1f) != rd:
+                continue
+            if (x & 0x7f800000) == 0x72800000 and (x >> 31) == sf:     # MOVK same width, same Rd
+                h = (x >> 21) & 3
+                if not sf and h > 1:
+                    break
+                val = (val & ~(0xffff << (16 * h))) | (((x >> 5) & 0xffff) << (16 * h))
+                chunks += 1
+                continue
+            break                                       # any other write to Rd ends the sequence
+        if chunks < 2:
+            continue                                    # a single movz is a plain 16-bit immediate
+        off = file_off + 4 * i
+        if sf:
+            yield val, 8, off
+            if val < (1 << 32):
+                yield val, 4, off
+        else:
+            yield val, 4, off
+
+
+def scan(data: bytes, extra=None) -> list[dict]:
+    """All crypto-constant hits in `data` (file offsets). `extra` is an optional iterable of
+    (value, width, file_offset) constants decoded from instructions (arm64_immediates)."""
     hits = []
     for algo, what, sig, conf in _BYTE_SIGS:
         start = data.find(sig)
@@ -77,25 +143,59 @@ def scan(data: bytes) -> list[dict]:
             hits.append({"algo": algo, "kind": what, "offset": start, "confidence": conf,
                          "match": "byte-sequence"})
             start = data.find(sig, start + 1)
+    decoded = {}
+    for v, w, off in (extra or ()):
+        decoded.setdefault((w, v), off)
+    sets = []
     for algo, spec in _CONST_SIGS.items():
         w = spec["width"]
         fmt = "<I" if w == 4 else "<Q"
-        want = set(spec["consts"])
+        rounds = set(spec["round"])
         found = {}
-        # scan every aligned and unaligned position cheaply via a set of all little-endian words is
-        # too big; instead search for each constant's byte pattern directly
-        for c in want:
+        for c in set(spec["init"]) | rounds:
             pat = struct.pack(fmt, c)
             off = data.find(pat)
+            # a 32-bit hit that is just half of a SHA-512/BLAKE2b word is that word, not SHA-256
+            while off != -1 and w == 4 and _half_of_wide(data, off):
+                off = data.find(pat, off + 1)
+            if off == -1 and (w, c) in decoded:
+                off = decoded[(w, c)]
             if off != -1:
                 found[c] = off
         if len(found) >= spec["min"]:
-            first = min(found.values())
-            hits.append({"algo": algo, "kind": f"{len(found)} round/init constant(s)",
-                         "offset": first, "confidence": "high" if len(found) >= spec["min"] + 1 else "medium",
-                         "match": "constant-set", "constants": sorted(hex(c) for c in found)})
+            nround = len(rounds & set(found))
+            sets.append((algo, found, nround, spec["min"]))
+    for algo, found, nround, mn in sets:
+        if nround == 0 and any(o_n and set(found) <= set(o_f) for o_a, o_f, o_n, _ in sets
+                               if o_a != algo):
+            continue        # shared IV words, already explained by an algorithm with round constants
+        conf = "high" if nround and len(found) >= mn + 1 else "medium"
+        hits.append({"algo": algo, "kind": f"{len(found)} constant(s): {len(found) - nround} init, "
+                                           f"{nround} round",
+                     "offset": min(found.values()), "confidence": conf,
+                     "match": "constant-set", "constants": sorted(hex(c) for c in found)})
     hits.sort(key=lambda h: h["offset"])
     return hits
+
+
+def _is_arm64(b) -> bool:
+    try:
+        if b.format.name == "ELF":
+            return "AARCH64" in str(b.header.machine_type)
+        if b.format.name == "MACHO":
+            return "ARM64" in str(b.header.cpu_type)
+        return "ARM64" in str(b.header.machine)
+    except Exception:
+        return False
+
+
+def _exec_section(b, s) -> bool:
+    f = b.format.name
+    if f == "PE":
+        return bool(int(s.characteristics) & 0x20000000)
+    if f == "MACHO":
+        return bool(int(s.flags) & 0x80000400)
+    return bool(int(s.flags) & 0x4)
 
 
 def recover(path) -> dict:
@@ -114,7 +214,16 @@ def recover(path) -> dict:
                     secs.append((off, off + size, s.virtual_address, s.name))
             except Exception:
                 continue
-    hits = scan(data)
+    extra = []
+    if b is not None and _is_arm64(b):
+        for s in b.sections:
+            try:
+                if not _exec_section(b, s) or not s.size:
+                    continue
+                extra.extend(arm64_immediates(bytes(s.content), s.offset))
+            except Exception:
+                continue
+    hits = scan(data, extra)
     for h in hits:
         h["va"], h["section"] = None, None
         for lo, hi, va, name in secs:
