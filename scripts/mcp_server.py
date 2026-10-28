@@ -235,9 +235,9 @@ def tool_push_annotations(args: dict) -> dict:
         raise ValueError(str(e))
     dry_run = _bool_arg(args, "dry_run", True)
     force = _bool_arg(args, "force", False)
-    bookmarks = _bool_arg(args, "bookmarks", False)
     opts = {}
-    for k, allowed in (("ghidra_comment", ("pre", "eol")), ("ida_comment", ("append", "set"))):
+    for k, allowed in (("ghidra_comment", ("eol", "pre")), ("ida_comment", ("merge", "append", "set")),
+                       ("bookmarks", ("auto", "off", "force"))):
         if k in args:
             if args[k] not in allowed:
                 raise ValueError(f"'{k}' must be one of {list(allowed)}")
@@ -249,8 +249,7 @@ def tool_push_annotations(args: dict) -> dict:
     doc = _annotation_doc(args)                 # every argument is checked before the analysis
     try:
         report = DB.push(doc, backend, url, dry_run=dry_run, image_base=image_base,
-                         force=force, allow_remote=False, bookmarks=bookmarks,
-                         ida_database=db, **opts)
+                         force=force, allow_remote=False, ida_database=db, **opts)
     except DB.BridgeError as e:
         raise ValueError(str(e))
     results = report["results"]
@@ -359,7 +358,9 @@ TOOLS = {
                        "backend ghidra-mcp (GhidraMCP plugin, http://127.0.0.1:8080/) or ida-mcp "
                        "(ida-pro-mcp plugin, http://127.0.0.1:13337/mcp). Checks the open "
                        "program's sha256, verifies the address mapping on function starts, renames "
-                       "only default names, '[rust-deobf] '-prefixed comments without duplicates. "
+                       "only default names; comments are read back and only their '[rust-deobf] ' "
+                       "lines rewritten (GhidraMCP: EOL comments; IDA: via its py_eval tool, else "
+                       "deduped append). "
                        "dry_run defaults to TRUE (reads only, reports the plan); pass "
                        "dry_run=false to write.",
         "handler": tool_push_annotations,
@@ -374,13 +375,16 @@ TOOLS = {
                                "description": "override the image base the decompiler reports"},
                 "force": {"type": "boolean",
                           "description": "push despite a sha256 mismatch / unverified --image-base"},
-                "ghidra_comment": {"type": "string", "enum": ["pre", "eol"],
-                                   "description": "pre (default): decompiler comment, replaced; "
-                                                  "eol: merged end-of-line comment"},
-                "ida_comment": {"type": "string", "enum": ["append", "set"],
-                                "description": "append (default, deduped, keeps analyst text) or set"},
-                "bookmarks": {"type": "boolean",
-                              "description": "IDA: add bookmarks too (replaces one at the address)"},
+                "ghidra_comment": {"type": "string", "enum": ["eol", "pre"],
+                                   "description": "eol (default): read back and merged; pre: "
+                                                  "decompiler PRE comment, cannot be read back "
+                                                  "through GhidraMCP, so it is replaced"},
+                "ida_comment": {"type": "string", "enum": ["merge", "append", "set"],
+                                "description": "merge (default; exact, needs ida-pro-mcp's "
+                                               "py_eval), append (deduped, stale lines stay), set"},
+                "bookmarks": {"type": "string", "enum": ["auto", "off", "force"],
+                              "description": "IDA: auto (default) only into free or rust-deobf "
+                                             "slots; force also when slots cannot be read"},
                 "ida_database": {"type": "string", "description": "idalib-mcp session id"},
             }, **_FILTER_PROPS),
             "required": ["path", "backend", "url"],

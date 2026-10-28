@@ -28,14 +28,17 @@ in the decompiler before anything is written; it is never guessed silently. Ghid
 Safety: loopback URLs only unless --allow-remote; no proxy, no redirects followed; the program open
 in the decompiler must have this file's sha256 when the API reports one (--force overrides). Only
 default names are renamed (Ghidra FUN_/SUB_, IDA sub_) or names this tool gave earlier (rd_*/lib_*).
-Comments carry a "[rust-deobf] " prefix per line and re-running never duplicates them: Ghidra PRE
-comments (decompiler view, default) are REPLACED by the merged rust-deobf block at that address --
-GhidraMCP cannot read a PRE comment back, so an analyst's PRE comment at the same address is
-overwritten (use --ghidra-comment eol to merge into end-of-line comments instead, which it can
-read); IDA comments are appended line by line with ida-pro-mcp's dedupe (analyst text kept; a fact
-that changed leaves its old line). GhidraMCP has no bookmark API; IDA bookmarks are opt-in
-(--bookmarks) because add_bookmark replaces any bookmark at the address. Static + emulation only:
-the target is never executed.
+Comments carry a "[rust-deobf] " prefix per line; the existing comment is READ first and only those
+lines are rewritten (outdated facts replaced, the analyst's text kept):
+  * GhidraMCP: end-of-line comments (default). Its API returns EOL comments (/disassemble_function)
+    but has no read path for PRE comments, so --ghidra-comment pre (decompiler view) REPLACES the
+    PRE comment at an address. Addresses outside functions cannot be read back: skipped in EOL mode.
+    No bookmark endpoint: a bookmark becomes a "[rust-deobf] bookmark:" line of the comment.
+  * ida-pro-mcp: comments and bookmark slots are read through its py_eval tool (enabled in the IDA
+    plugin by default; idalib-mcp needs --unsafe). Without it: deduped append (a stale line stays)
+    and no bookmarks unless --bookmarks force. Bookmarks only go into a free slot or one of ours.
+Static + emulation only: the target is never executed. scripts/decompiler_selfcheck.py checks a
+real decompiler setup (mapping, identity, comment round trip).
 
     python3 scripts/decompiler_bridge.py sample.bin                          # annotation JSON
     python3 scripts/decompiler_bridge.py sample.bin --image-base 0x100000    # + decompiler addresses
@@ -278,67 +281,6 @@ def _reuse(path: Path, run_kwargs: dict, res, meta):
         recover.run, recover_rust_meta.recover = orig_run, orig_meta
 
 
-def _panic_location_vas(path: Path, meta: dict) -> list:
-    """[(address, file, line, col)] of the core::panic::Location records recover_rust_meta found.
-    The engine reports (file, line, col) only; this re-finds each record's address with the same
-    two scans (absolute pointer / relocation addend) and keeps only records the engine reported."""
-    import bisect
-    import struct
-    import recover_rust_meta as RM
-    want = {(p.get("file"), p.get("line"), p.get("col")) for p in (meta.get("panic_sites") or [])}
-    if not want:
-        return []
-    image_base, ptr, secs, _syms, relocs = RM.read_sections(path)
-    src = RM.find_source_paths(secs)
-    spans = sorted((va, ln, s) for s, (va, ln) in src.items())
-    starts = [sp[0] for sp in spans]
-    if not starts:
-        return []
-
-    def lookup(cand, rec_len):
-        k = bisect.bisect_right(starts, cand) - 1
-        if k < 0:
-            return None
-        va, ln, s = spans[k]
-        if not (va <= cand < va + ln) or cand + rec_len != va + ln:
-            return None
-        try:
-            return s.encode("utf-8")[cand - va:].decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-
-    packP = "<Q" if ptr == 8 else "<I"
-    found = {}
-    for base, data in secs:
-        for off in range(0, len(data) - (2 * ptr + 8) + 1, 4):
-            cand = struct.unpack_from(packP, data, off)[0]
-            if cand < starts[0]:
-                continue
-            rec_len = struct.unpack_from(packP, data, off + ptr)[0]
-            if not 0 < rec_len < 4096:
-                continue
-            s = lookup(cand, rec_len)
-            if s is None:
-                continue
-            line, col = struct.unpack_from("<II", data, off + 2 * ptr)
-            if (s, line, col) in want:
-                found.setdefault((s, line, col), base + off)
-    for addr, addend in relocs or []:
-        rl = RM.va_read(secs, addr + ptr, ptr)
-        lc = RM.va_read(secs, addr + 2 * ptr, 8)
-        if len(rl) < ptr or len(lc) < 8:
-            continue
-        s = lookup(addend, struct.unpack_from(packP, rl, 0)[0])
-        if s is None:
-            continue
-        line, col = struct.unpack_from("<II", lc, 0)
-        if (s, line, col) in want:
-            found.setdefault((s, line, col), addr)
-    # recover_rust_meta reads PE sections at imagebase + RVA; this toolkit's PE addresses are RVAs
-    return sorted((va - image_base, f, ln, c) for (f, ln, c), va in found.items()
-                  if va >= image_base)
-
-
 def collect(path: Path, emulate: str = "always", time_budget: float = 60.0,
             triage: bool = True) -> dict:
     """Run the tiers on `path` (static + emulation, never executed). Each tier is isolated: a
@@ -354,6 +296,11 @@ def collect(path: Path, emulate: str = "always", time_budget: float = 60.0,
             facts["errors"].append({"engine": name, "error": f"{type(e).__name__}: {e}"})
             return None
 
+    if triage and emulate == "auto":
+        # the triage card's normal (non-fast) run emulates; one run serves both instead of two
+        emulate = "always"
+        facts["notes"].append("--emulate auto ran as always: the triage card needs the emulation "
+                              "pass (use --no-triage to keep auto)")
     run_kwargs = dict(emulate=emulate, stackstrings=True, min_len=5, literals=True,
                       time_budget=time_budget, libfuncs=True, static=True)
     res = guarded("recover", lambda: recover.run(path, **run_kwargs))
@@ -371,14 +318,16 @@ def collect(path: Path, emulate: str = "always", time_budget: float = 60.0,
     import recover_rust_meta
     facts["meta"] = guarded("recover_rust_meta", lambda: recover_rust_meta.recover(path))
     if facts["meta"]:
-        facts["locations"] = guarded("panic Location addresses",
-                                     lambda: _panic_location_vas(path, facts["meta"])) or []
+        # recover_rust_meta reports each Location record's own address (RVA for PE)
+        facts["locations"] = [(p["va"], p["file"], p["line"], p["col"])
+                              for p in facts["meta"].get("panic_locations") or []
+                              if isinstance(p, dict) and _addr(p.get("va")) is not None]
     if triage:
         import soc_triage
-        fast = emulate != "always"
+        fast = emulate == "never"
         if fast:
-            facts["notes"].append("triage card in fast mode (emulate != always): its signal is "
-                                  "capped at LOW")
+            facts["notes"].append("--emulate never: the triage card runs in fast mode, its "
+                                  "signal is capped at LOW and labelled so")
         with _reuse(path, run_kwargs, res, facts["meta"]):
             facts["triage"] = guarded(
                 "soc_triage", lambda: soc_triage.triage(path, fast=fast, time_budget=time_budget))
@@ -389,6 +338,11 @@ def collect(path: Path, emulate: str = "always", time_budget: float = 60.0,
 # facts -> neutral annotations (pure)
 # ---------------------------------------------------------------------------------------------
 _KIND_ORDER = {"rename": 0, "comment": 1, "bookmark": 2}
+
+
+def _triage_fast(card: dict) -> bool:
+    """soc_triage --fast cards say so in `mode` (and cap the signal at LOW)."""
+    return str(card.get("mode") or "").startswith("static (fast")
 
 
 def build_annotations(hdr: dict, facts: dict, max_locations: int = 200) -> tuple[list, list]:
@@ -511,10 +465,13 @@ def build_annotations(hdr: dict, facts: dict, max_locations: int = 200) -> tuple
     if card.get("triage_signal"):
         if entry:
             reasons = "; ".join(card.get("signal_reasons") or [])
-            add(entry, "comment", f"{PREFIX}triage signal {_plain(card['triage_signal'], 10)}: "
-                f"{_plain(reasons, 400)}", "soc_triage", "function")
-            add(entry, "bookmark", f"triage {_plain(card['triage_signal'], 10)}", "soc_triage",
-                "function")
+            sig = _plain(card["triage_signal"], 10)
+            fast = _triage_fast(card)
+            label = " (fast mode: decoding skipped, signal capped at LOW)" if fast else ""
+            add(entry, "comment", f"{PREFIX}triage signal {sig}{label}: {_plain(reasons, 400)}",
+                "soc_triage", "function")
+            add(entry, "bookmark", f"triage {sig}" + (" (fast mode, capped)" if fast else ""),
+                "soc_triage", "function")
         else:
             notes.append("no entry point: program-level facts (toolchain, crates, triage) are in "
                          "'program' only, not anchored to an address")
@@ -587,6 +544,8 @@ def document(path: Path, hdr: dict, facts: dict, ann: list, notes: list) -> dict
             "capabilities": meta.get("capabilities") or {},
             "panic_sites": len(meta.get("panic_sites") or []),
             "triage_signal": card.get("triage_signal"),
+            "triage_mode": card.get("mode"),
+            "triage_capped": _triage_fast(card) if card else None,
             "signal_reasons": card.get("signal_reasons") or [],
         },
         "counts": counts,
@@ -778,9 +737,15 @@ def _ghidra_addr(text) -> int | None:
 
 
 class GhidraMcpBackend:
+    """GhidraMCP. Comments default to EOL: the 2.0 API returns EOL comments (/disassemble_function
+    items[].comment) but has NO read path for PRE comments (/decompile_function returns C text
+    without addresses, nothing else reads comments), so only EOL can be merged safely. PRE is
+    opt-in and replaces. No bookmark endpoint either: bookmarks become a "[rust-deobf] bookmark:"
+    line in the same comment (fold_bookmarks)."""
     name = "ghidra-mcp"
+    fold_bookmarks = True
 
-    def __init__(self, client: HttpClient, comment_type: str = "pre"):
+    def __init__(self, client: HttpClient, comment_type: str = "eol"):
         if comment_type not in ("pre", "eol"):
             raise BridgeError(EXIT_USAGE, "--ghidra-comment must be pre or eol")
         self.c = client
@@ -876,7 +841,7 @@ class GhidraMcpBackend:
             return None
         text = self._legacy("GET", "disassemble_function", {"address": _hex(addr)})
         cur, comments = None, {}
-        for ln in text.split("\n"):
+        for ln in text.rstrip("\n").split("\n"):     # 1.x ends with "\n": not a comment line
             # "00101139: INSN ; comment" (Address.toString, optionally "space:"/"ovl::" first)
             m = re.match(r"^((?:[A-Za-z_]\w*::?)?[0-9A-Fa-f]{4,16}): (.*)$", ln)
             if m and _ghidra_addr(m.group(1)) is not None:
@@ -957,7 +922,7 @@ class GhidraMcpBackend:
 
     def apply_bookmarks(self, items, dry_run):
         return [_result("bookmark", addr, "skipped", "GhidraMCP has no bookmark endpoint")
-                for addr, _t in items]
+                for addr, _t in items]               # not reached: push() folds them (see class)
 
 
 def _rename_decision(backend, addr, fn, new):
@@ -1081,17 +1046,69 @@ class McpHttpSession:
         return None
 
 
+# py_eval programs for ida-pro-mcp's (unsafe-marked) py_eval tool, the only tool that READS a
+# comment or a bookmark exactly. The real tool exec()s with a separate locals dict, so these use only
+# top-level statements (no def/lambda/comprehension, which would not see those locals). The only
+# data is one JSON document embedded as a Python string literal (repr), never spliced into code.
+_IDA_READ = """import json as _rd_json
+import idc as _rd_idc
+import ida_funcs as _rd_funcs
+_rd_in = _rd_json.loads(%s)
+_rd_out = {}
+for _rd_ea in _rd_in["addrs"]:
+    _rd_f = _rd_funcs.get_func(_rd_ea)
+    _rd_start = _rd_f is not None and _rd_f.start_ea == _rd_ea
+    _rd_fc = (_rd_idc.get_func_cmt(_rd_ea, 0) or "") if _rd_start else None
+    _rd_out[str(_rd_ea)] = {"cmt": _rd_idc.get_cmt(_rd_ea, 0) or "", "start": _rd_start, "fcmt": _rd_fc}
+_rd_bm = []
+if _rd_in["bookmarks"]:
+    for _rd_slot in range(1024):
+        _rd_b = _rd_idc.get_bookmark(_rd_slot)
+        if _rd_b is not None and _rd_b != _rd_idc.BADADDR:
+            _rd_bm.append([_rd_b, _rd_idc.get_bookmark_desc(_rd_slot) or ""])
+_rd_json.dumps({"comments": _rd_out, "bookmarks": _rd_bm})
+"""
+_IDA_WRITE = """import json as _rd_json
+import idc as _rd_idc
+_rd_in = _rd_json.loads(%s)
+_rd_out = []
+for _rd_item in _rd_in:
+    if _rd_item[1] == "func":
+        _rd_out.append(bool(_rd_idc.set_func_cmt(_rd_item[0], _rd_item[2], 0)))
+    else:
+        _rd_out.append(bool(_rd_idc.set_cmt(_rd_item[0], _rd_item[2], 0)))
+try:
+    import ida_hexrays as _rd_hx
+    for _rd_item in _rd_in:
+        _rd_hx.mark_cfunc_dirty(_rd_item[0])
+except Exception:
+    pass
+_rd_json.dumps(_rd_out)
+"""
+
+
 class IdaMcpBackend:
+    """ida-pro-mcp. Comment modes: merge (default) reads the exact regular / function comment
+    through py_eval and rewrites only the "[rust-deobf]" lines (stale ones removed, analyst text
+    kept); append (append_comments, dedupe -- cannot remove a stale line; the fallback when py_eval
+    is disabled); set (set_comments: replaces). Bookmarks: auto (default) adds only into a free
+    slot or one already ours, which needs py_eval to read the slots; force adds blindly
+    (add_bookmark replaces whatever is at the address); off."""
     name = "ida-mcp"
     BATCH = 50
+    PY_BATCH = 200
 
-    def __init__(self, client: HttpClient, comment_mode: str = "append",
-                 database: str | None = None, bookmarks: bool = False):
-        if comment_mode not in ("append", "set"):
-            raise BridgeError(EXIT_USAGE, "--ida-comment must be append or set")
+    def __init__(self, client: HttpClient, comment_mode: str = "merge",
+                 database: str | None = None, bookmarks: str = "auto"):
+        if comment_mode not in ("merge", "append", "set"):
+            raise BridgeError(EXIT_USAGE, "--ida-comment must be merge, append or set")
+        if bookmarks not in ("auto", "off", "force"):
+            raise BridgeError(EXIT_USAGE, "--bookmarks must be auto, off or force")
         self.s = McpHttpSession(client, database)
         self.comment_mode = comment_mode
         self.bookmarks = bookmarks
+        self.can_read = False
+        self._marks = None            # bookmark slots read together with the comments
         self._funcs = {}
 
     def connect(self) -> dict:
@@ -1105,16 +1122,57 @@ class IdaMcpBackend:
         if health.get("status") == "busy":
             raise BridgeError(EXIT_BACKEND, f"IDA is busy ({health.get('busy_tool')}); retry later")
         ib = _addr(health.get("imagebase"))
-        sha, note = None, None
+        notes = []
+        sha = None
         try:
             meta = self.s.read_resource("ida://idb/metadata") or {}
             sha = meta.get("sha256") if meta.get("sha256") not in (None, "unavailable") else None
         except BridgeError as e:
-            note = f"sha256 not available from IDA ({e})"
+            notes.append(f"sha256 not available from IDA ({e})")
+        try:
+            tools = {t.get("name") for t in (self.s._rpc("tools/list", {}) or {}).get("tools") or []
+                     if isinstance(t, dict)}
+        except BridgeError:
+            tools = set()
+        self.can_read = "py_eval" in tools
+        if self.comment_mode == "merge" and not self.can_read:
+            self.comment_mode = "append"
+            notes.append("ida-pro-mcp offers no py_eval (idalib-mcp without --unsafe, or disabled "
+                         "on the plugin's config page): no tool reads a comment back, so comments "
+                         "are appended (deduped) and a stale rust-deobf line from an earlier run "
+                         "cannot be removed")
         srv = self.s.server
         return {"api": f"ida-pro-mcp ({srv.get('name', '?')} {srv.get('version', '')})".strip(),
                 "program": health.get("module"), "input_path": health.get("input_path"),
-                "image_base": ib, "sha256": sha, "note": note}
+                "image_base": ib, "sha256": sha, "comment_mode": self.comment_mode,
+                "reads_comments": self.can_read, "notes": notes}
+
+    def _py(self, template: str, payload) -> object:
+        code = template % repr(json.dumps(payload))
+        r = self.s.call_tool("py_eval", {"code": code, "new_locals": True}) or {}
+        out = r.get("result") if isinstance(r, dict) else None
+        j = _json(out.encode("utf-8")) if isinstance(out, str) and out else None
+        if j is None:
+            err = (r.get("stderr") if isinstance(r, dict) else "") or "no result"
+            raise BridgeError(EXIT_BACKEND, f"ida-pro-mcp py_eval failed: {err.strip()[-300:]}")
+        return j
+
+    def read_state(self, addrs, bookmarks=False) -> tuple[dict, dict]:
+        """({ea: {cmt, start, fcmt}}, {ea: bookmark description}) read exactly via py_eval."""
+        comments, marks = {}, {}
+        addrs = list(addrs)
+        chunks = [addrs[i:i + self.PY_BATCH] for i in range(0, len(addrs), self.PY_BATCH)] or [[]]
+        for k, chunk in enumerate(chunks):
+            r = self._py(_IDA_READ, {"addrs": chunk, "bookmarks": bool(bookmarks and k == 0)})
+            if not isinstance(r, dict):
+                raise BridgeError(EXIT_BACKEND, "ida-pro-mcp py_eval: unexpected read result")
+            for key, v in (r.get("comments") or {}).items():
+                if isinstance(v, dict) and _addr(key) is not None:
+                    comments[_addr(key)] = v
+            for pair in r.get("bookmarks") or []:
+                if isinstance(pair, list) and len(pair) == 2 and _addr(pair[0]) is not None:
+                    marks.setdefault(_addr(pair[0]), str(pair[1]))
+        return comments, marks
 
     def lookup(self, addrs):
         need = [a for a in addrs if a not in self._funcs]
@@ -1136,6 +1194,8 @@ class IdaMcpBackend:
         return fn is not None and fn[0] == addr
 
     def apply_comments(self, items, dry_run):
+        if self.comment_mode == "merge":
+            return self._merge_comments(items, dry_run)
         if dry_run:
             what = "appended line by line, deduped" if self.comment_mode == "append" else \
                 "set (replaces, disassembly + decompiler)"
@@ -1184,6 +1244,37 @@ class IdaMcpBackend:
                 out.append(_result("comment", a, "unchanged"))
         return out
 
+    def _merge_comments(self, items, dry_run):
+        want_marks = self.bookmarks != "off"
+        state, marks = self.read_state([a for a, _s, _l in items], bookmarks=want_marks)
+        if want_marks:
+            self._marks = marks
+        out, writes = [], []
+        for a, scope, lines in items:
+            st = state.get(a)
+            if st is None:
+                out.append(_result("comment", a, "failed", "py_eval returned no comment state"))
+                continue
+            kind = "func" if scope == "function" and st.get("start") else "line"
+            existing = (st.get("fcmt") if kind == "func" else st.get("cmt")) or ""
+            merged = _merge_lines(existing, lines)
+            if merged == existing:
+                out.append(_result("comment", a, "unchanged"))
+            elif dry_run:
+                out.append(_result("comment", a, "planned", f"{kind} comment, rust-deobf lines "
+                                   "rewritten, other text kept"))
+            else:
+                writes.append((a, kind, merged))
+        for i in range(0, len(writes), self.PY_BATCH):
+            chunk = writes[i:i + self.PY_BATCH]
+            oks = self._py(_IDA_WRITE, [[a, k, t] for a, k, t in chunk])
+            oks = oks if isinstance(oks, list) else []
+            for j, (a, k, _t) in enumerate(chunk):
+                ok = j < len(oks) and oks[j] is True
+                out.append(_result("comment", a, "applied" if ok else "failed",
+                                   f"{k} comment merged" if ok else "IDA refused the comment"))
+        return out
+
     def apply_renames(self, items, dry_run):
         fns = self.lookup([a for a, _n in items])
         out, todo = [], []
@@ -1210,12 +1301,28 @@ class IdaMcpBackend:
         return out
 
     def apply_bookmarks(self, items, dry_run):
-        if not self.bookmarks:
-            return [_result("bookmark", a, "skipped", "IDA bookmarks are opt-in (--bookmarks): "
-                            "add_bookmark replaces any bookmark already at the address")
-                    for a, _t in items]
+        if self.bookmarks == "off" or not items:
+            return [_result("bookmark", a, "skipped", "--bookmarks off") for a, _t in items]
+        existing = None
+        if self.can_read:
+            existing = self._marks
+            if existing is None:
+                _, existing = self.read_state([], bookmarks=True)
+        elif self.bookmarks != "force":
+            return [_result("bookmark", a, "skipped", "cannot read IDA's bookmark slots without "
+                            "py_eval, and add_bookmark replaces whatever is at the address; "
+                            "--bookmarks force adds anyway") for a, _t in items]
         out = []
         for a, text in items:
+            if existing is not None and a in existing:
+                cur = existing[a]
+                if not cur.startswith(PREFIX.strip()):
+                    out.append(_result("bookmark", a, "skipped", f"keeps the existing bookmark "
+                                       f"{cur[:60]!r}"))
+                    continue
+                if cur == PREFIX + text:
+                    out.append(_result("bookmark", a, "unchanged"))
+                    continue
             if dry_run:
                 out.append(_result("bookmark", a, "planned"))
                 continue
@@ -1313,8 +1420,19 @@ def plan(annotations: list, delta: int) -> dict:
             "bookmarks": [(a, "; ".join(t)[:200]) for a, t in sorted(marks.items())]}
 
 
-def make_backend(backend: str, url: str, *, rate=25.0, timeout=60.0, ghidra_comment="pre",
-                 ida_comment="append", bookmarks=False, ida_database=None):
+def _fold_bookmarks(comments: list, bookmarks: list) -> list:
+    """Bookmarks as "[rust-deobf] bookmark: ..." lines of the comment at the same address."""
+    out = {a: (sc, list(lines)) for a, sc, lines in comments}
+    for a, text in bookmarks:
+        sc, lines = out.setdefault(a, ("function", []))
+        line = f"{PREFIX}bookmark: {text}"
+        if line not in lines:
+            lines.append(line)
+    return [(a, out[a][0], out[a][1]) for a in sorted(out)]
+
+
+def make_backend(backend: str, url: str, *, rate=25.0, timeout=60.0, ghidra_comment="eol",
+                 ida_comment="merge", bookmarks="auto", ida_database=None):
     if backend == "ghidra-mcp":
         return GhidraMcpBackend(HttpClient(url, timeout, rate, "GhidraMCP"), ghidra_comment)
     if backend == "ida-mcp":
@@ -1324,14 +1442,14 @@ def make_backend(backend: str, url: str, *, rate=25.0, timeout=60.0, ghidra_comm
 
 
 def push(doc: dict, backend: str, url: str | None = None, *, dry_run=False, image_base=None,
-         force=False, allow_remote=False, rate=25.0, timeout=60.0, ghidra_comment="pre",
-         ida_comment="append", bookmarks=False, ida_database=None) -> dict:
+         force=False, allow_remote=False, rate=25.0, timeout=60.0, ghidra_comment="eol",
+         ida_comment="merge", bookmarks="auto", ida_database=None) -> dict:
     """Write doc's annotations into a running decompiler; returns a report (never prints)."""
     url = check_url(url or DEFAULT_URLS.get(backend, ""), allow_remote)
     be = make_backend(backend, url, rate=rate, timeout=timeout, ghidra_comment=ghidra_comment,
                       ida_comment=ida_comment, bookmarks=bookmarks, ida_database=ida_database)
     info = be.connect()
-    notes = [n for n in [info.pop("note", None)] if n]
+    notes = list(info.pop("notes", None) or [])
     sha, dsha = doc.get("sha256"), info.get("sha256")
     if sha and dsha and sha.lower() != str(dsha).lower():
         if not force:
@@ -1343,12 +1461,29 @@ def push(doc: dict, backend: str, url: str | None = None, *, dry_run=False, imag
         notes.append("the decompiler did not report the program's sha256: identity not checked")
     mapping = resolve_mapping(doc, be, info, image_base=image_base, force=force)
     p = plan(doc["annotations"], mapping["delta"])
+    if getattr(be, "fold_bookmarks", False):
+        p["comments"] = _fold_bookmarks(p["comments"], p["bookmarks"])
     results = be.apply_comments(p["comments"], dry_run)
+    if getattr(be, "fold_bookmarks", False):
+        by_addr = {r["address"]: r for r in results}
+        kind = "EOL" if getattr(be, "comment_type", "") == "eol" else "PRE"
+        for a, _t in p["bookmarks"]:
+            r = by_addr.get(_hex(a)) or {"status": "skipped", "detail": "no comment result"}
+            results.append(_result("bookmark", a, r["status"],
+                                   f"written as a '{PREFIX}bookmark:' line of the {kind} comment "
+                                   "(GhidraMCP has no bookmark endpoint)"
+                                   + (f"; {r['detail']}" if r["detail"] else "")))
+    else:
+        results += be.apply_bookmarks(p["bookmarks"], dry_run)
     results += be.apply_renames(p["renames"], dry_run)
-    results += be.apply_bookmarks(p["bookmarks"], dry_run)
     summary = {k: 0 for k in ("applied", "unchanged", "planned", "skipped", "failed")}
     for r in results:
         summary[r["status"]] = summary.get(r["status"], 0) + 1
+    if backend == "ghidra-mcp" and ghidra_comment == "eol" and p["comments"]:
+        notes.append("Ghidra EOL comments: merged with the analyst's text; the listing shows them, "
+                     "the decompiler only with its EOL-comment display option on. Addresses "
+                     "outside any function (vtables, panic Locations) cannot be read back through "
+                     "GhidraMCP and are skipped (--ghidra-comment pre writes them, replacing)")
     if backend == "ghidra-mcp" and ghidra_comment == "pre" and p["comments"]:
         notes.append("Ghidra PRE comments at annotated addresses are replaced by the rust-deobf "
                      "block (GhidraMCP cannot read them back); --ghidra-comment eol merges instead")
@@ -1415,14 +1550,16 @@ def main(argv=None) -> int:
     ap.add_argument("--kind", action="append", choices=KINDS, help="only these kinds (repeatable)")
     ap.add_argument("--function", type=_int, metavar="ADDR", help="only annotations about this "
                     "function (rust-deobf address space)")
-    ap.add_argument("--ghidra-comment", choices=("pre", "eol"), default="pre",
-                    help="pre: decompiler PRE comment, rust-deobf block replaces it (default); "
-                         "eol: end-of-line comment merged with the analyst's text")
-    ap.add_argument("--ida-comment", choices=("append", "set"), default="append",
-                    help="append: deduped lines, keeps analyst text (default); set: replace, also "
-                         "puts instruction comments into the pseudocode")
-    ap.add_argument("--bookmarks", action="store_true", help="IDA: also add bookmarks (replaces a "
-                    "bookmark already at the address)")
+    ap.add_argument("--ghidra-comment", choices=("eol", "pre"), default="eol",
+                    help="eol (default): end-of-line comment, read back and merged with the "
+                         "analyst's text; pre: decompiler PRE comment, which GhidraMCP cannot read "
+                         "back, so the rust-deobf block REPLACES it")
+    ap.add_argument("--ida-comment", choices=("merge", "append", "set"), default="merge",
+                    help="merge (default): read via py_eval, rewrite only rust-deobf lines; "
+                         "append: deduped append (stale lines stay); set: replace")
+    ap.add_argument("--bookmarks", choices=("auto", "off", "force"), default="auto",
+                    help="IDA: auto (default) only into free/own slots (needs py_eval); force: "
+                         "add even when slots cannot be read (replaces); off")
     ap.add_argument("--ida-database", metavar="ID", help="idalib-mcp session id (its `database`)")
     ap.add_argument("--emulate", choices=("always", "auto", "never"), default="always")
     ap.add_argument("--time-budget", type=float, default=60.0, help="emulation budget in seconds")
@@ -1486,10 +1623,91 @@ def main(argv=None) -> int:
 # ---------------------------------------------------------------------------------------------
 # selftest: synthetic facts + an in-process GhidraMCP 2.x stand-in (no binary, no Ghidra)
 # ---------------------------------------------------------------------------------------------
-def _selftest():
+def _selftest_ghidra_server(state: dict):
+    """A minimal GhidraMCP 2.x stand-in (routes, envelope and EOL semantics of BackendHttpServer /
+    GhidraAnalysisService) for the --selftest of this module and of decompiler_selfcheck.py.
+    state: names {entry: name}, insns {entry: [addresses]}, eol {address: comment}; it records
+    POSTs in state["posts"]. Returns (server, url); call server.shutdown()."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    state.setdefault("posts", [])
+    state.setdefault("eol", {})
 
+    def func_of(a):
+        return next((f for f, ins in state["insns"].items() if f <= a <= max(ins)), None)
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, obj):
+            b = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def _nf(self):
+            self._send(404, {"success": False, "error": {"code": "FUNCTION_NOT_FOUND",
+                                                         "message": "none"}})
+
+        def _params(self):
+            u = urllib.parse.urlsplit(self.path)
+            p = dict(urllib.parse.parse_qsl(u.query, keep_blank_values=True))
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                p.update(urllib.parse.parse_qsl(self.rfile.read(n).decode(), keep_blank_values=True))
+            return u.path, p
+
+        def do_GET(self):
+            path, p = self._params()
+            if path == "/health":
+                return self._send(200, {"success": True, "data": {"version": "2.0.0",
+                                                                  "program": {"name": "t"}}})
+            if path == "/program_info":
+                return self._send(200, {"success": True, "data": {
+                    "name": "t", "image_base": "140000000", "entry_points": ["140001010"],
+                    "sha256": state.get("sha256")}})
+            if path in ("/function", "/disassemble_function"):
+                f = func_of(int(p["address"], 16))
+                if f is None:
+                    return self._nf()
+                if path == "/function":
+                    return self._send(200, {"success": True, "data": {
+                        "name": state["names"][f], "address": "%08x" % f}})
+                items = [{"address": "%08x" % a, "bytes": "90", "instruction": "NOP",
+                          "comment": state["eol"].get(a)} for a in state["insns"][f]]
+                return self._send(200, {"success": True, "data": {
+                    "items": items, "offset": 0, "limit": 2000, "total": len(items),
+                    "has_more": False}})
+            self._send(404, {"success": False, "error": {"code": "UNKNOWN_ENDPOINT", "message": path}})
+
+        def do_POST(self):
+            path, p = self._params()
+            state["posts"].append((path, p))
+            if path == "/set_disassembly_comment":
+                a = int(p["address"], 16)
+                if p["comment"]:
+                    state["eol"][a] = p["comment"]
+                else:
+                    state["eol"].pop(a, None)
+                return self._send(200, {"success": True, "data": {
+                    "address": p["address"], "comment_type": "EOL",
+                    "comment": state["eol"].get(a)}})
+            if path == "/rename_function_by_address":
+                a = int(p["function_address"], 16)
+                old, state["names"][a] = state["names"][a], p["new_name"]
+                return self._send(200, {"success": True, "data": {
+                    "address": "%x" % a, "old_name": old, "new_name": p["new_name"]}})
+            self._send(404, {"success": False, "error": {"code": "UNKNOWN_ENDPOINT", "message": path}})
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, "http://127.0.0.1:%d/" % srv.server_address[1]
+
+
+def _selftest():
     assert _esc('a"b\\c\nd‮') == 'a\\"b\\\\c\\nd\\u202e'
     assert _q("x" * 300).endswith("...(+140 chars)")
     hdr = {"format": "PE", "arch": "x86_64", "address_space": "rva", "address_base": 0,
@@ -1509,66 +1727,12 @@ def _selftest():
                      "0x4000": "lib_core_fmt_write", "0x4100": "rd_vtmethod_8000_0"}, names
     assert all("\n" not in a["text"] for a in doc["annotations"])
 
-    state = {"comments": {}, "names": {0x140001010: "entry", 0x140002000: "FUN_140002000",
-                                       0x140003000: "my_decoder", 0x140004000: "FUN_140004000"},
-             "posts": []}
-
-    class H(BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-
-        def _send(self, code, obj):
-            b = json.dumps(obj).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(b)))
-            self.end_headers()
-            self.wfile.write(b)
-
-        def _params(self):
-            u = urllib.parse.urlsplit(self.path)
-            p = dict(urllib.parse.parse_qsl(u.query, keep_blank_values=True))
-            n = int(self.headers.get("Content-Length") or 0)
-            if n:
-                p.update(urllib.parse.parse_qsl(self.rfile.read(n).decode(), keep_blank_values=True))
-            return u.path, p
-
-        def do_GET(self):
-            path, p = self._params()
-            if path == "/health":
-                return self._send(200, {"success": True, "data": {"version": "2.0.0",
-                                                                  "program": {"name": "t"}}})
-            if path == "/program_info":
-                return self._send(200, {"success": True, "data": {
-                    "name": "t", "image_base": "140000000", "entry_points": ["140001010"],
-                    "sha256": None}})
-            if path == "/function":
-                a = int(p["address"], 16)
-                if a in state["names"]:
-                    return self._send(200, {"success": True, "data": {
-                        "name": state["names"][a], "address": "%08x" % a}})
-                return self._send(404, {"success": False, "error": {
-                    "code": "FUNCTION_NOT_FOUND", "message": "none"}})
-            self._send(404, {"success": False, "error": {"code": "UNKNOWN_ENDPOINT", "message": path}})
-
-        def do_POST(self):
-            path, p = self._params()
-            state["posts"].append((path, p))
-            if path == "/set_decompiler_comment":
-                state["comments"][int(p["address"], 16)] = p["comment"]
-                return self._send(200, {"success": True, "data": {"address": p["address"],
-                                                                  "comment_type": "PRE",
-                                                                  "comment": p["comment"]}})
-            if path == "/rename_function_by_address":
-                a = int(p["function_address"], 16)
-                old, state["names"][a] = state["names"][a], p["new_name"]
-                return self._send(200, {"success": True, "data": {
-                    "address": "%x" % a, "old_name": old, "new_name": p["new_name"]}})
-            self._send(404, {"success": False, "error": {"code": "UNKNOWN_ENDPOINT", "message": path}})
-
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    url = "http://127.0.0.1:%d/" % srv.server_address[1]
+    state = {"names": {0x140001010: "entry", 0x140002000: "FUN_140002000",
+                       0x140003000: "my_decoder", 0x140004000: "FUN_140004000"},
+             "insns": {0x140001010: [0x140001010], 0x140002000: [0x140002000, 0x140002100],
+                       0x140003000: [0x140003000], 0x140004000: [0x140004000]},
+             "eol": {0x140002000: "analyst: entry of the decoder"}}
+    srv, url = _selftest_ghidra_server(state)
     try:
         dry = push(doc, "ghidra-mcp", url, dry_run=True, rate=0)
         assert not state["posts"] and dry["summary"]["planned"] > 0, dry
@@ -1577,13 +1741,13 @@ def _selftest():
         assert r1["summary"]["failed"] == 0, r1
         assert state["names"][0x140002000] == "rd_url_https_update_example_x"
         assert state["names"][0x140003000] == "my_decoder"          # analyst name kept
-        c = state["comments"][0x140002000]
-        assert c.startswith(PREFIX) and '\\n' in c and "\n" not in c, c
-        snapshot = dict(state["comments"])
-        r2 = push(doc, "ghidra-mcp", url, rate=0)
-        assert state["comments"] == snapshot                         # idempotent: no duplicates
-        assert r2["summary"]["applied"] == len(snapshot)             # (PRE: rewritten, same text)
-        assert all(r["status"] != "applied" for r in r2["results"] if r["op"] == "rename")
+        c = state["eol"][0x140002000].split("\n")
+        assert c[0] == "analyst: entry of the decoder" and c[1].startswith(PREFIX), c
+        assert all("\n" not in x for x in c) and any('\\n' in x for x in c)
+        assert 0x140008000 not in state["eol"]          # data address: unreadable -> not written
+        n = len(state["posts"])
+        push(doc, "ghidra-mcp", url, rate=0)
+        assert len(state["posts"]) == n                 # idempotent: nothing rewritten
     finally:
         srv.shutdown()
         srv.server_close()
@@ -1599,8 +1763,8 @@ def _selftest():
     except BridgeError as e:
         assert e.code == EXIT_BACKEND and "cannot reach GhidraMCP" in str(e)
     print("selftest OK: neutral annotations (escaping, renames), PE RVA -> Ghidra VA mapping "
-          "verified, dry-run writes nothing, push + idempotent re-push, analyst name kept, "
-          "loopback-only URLs, unreachable server reported")
+          "verified, dry-run writes nothing, EOL merge keeps the analyst's comment, idempotent "
+          "re-push, analyst name kept, loopback-only URLs, unreachable server reported")
 
 
 if __name__ == "__main__":

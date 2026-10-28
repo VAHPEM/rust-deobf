@@ -245,8 +245,16 @@ def test_annotations_tool_real_fixture_over_stdio():
     assert any(a["text"] == "rd_vtmethod_22e4_0" for a in doc["annotations"])
 
 
-@pytest.mark.parametrize("key", ["dry_run", "force", "bookmarks", "triage"])
+@pytest.mark.parametrize("key", ["dry_run", "force", "triage"])
 def test_push_annotations_booleans_are_strict(synthetic_doc, key):
     res, text = _call("push_annotations", {"path": str(SAMPLE), "backend": "ghidra-mcp",
                                            "url": "http://127.0.0.1:9/", key: "false"})
+    assert res["isError"] and key in text and not synthetic_doc
+
+
+@pytest.mark.parametrize("key,value", [("bookmarks", True), ("bookmarks", "yes"),
+                                       ("ida_comment", "replace"), ("ghidra_comment", "plate")])
+def test_push_annotations_enums_are_strict(synthetic_doc, key, value):
+    res, text = _call("push_annotations", {"path": str(SAMPLE), "backend": "ida-mcp",
+                                           "url": "http://127.0.0.1:9/mcp", key: value})
     assert res["isError"] and key in text and not synthetic_doc

@@ -2,6 +2,7 @@
 adapters against in-process stand-ins of their real HTTP APIs (tests/decompiler_mocks.py cites the
 plugin source each one follows). No Ghidra or IDA is needed; what that leaves unverified is listed
 in VALIDATION.md."""
+import ast
 import json
 import subprocess
 import sys
@@ -120,7 +121,7 @@ def test_filters_and_decompiler_addresses():
 def test_pe_rva_maps_to_ghidra_image_base_and_exact_requests():
     doc = _doc(PE_HDR, FACTS)
     with _ghidra_pe() as g:
-        r = DB.push(doc, "ghidra-mcp", g.url, rate=0)
+        r = DB.push(doc, "ghidra-mcp", g.url, rate=0, ghidra_comment="pre")
         assert r["mapping"]["delta"] == 0x140000000 and r["mapping"]["verified"] is True
         assert r["summary"]["failed"] == 0, r["results"]
         posts = g.posts()
@@ -145,10 +146,11 @@ def test_pe_rva_maps_to_ghidra_image_base_and_exact_requests():
 def test_injection_characters_survive_the_form_encoding():
     doc = _doc(PE_HDR, FACTS)
     with _ghidra_pe() as g:
-        DB.push(doc, "ghidra-mcp", g.url, rate=0)
+        DB.push(doc, "ghidra-mcp", g.url, rate=0, ghidra_comment="pre")
         stored = g.comments[("PRE", 0x140002000)]
         plan = DB.plan(doc["annotations"], 0x140000000)
-        expected = dict((a, "\n".join(lines)) for a, _s, lines in plan["comments"])
+        folded = DB._fold_bookmarks(plan["comments"], plan["bookmarks"])
+        expected = dict((a, "\n".join(lines)) for a, _s, lines in folded)
         assert stored == expected[0x140002000]
         assert 'a&b=c+d%20e#f\\n\\"q\\" Phạm' in stored
 
@@ -163,7 +165,7 @@ def test_elf_pie_ghidra_rebased_to_0x100000():
         r = DB.push(doc, "ghidra-mcp", g.url, rate=0)
         assert r["mapping"]["delta"] == 0x100000 and r["mapping"]["verified"]
         assert g.funcs[0x101460][0] == "rd_str_hello_world"
-        assert ("PRE", 0x101460) in g.comments
+        assert g.comments[("EOL", 0x101460)].startswith(DB.PREFIX)
 
 
 def test_elf_non_pie_link_base_and_ida_reporting_zero():
@@ -238,16 +240,19 @@ def test_sha256_mismatch_refused_unless_forced():
 def test_ghidra_pre_idempotent_and_dry_run_writes_nothing():
     doc = _doc(PE_HDR, FACTS)
     with _ghidra_pe() as g:
-        dry = DB.push(doc, "ghidra-mcp", g.url, rate=0, dry_run=True)
+        dry = DB.push(doc, "ghidra-mcp", g.url, rate=0, dry_run=True, ghidra_comment="pre")
         assert not g.posts() and dry["summary"]["planned"] > 0
         assert not g.comments and g.funcs[0x140002000][0] == "FUN_140002000"
-        DB.push(doc, "ghidra-mcp", g.url, rate=0)
+        DB.push(doc, "ghidra-mcp", g.url, rate=0, ghidra_comment="pre")
         state = (dict(g.comments), {a: v[0] for a, v in g.funcs.items()})
-        r2 = DB.push(doc, "ghidra-mcp", g.url, rate=0)
+        r2 = DB.push(doc, "ghidra-mcp", g.url, rate=0, ghidra_comment="pre")
         assert (g.comments, {a: v[0] for a, v in g.funcs.items()}) == state
         renames = [x for x in r2["results"] if x["op"] == "rename"]
         assert all(x["status"] in ("unchanged", "skipped") for x in renames)
-        assert {x["status"] for x in r2["results"] if x["op"] == "bookmark"} == {"skipped"}
+        bm = [x for x in r2["results"] if x["op"] == "bookmark"]
+        assert bm and all("no bookmark endpoint" in x["detail"] for x in bm)
+        assert any(ln.startswith(DB.PREFIX + "bookmark: vtable")
+                   for ln in g.comments[("PRE", 0x140008000)].split("\n"))
 
 
 def test_ghidra_eol_merges_keeps_analyst_text_and_is_idempotent():
@@ -284,7 +289,7 @@ def test_ghidra_legacy_plain_text_api():
         with pytest.raises(DB.BridgeError) as e:            # 1.x cannot report an image base
             DB.push(doc, "ghidra-mcp", g.url, rate=0)
         assert e.value.code == DB.EXIT_REFUSED and "--image-base" in str(e.value)
-        r = DB.push(doc, "ghidra-mcp", g.url, rate=0, image_base=ib)
+        r = DB.push(doc, "ghidra-mcp", g.url, rate=0, image_base=ib, ghidra_comment="pre")
         assert r["server"]["api"].startswith("GhidraMCP 1.x") and r["mapping"]["verified"]
         assert g.funcs[ib + 0x2000][0] == "rd_url_https_update_example_a"
         assert g.pre[ib + 0x2000].count(DB.PREFIX) >= 3
@@ -315,7 +320,7 @@ def _ida_pe(**kw):
 def test_ida_push_exact_calls_session_and_idempotency(sse):
     doc = _doc(PE_HDR, FACTS)
     with _ida_pe(sse=sse, require_session=True) as ida:
-        r = DB.push(doc, "ida-mcp", ida.url, rate=0)
+        r = DB.push(doc, "ida-mcp", ida.url, rate=0, ida_comment="append", bookmarks="off")
         assert r["summary"]["failed"] == 0, r["results"]
         assert r["mapping"]["delta"] == 0x140000000 and r["mapping"]["verified"]
         first = ida.requests[0]
@@ -337,22 +342,22 @@ def test_ida_push_exact_calls_session_and_idempotency(sse):
         assert ida.funcs[0x140003000][0] == "my_decoder"
         assert not ida.tool_calls("add_bookmark") and not ida.bookmarks
         state = (dict(ida.cmts), dict(ida.func_cmts), {a: v[0] for a, v in ida.funcs.items()})
-        r2 = DB.push(doc, "ida-mcp", ida.url, rate=0)
+        r2 = DB.push(doc, "ida-mcp", ida.url, rate=0, ida_comment="append", bookmarks="off")
         assert (ida.cmts, ida.func_cmts, {a: v[0] for a, v in ida.funcs.items()}) == state
         assert {x["status"] for x in r2["results"] if x["op"] == "comment"} == {"unchanged"}
         assert len(ida.tool_calls("rename")) == 1                    # nothing left to rename
 
 
-def test_ida_keeps_analyst_comments_bookmarks_opt_in_dry_run_and_database():
+def test_ida_keeps_analyst_comments_dry_run_and_database():
     doc = _doc(PE_HDR, FACTS)
     with _ida_pe(database="s1") as ida:
         ida.func_cmts[0x140002000] = "analyst note"
         dry = DB.push(doc, "ida-mcp", ida.url, rate=0, dry_run=True, ida_database="s1")
         writes = [c for c in ida.tool_calls() if c["name"] in
                   ("append_comments", "set_comments", "rename", "add_bookmark")]
-        assert not writes and dry["summary"]["planned"] > 0
+        assert not writes and dry["summary"]["planned"] > 0 and len(ida.py_codes) == 1
         assert all(c["arguments"].get("database") == "s1" for c in ida.tool_calls())
-        DB.push(doc, "ida-mcp", ida.url, rate=0, bookmarks=True, ida_database="s1")
+        DB.push(doc, "ida-mcp", ida.url, rate=0, ida_database="s1")
         assert ida.func_cmts[0x140002000].startswith("analyst note\n" + DB.PREFIX)
         assert ida.bookmarks[0x140008000].startswith(DB.PREFIX + "vtable")
         assert set(ida.tool_calls("add_bookmark")[0]["arguments"]) == {"addr", "name", "prefix",
@@ -505,20 +510,6 @@ def test_unsupported_input(tmp_path):
     assert _cli(str(f)).returncode == DB.EXIT_UNSUPPORTED
 
 
-def test_panic_location_record_addresses_match_the_engine():
-    import recover_rust_meta
-    path = FIX / "vm" / "benign_rust_std.x64"
-    meta = recover_rust_meta.recover(path)
-    locs = DB._panic_location_vas(path, meta)
-    sites = {(p["file"], p["line"], p["col"]) for p in meta["panic_sites"]}
-    assert locs and len(locs) <= len(sites) and len(locs) >= 0.9 * len(sites)
-    assert all((f, ln, c) in sites for _va, f, ln, c in locs)
-    import lief
-    b = lief.parse(str(path))
-    secs = [(s.virtual_address, s.virtual_address + s.size) for s in b.sections if s.virtual_address]
-    assert all(any(lo <= va < hi for lo, hi in secs) for va, *_ in locs)
-
-
 def test_analyze_real_fixture_decoded_strings():
     doc = DB.analyze(FIX / "strenc" / "rustcloak_lazy.x64", time_budget=20)
     ren = {a["address"]: a["text"] for a in doc["annotations"] if a["kind"] == "rename"
@@ -567,3 +558,165 @@ def test_legacy_eol_parser_ignores_address_like_continuations():
         be.connect()
         assert be._read_eol(ib + 0x2000) == "first\nabc: looks like an address"
         assert be._read_eol(ib + 0x2050) == ""
+
+
+# --- round 2: limitations fixed ------------------------------------------------------------------
+def test_bridge_uses_engine_panic_locations_without_rescanning(monkeypatch):
+    import recover_rust_meta
+    path = FIX / "vm" / "benign_rust_std.x64"
+    meta = recover_rust_meta.recover(path)
+    called = []
+    monkeypatch.setattr(recover_rust_meta, "find_location_structs",
+                        lambda *a, **k: called.append(1) or [])
+    monkeypatch.setattr(recover_rust_meta, "recover", lambda p: meta)
+    facts = DB.collect(path, emulate="never", triage=False)
+    assert not called                                      # no second rodata scan
+    assert facts["locations"] == [(p["va"], p["file"], p["line"], p["col"])
+                                  for p in meta["panic_locations"]]
+    assert not hasattr(DB, "_panic_location_vas")
+
+
+def test_fast_triage_signal_is_labelled_capped():
+    card = {"triage_signal": "LOW", "signal_reasons": ["no obfuscation evidence (--fast)"],
+            "mode": "static (fast: metadata + literals, no decoding)"}
+    ann, _ = DB.build_annotations(PE_HDR, {"triage": card})
+    texts = [a["text"] for a in ann if a["source_tier"] == "soc_triage"]
+    assert any("fast mode" in t and "capped at LOW" in t for t in texts if t.startswith(DB.PREFIX))
+    assert "triage LOW (fast mode, capped)" in texts
+    full = dict(card, mode="static+emulation (not executed)")
+    ann, _ = DB.build_annotations(PE_HDR, {"triage": full})
+    assert not any("capped" in a["text"] for a in ann)
+
+
+def test_emulate_auto_runs_the_normal_triage_once():
+    import recover
+    calls = []
+    orig = recover.run
+
+    def spy(p, **kw):
+        calls.append(kw["emulate"])
+        return orig(p, **kw)
+    recover.run = spy
+    try:
+        facts = DB.collect(FIX / "strenc" / "rustcloak_lazy.x64", emulate="auto", time_budget=10)
+    finally:
+        recover.run = orig
+    assert calls == ["always"]                  # auto upgraded once, triage reused it
+    assert not facts["triage"]["mode"].startswith("static (fast")
+    assert any("auto" in n and "always" in n for n in facts["notes"])
+
+
+def test_ghidra_default_is_eol_merge_and_bookmarks_become_eol_lines():
+    """GhidraMCP 2.0 has no read path for PRE comments (only /disassemble_function returns EOL
+    comments), so the default must be the comment type it can read back and merge."""
+    doc = _doc(PE_HDR, FACTS)
+    with _ghidra_pe() as g:
+        g.comments[("EOL", 0x140002000)] = "analyst: decoder entry"
+        g.comments[("PRE", 0x140002000)] = "analyst PRE note"
+        r = DB.push(doc, "ghidra-mcp", g.url, rate=0)
+        assert "/set_decompiler_comment" not in {p["path"] for p in g.posts()}
+        assert g.comments[("PRE", 0x140002000)] == "analyst PRE note"
+        eol = g.comments[("EOL", 0x140002000)].split("\n")
+        assert eol[0] == "analyst: decoder entry"
+        assert any(ln.startswith(DB.PREFIX + "bookmark: 2 decoded") for ln in eol)
+        bm = {x["address"]: x for x in r["results"] if x["op"] == "bookmark"}
+        assert bm["0x140002000"]["status"] == "applied" and "EOL" in bm["0x140002000"]["detail"]
+        # a data address (vtable) has no function: its EOL comment cannot be read -> not written
+        assert bm["0x140008000"]["status"] == "skipped"
+        assert ("EOL", 0x140008000) not in g.comments
+        n = len(g.posts())
+        DB.push(doc, "ghidra-mcp", g.url, rate=0)
+        assert len(g.posts()) == n                                    # idempotent: no writes
+
+
+def _stale_ida():
+    ida = _ida_pe()
+    ida.func_cmts[0x140002000] = "analyst note\n" + DB.PREFIX + "decodes \"an old fact\""
+    ida.cmts[0x140002050] = DB.PREFIX + "decoder call -> \"stale\"\nanalyst line"
+    return ida
+
+
+def test_ida_merge_rewrites_only_rust_deobf_lines():
+    doc = _doc(PE_HDR, FACTS)
+    with _stale_ida() as ida:
+        r = DB.push(doc, "ida-mcp", ida.url, rate=0)
+        assert r["server"]["comment_mode"] == "merge", r["notes"]
+        fc = ida.func_cmts[0x140002000].split("\n")
+        assert fc[0] == "analyst note" and not any("old fact" in ln for ln in fc)
+        assert len(fc) > 2 and all(ln.startswith(DB.PREFIX) for ln in fc[1:])
+        lc = ida.cmts[0x140002050].split("\n")
+        assert lc[0] == "analyst line" and "stale" not in ida.cmts[0x140002050]
+        assert not ida.tool_calls("append_comments") and not ida.tool_calls("set_comments")
+        writes = len(ida.py_codes)
+        r2 = DB.push(doc, "ida-mcp", ida.url, rate=0)
+        assert {x["status"] for x in r2["results"] if x["op"] == "comment"} == {"unchanged"}
+        assert len(ida.py_codes) == writes + 1                       # one read, no write
+
+
+def test_ida_merge_dry_run_reads_but_writes_nothing():
+    doc = _doc(PE_HDR, FACTS)
+    with _stale_ida() as ida:
+        before = (dict(ida.cmts), dict(ida.func_cmts))
+        r = DB.push(doc, "ida-mcp", ida.url, rate=0, dry_run=True)
+        assert (ida.cmts, ida.func_cmts) == before and len(ida.py_codes) == 1   # read only
+        assert r["summary"]["planned"] > 0 and r["summary"]["failed"] == 0
+
+
+def test_ida_py_eval_payload_cannot_inject_code():
+    evil = '""")\nimport os  # \'\'\' \\ "\n'
+    facts = {"recover": {"decoded": [{"string": evil, "function": 0x2000}]}}
+    doc = _doc(PE_HDR, facts)
+    with _ida_pe() as ida:
+        DB.push(doc, "ida-mcp", ida.url, rate=0)
+        assert DB._esc(evil) in ida.func_cmts[0x140002000]
+        assert len(ida.py_codes) >= 2                               # a read and a write
+        for code in ida.py_codes:
+            tree = ast.parse(code)
+            strs = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
+                    and isinstance(n.value, str)]
+            assert not any("import os" in x for x in strs[1:])     # only inside the JSON literal
+            assert not any(isinstance(n, (ast.FunctionDef, ast.Lambda, ast.ListComp))
+                           for n in ast.walk(tree))                 # exec-with-locals safe
+
+
+def test_ida_without_py_eval_falls_back_to_append_and_says_so():
+    doc = _doc(PE_HDR, FACTS)
+    with _ida_pe(py_eval=False) as ida:
+        ida.func_cmts[0x140002000] = DB.PREFIX + "decodes \"an old fact\""
+        r = DB.push(doc, "ida-mcp", ida.url, rate=0)
+        assert r["server"]["comment_mode"] == "append"
+        assert any("py_eval" in n and "stale" in n for n in r["notes"])
+        assert "an old fact" in ida.func_cmts[0x140002000]            # cannot be removed
+        bm = [x for x in r["results"] if x["op"] == "bookmark"]
+        assert bm and {x["status"] for x in bm} == {"skipped"} and not ida.bookmarks
+
+
+def test_ida_bookmarks_only_into_free_or_own_slots():
+    doc = _doc(PE_HDR, FACTS)
+    with _ida_pe() as ida:
+        ida.bookmarks[0x140008000] = "my own mark"                    # the analyst's
+        ida.bookmarks[0x140001010] = DB.PREFIX + "triage LOW"         # ours, outdated
+        r = DB.push(doc, "ida-mcp", ida.url, rate=0)
+        assert ida.bookmarks[0x140008000] == "my own mark"
+        assert ida.bookmarks[0x140001010] == DB.PREFIX + "triage MEDIUM"
+        assert ida.bookmarks[0x140002000].startswith(DB.PREFIX + "2 decoded")
+        bm = {x["address"]: x["status"] for x in r["results"] if x["op"] == "bookmark"}
+        assert bm["0x140008000"] == "skipped" and bm["0x140001010"] == "applied"
+        r2 = DB.push(doc, "ida-mcp", ida.url, rate=0)
+        assert {x["status"] for x in r2["results"] if x["op"] == "bookmark"} <= {"unchanged",
+                                                                                "skipped"}
+    with _ida_pe(py_eval=False) as ida:
+        ida.bookmarks[0x140008000] = "my own mark"
+        DB.push(doc, "ida-mcp", ida.url, rate=0, bookmarks="force")
+        assert ida.bookmarks[0x140008000].startswith(DB.PREFIX)       # force = old blind mode
+
+
+def test_legacy_eol_of_the_last_instruction_has_no_trailing_newline():
+    """Found by decompiler_selfcheck: 1.x ends its disassembly with '\\n'; the last instruction's
+    comment must not gain an empty continuation line (or every re-run rewrites it)."""
+    ib = 0x140000000
+    with GhidraLegacy({ib + 0x2000: ("FUN_140002000", [ib + 0x2000, ib + 0x2050])}) as g:
+        g.eol[ib + 0x2050] = "last one"
+        be = DB.make_backend("ghidra-mcp", g.url, rate=0)
+        be.connect()
+        assert be._read_eol(ib + 0x2050) == "last one"

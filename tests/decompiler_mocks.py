@@ -18,12 +18,18 @@ parameter names, reply shapes and validation, taken from the plugins' source:
   structuredContent, isError}, resources/read, Host/Origin checks), ida_mcp/api_core.py
   (server_health, lookup_funcs), ida_mcp/api_modify.py (append_comments + _append_comment_text
   dedupe, set_comments, rename(batch.func), add_bookmark), ida_mcp/api_resources.py
-  (ida://idb/metadata), ida_mcp/utils.py (parse_address: int(addr, 0)).
+  (ida://idb/metadata), ida_mcp/utils.py (parse_address: int(addr, 0)), ida_mcp/api_python.py
+  (py_eval: @unsafe -- absent from tools/list when disabled; exec with a separate locals dict, the
+  last expression's str() is "result", an exception gives result "" + a traceback in "stderr").
+  The fake idc/ida_funcs/idaapi/ida_hexrays modules py_eval sees are backed by the mock's state.
 """
 from __future__ import annotations
 
+import ast
 import json
 import threading
+import traceback
+import types
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -346,6 +352,11 @@ class _IdaHandler(_Base):
                                       "text": json.dumps({"base": hex(st.imagebase),
                                                           "sha256": st.sha256})}]}
             return {"contents": [], "isError": True}
+        if method == "tools/list":
+            names = ["server_health", "lookup_funcs", "append_comments", "set_comments",
+                     "rename", "add_bookmark"] + (["py_eval"] if st.py_eval else [])
+            return {"tools": [{"name": n, "description": n, "inputSchema": {"type": "object"}}
+                              for n in names]}
         if method != "tools/call":
             return {}
         name, args = params.get("name"), dict(params.get("arguments") or {})
@@ -436,6 +447,54 @@ class _IdaHandler(_Base):
             out.append({"addr": it["addr"], "old": old, "new": it["name"]})
         return {"func": out, "summary": {"total": len(out)}}
 
+    def tool_py_eval(self, code, new_locals=False):
+        if not self.state.py_eval:
+            raise TypeError("unknown tool py_eval")
+        st = self.state
+        st.py_codes.append(code)
+        bad = 0xFFFFFFFFFFFFFFFF
+        funcs = st.funcs
+
+        def get_func(ea):
+            for s0, (_n, end) in funcs.items():
+                if s0 <= ea < end:
+                    return types.SimpleNamespace(start_ea=s0, end_ea=end)
+            return None
+        slots = list(st.bookmarks.items())
+        idc = types.SimpleNamespace(
+            BADADDR=bad,
+            get_cmt=lambda ea, rpt: st.cmts.get(ea) if not rpt else None,
+            set_cmt=lambda ea, text, rpt: bool(st.cmts.__setitem__(ea, text) or True),
+            get_func_cmt=lambda ea, rpt: st.func_cmts.get(get_func(ea).start_ea) if not rpt else None,
+            set_func_cmt=lambda ea, text, rpt: bool(st.func_cmts.__setitem__(get_func(ea).start_ea, text)
+                                                    or True),
+            get_bookmark=lambda slot: slots[slot][0] if slot < len(slots) else bad,
+            get_bookmark_desc=lambda slot: slots[slot][1] if slot < len(slots) else None)
+        mods = {"idc": idc, "ida_funcs": types.SimpleNamespace(get_func=get_func),
+                "idaapi": types.SimpleNamespace(BADADDR=bad),
+                "ida_hexrays": types.SimpleNamespace(mark_cfunc_dirty=lambda ea: True),
+                "json": json}
+
+        def imp(name, *a, **k):
+            if name not in mods:
+                raise ImportError(name)
+            return mods[name]
+        g = {"__builtins__": dict(__builtins__ if isinstance(__builtins__, dict)
+                                  else vars(__builtins__), __import__=imp)}
+        loc = {}
+        try:
+            tree = ast.parse(code)
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                exec(compile(ast.Module(body=tree.body[:-1], type_ignores=[]), "<s>", "exec"), g, loc)
+                g.update(loc)
+                res = str(eval(compile(ast.Expression(body=tree.body[-1].value), "<s>", "eval"), g))
+            else:
+                exec(code, g, loc)
+                res = ""
+            return {"result": res, "stdout": "", "stderr": ""}
+        except Exception:
+            return {"result": "", "stdout": "", "stderr": traceback.format_exc()}
+
     def tool_add_bookmark(self, addr, name, prefix="idaMCP: "):
         self.state.bookmarks[int(addr, 0)] = prefix + name
         return {"addr": addr, "ok": True, "title": prefix + name}
@@ -445,7 +504,7 @@ class Ida(Server):
     handler = _IdaHandler
 
     def __init__(self, imagebase, funcs, sha256=None, sse=False, require_session=False,
-                 database=None):
+                 database=None, py_eval=True):
         """funcs: {start: (name, end)} in IDA (absolute) addresses."""
         self.imagebase = imagebase
         self.funcs = {a: [n, e] for a, (n, e) in funcs.items()}
@@ -453,6 +512,8 @@ class Ida(Server):
         self.sse = sse
         self.require_session = require_session
         self.database = database
+        self.py_eval = py_eval
+        self.py_codes = []
         self.sessions = set()
         self.cmts, self.func_cmts, self.bookmarks = {}, {}, {}
         self.requests = []
