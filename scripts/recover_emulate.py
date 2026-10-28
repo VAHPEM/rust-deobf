@@ -2055,7 +2055,6 @@ class Emulator:
         self.prev = None
         self.lo, self.hi = func_va, func_va + size
         pc = BASE + func_va
-        faults = {}
         extend = 3 if budget >= BUDGET else 0
         for _ in range(64):
             if timeout_us and (time.monotonic() - t_run) * 1e6 > timeout_us:
@@ -2086,9 +2085,11 @@ class Emulator:
                     break
                 self._capture()
                 self.prev = None
-                top = id(self.frames[0])
-                faults[top] = faults.get(top, 0) + 1
-                if faults[top] >= 3 or len(self.frames) == 1:
+                # count faults on the frame itself: keying a dict by id(frame) let a NEW callee inherit
+                # a freed frame's count when CPython reused its address (allocation-dependent results)
+                top = self.frames[0]
+                top["faults"] = top.get("faults", 0) + 1
+                if top["faults"] >= 3 or len(self.frames) == 1:
                     self._abandon()
                 else:
                     self._unwind(self.frames.pop())
