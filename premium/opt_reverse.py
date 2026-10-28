@@ -15,9 +15,12 @@ mechanical to undo:
 
 This is a reusable analysis, not tied to one engine: the deflattener's relooper and the VM
 devirtualizer both dispatch through jump tables, and so does ordinary optimized code a decompiler
-reads. x86-64 and 32-bit x86 (the LLVM `lea table; movsxd [table+idx*4]; add; jmp` rel32 idiom) and
-AArch64 (`adr|adrp+add table; adr anchor; ldrsw [table+idx*4]; add; br`, plus LLVM's compressed
-1/2-byte tables `ldrb|ldrh ...; add ..., lsl #2`).
+reads. x86-64 (the `lea table; movsxd [table+idx*4]; add; jmp` rel32 idiom), 32-bit x86 PIC (the
+GOT-relative `[ebx+idx*4-off]` table, GOT from a pc thunk + `add ebx, imm`) and AArch64
+(`adr|adrp+add table; adr anchor; ldrsw [table+idx*4]; add; br`, plus LLVM's compressed 1/2-byte
+tables `ldrb|ldrh ...; add ..., lsl #2`). A table's length always comes from the dominating bound
+(`cmp idx, K` + `ja`/`jae` on x86, `cmp idx, #K` on AArch64), followed through register copies of the
+bounded index (a u32 index zero-extended by `mov eax, edi` / `mov w8, w0`); with no bound, no table.
 
     python3 premium/opt_reverse.py path/to/binary            # list recovered jump tables
     python3 premium/opt_reverse.py path/to/binary --loops    # + unrolled-loop runs
@@ -41,7 +44,11 @@ _MAX_CASES = 4096          # a sane upper bound on switch arms
 _CANON = {"eax": "rax", "edi": "rdi", "esi": "rsi", "edx": "rdx", "ecx": "rcx", "ebx": "rbx",
           "ebp": "rbp", "esp": "rsp", "ax": "rax", "di": "rdi", "si": "rsi", "dx": "rdx",
           "cx": "rcx", "bx": "rbx", "bp": "rbp", "sp": "rsp", "al": "rax", "dil": "rdi",
-          "sil": "rsi", "dl": "rdx", "cl": "rcx", "bl": "rbx", "bpl": "rbp", "spl": "rsp"}
+          "sil": "rsi", "dl": "rdx", "cl": "rcx", "bl": "rbx", "bpl": "rbp", "spl": "rsp",
+          "ah": "rax", "bh": "rbx", "ch": "rcx", "dh": "rdx"}
+# registers a call preserves (SysV): a value in one of these survives an intervening call
+_CALLEE_SAVED = {"x86": {"rbx", "rbp", "rsi", "rdi"},
+                 "x86_64": {"rbx", "rbp", "r12", "r13", "r14", "r15"}}
 
 
 def _canon(name: str) -> str:
@@ -54,73 +61,214 @@ def _canon(name: str) -> str:
 
 
 def _md(arch: str):
+    """A detail-mode capstone disassembler for `arch` (x86_64 / x86 / aarch64)."""
     from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
-    md = Cs(CS_ARCH_X86, CS_MODE_32 if arch == "x86" else CS_MODE_64)
+    if arch == "aarch64":
+        from capstone import CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+        md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    else:
+        md = Cs(CS_ARCH_X86, CS_MODE_32 if arch == "x86" else CS_MODE_64)
     md.detail = True
     return md
 
 
-def recover_jump_tables(code: bytes, base: int, arch: str, read_i32, text_lo: int, text_hi: int):
-    """Scan x86 `code` (loaded at VA `base`) for the rel32 jump-table idiom and recover each switch.
+def _writes(insn, c):
+    """True if `insn` writes canonical register `c` (explicitly or implicitly). Conservative: an
+    instruction capstone cannot describe counts as writing it."""
+    try:
+        _r, w = insn.regs_access()
+    except Exception:
+        return True
+    return any(_canon(insn.reg_name(r)) == c for r in w)
 
+
+def _is_reg(op):
+    from capstone.x86 import X86_OP_REG
+    return op.type == X86_OP_REG
+
+
+def _block_edge(insn):
+    """An instruction that ends straight-line flow backwards-scanning cannot see past."""
+    return insn.mnemonic in ("jmp", "ret", "retf", "ud2", "hlt") or insn.mnemonic.startswith("ret")
+
+
+def _x86_index_bound(insns, k, idx, arch):
+    """Count of a table indexed by canonical register `idx` at insns[k], from a dominating bound
+    `cmp r, K` + `ja` (count K+1) / `jae` (count K) on a register holding the SAME value as idx.
+    Values are numbered forward over the preceding straight-line window: a reg-to-reg mov / movzx /
+    movsxd copies its source's value (`cmp edi, K; ja ..; mov eax, edi; ... [base + rax*4]`, or the
+    copy made before the cmp); any other write, a call (caller-saved regs), or a block edge gives a
+    fresh value. No bounded value at the load -> None: the count must come from a bound, never be
+    guessed."""
+    from capstone.x86 import X86_OP_IMM
+    vals, bound, fresh = {}, {}, [0]
+
+    def new():
+        fresh[0] += 1
+        return fresh[0]
+
+    def val(c):
+        if c not in vals:
+            vals[c] = new()
+        return vals[c]
+    lo = max(0, k - 24)
+    for p in range(lo, k):
+        w = insns[p]
+        ops = w.operands
+        if _block_edge(w):
+            vals.clear()
+            bound.clear()
+            continue
+        if w.mnemonic == "cmp" and len(ops) == 2 and _is_reg(ops[0]) and ops[1].type == X86_OP_IMM:
+            nxt = insns[p + 1].mnemonic if p + 1 < k else ""   # the jump to the default arm
+            cnt = {"ja": 1, "jnbe": 1, "jae": 0, "jnb": 0, "jnc": 0}.get(nxt)
+            if cnt is not None:
+                bound[val(_canon(w.reg_name(ops[0].reg)))] = ops[1].imm + cnt
+            continue
+        if w.mnemonic.startswith("call"):
+            for c in list(vals):
+                if c not in _CALLEE_SAVED[arch]:
+                    del vals[c]
+        if w.mnemonic in ("mov", "movzx", "movsxd") and len(ops) == 2 and _is_reg(ops[0]) \
+                and _is_reg(ops[1]):
+            vals[_canon(w.reg_name(ops[0].reg))] = val(_canon(w.reg_name(ops[1].reg)))
+            continue
+        try:
+            _r, wr = w.regs_access()
+        except Exception:
+            vals.clear()
+            continue
+        for r in wr:
+            vals[_canon(w.reg_name(r))] = new()
+    return bound.get(val(idx))
+
+
+def _x86_pc_thunk(insns, p, B, code, base):
+    """i386 PIC: the PC that insns[p-1] (just before `add B, GOT-PC`) loads into B, or None.
+    Recognises `call L; L: pop B` and `call __x86.get_pc_thunk.<B>` (`mov B, [esp]; ret`)."""
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+    from capstone.x86 import X86_OP_IMM, X86_OP_MEM
+    if p < 1:
+        return None
+    w = insns[p - 1]
+    if w.mnemonic == "pop" and len(w.operands) == 1 and _is_reg(w.operands[0]) \
+            and _canon(w.reg_name(w.operands[0].reg)) == B and p >= 2:
+        c = insns[p - 2]
+        if c.mnemonic == "call" and c.operands and c.operands[0].type == X86_OP_IMM \
+                and c.operands[0].imm == w.address:
+            return w.address
+        return None
+    if w.mnemonic == "call" and w.operands and w.operands[0].type == X86_OP_IMM:
+        t = w.operands[0].imm - base
+        if not 0 <= t < len(code):
+            return None
+        md = Cs(CS_ARCH_X86, CS_MODE_32)
+        md.detail = True
+        th = list(md.disasm(code[t:t + 8], base + t, 2))
+        if len(th) == 2 and th[0].mnemonic == "mov" and len(th[0].operands) == 2 \
+                and _is_reg(th[0].operands[0]) and _canon(th[0].reg_name(th[0].operands[0].reg)) == B \
+                and th[0].operands[1].type == X86_OP_MEM and th[0].operands[1].mem.index == 0 \
+                and th[0].operands[1].mem.disp == 0 \
+                and _canon(th[0].reg_name(th[0].operands[1].mem.base)) == "rsp" \
+                and th[1].mnemonic == "ret":
+            return w.address + w.size
+    return None
+
+
+def _x86_base_value(insns, k, B, arch, code, base):
+    """The value of table-base register B (canonical) at insns[k]: x86-64 `lea B, [rip + d]`, or
+    i386 PIC's GOT pointer (`<pc thunk>; add B, imm`). Scans back to B's defining instruction; any
+    other definition, a call clobbering it, or a block edge -> None."""
+    from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_EIP, X86_REG_RIP
+    for p in range(k - 1, max(-1, k - 64), -1):
+        w = insns[p]
+        ops = w.operands
+        dst = _canon(w.reg_name(ops[0].reg)) if ops and _is_reg(ops[0]) else None
+        if w.mnemonic == "lea" and dst == B and len(ops) == 2 and ops[1].type == X86_OP_MEM:
+            mem = ops[1].mem
+            if mem.base in (X86_REG_RIP, X86_REG_EIP) and mem.index == 0:
+                return w.address + w.size + mem.disp   # rip-relative: from the NEXT insn
+            return None
+        if arch == "x86" and w.mnemonic == "add" and dst == B and len(ops) == 2 \
+                and ops[1].type == X86_OP_IMM:
+            pc = _x86_pc_thunk(insns, p, B, code, base)
+            return None if pc is None else (pc + ops[1].imm) & 0xffffffff
+        if _block_edge(w):
+            return None
+        if w.mnemonic.startswith("call") and B not in _CALLEE_SAVED[arch]:
+            return None
+        if _writes(w, B):
+            return None
+    return None
+
+
+def recover_jump_tables(code: bytes, base: int, arch: str, read_i32, text_lo: int, text_hi: int):
+    """Scan x86 `code` (loaded at VA `base`) for the relative jump-table idiom and recover each switch:
+        cmp idx, K ; ja default            (the bound; jae -> K cases; a mov/movzx copy may follow)
+        lea B, [rip + table]               (x86-64)  |  i386 PIC: B = GOT (pc thunk; add B, imm)
+        movsxd|mov T, [B + idx*4 + disp]   (table = B + disp; entries are offsets from B)
+        add T, B ; jmp T
     read_i32(va) -> signed 32-bit table entry at `va` (from the data section holding the table), or
     None if unmapped. Returns [{jmp_va, table_va, index_reg, count, default, cases:{i:target}}]."""
-    from capstone.x86 import X86_OP_REG, X86_OP_MEM, X86_OP_IMM
+    from capstone.x86 import X86_OP_MEM
     md = _md(arch)
-
-    def same_reg(a, b):              # cmp edi bounds an index rdi: compare 64-bit canonical names
-        return _canon(md.reg_name(a)) == _canon(md.reg_name(b))
     insns = list(md.disasm(code, base))
+    amask = (1 << (64 if arch != "x86" else 32)) - 1
     out = []
     for i, jmp in enumerate(insns):
-        if jmp.mnemonic != "jmp" or not jmp.operands or jmp.operands[0].type != X86_OP_REG:
+        if jmp.mnemonic != "jmp" or len(jmp.operands) != 1 or not _is_reg(jmp.operands[0]):
             continue
-        tgt_reg = jmp.operands[0].reg
-        # look back a few instructions for: add tgt, B ; movsxd/mov tgt, [B + idx*4] ; lea B,[rip+d]
-        window = insns[max(0, i - 5):i]
-        add_i = movsxd_i = lea_i = None
-        base_reg = index_reg = None
-        for w in reversed(window):
-            if add_i is None and w.mnemonic == "add" and len(w.operands) == 2 \
-                    and w.operands[0].type == X86_OP_REG and w.operands[0].reg == tgt_reg \
-                    and w.operands[1].type == X86_OP_REG:
-                add_i, base_reg = w, w.operands[1].reg
-            elif add_i is not None and movsxd_i is None and w.mnemonic in ("movsxd", "mov") \
-                    and len(w.operands) == 2 and w.operands[0].type == X86_OP_REG \
-                    and w.operands[0].reg == tgt_reg and w.operands[1].type == X86_OP_MEM:
-                mem = w.operands[1].mem
-                if mem.base == base_reg and mem.scale == 4 and mem.index != 0:
-                    movsxd_i, index_reg = w, mem.index
-            elif movsxd_i is not None and lea_i is None and w.mnemonic == "lea" \
-                    and len(w.operands) == 2 and w.operands[0].type == X86_OP_REG \
-                    and w.operands[0].reg == base_reg and w.operands[1].type == X86_OP_MEM:
-                mem = w.operands[1].mem
-                from capstone.x86 import X86_REG_RIP, X86_REG_EIP
-                if mem.base in (X86_REG_RIP, X86_REG_EIP) and mem.index == 0:
-                    lea_i = w
-                    table_va = w.address + w.size + mem.disp   # rip-relative: from the NEXT insn
+        tgt = _canon(jmp.reg_name(jmp.operands[0].reg))
+        # back from the jmp: `add T, B` then the table load `T <- [B + idx*4 + disp]`; nothing else
+        # in between may write T, and nothing between the load and the add may write B
+        add_k = load_k = None
+        for p in range(i - 1, max(-1, i - 6), -1):
+            w = insns[p]
+            ops = w.operands
+            if add_k is None:
+                if w.mnemonic == "add" and len(ops) == 2 and _is_reg(ops[0]) and _is_reg(ops[1]) \
+                        and _canon(w.reg_name(ops[0].reg)) == tgt \
+                        and _canon(w.reg_name(ops[1].reg)) != tgt:     # `add T, T` is no base
+                    add_k = p
+                elif _writes(w, tgt) or _block_edge(w):
                     break
-        if lea_i is None or movsxd_i is None or add_i is None:
-            continue
-        # bound: a preceding `cmp index_reg, K` gives count K+1. We REQUIRE this bound -- without it
-        # the table length is unknown and reading "until an entry leaves .text" over-reads into
-        # adjacent data that coincidentally points into code (observed: 700-case phantom tables), so
-        # a bounded, exact recovery is preferred over a guessed one (precision over recall).
-        count = None
-        for w in reversed(insns[max(0, i - 12):i]):
-            if w.mnemonic in ("cmp", "sub") and len(w.operands) == 2 \
-                    and w.operands[0].type == X86_OP_REG and same_reg(w.operands[0].reg, index_reg) \
-                    and w.operands[1].type == X86_OP_IMM:
-                count = w.operands[1].imm + 1
+                continue
+            B = _canon(insns[add_k].reg_name(insns[add_k].operands[1].reg))
+            if w.mnemonic in ("movsxd", "mov") and len(ops) == 2 and _is_reg(ops[0]) \
+                    and _canon(w.reg_name(ops[0].reg)) == tgt and ops[1].type == X86_OP_MEM:
+                mem = ops[1].mem
+                if mem.base and mem.index and mem.scale == 4 \
+                        and _canon(w.reg_name(mem.base)) == B:
+                    load_k = p
                 break
+            if _writes(w, tgt) or _writes(w, B) or _block_edge(w):
+                break
+        if add_k is None or load_k is None:
+            continue
+        load = insns[load_k]
+        B = _canon(insns[add_k].reg_name(insns[add_k].operands[1].reg))
+        mem = load.operands[1].mem
+        index_reg = mem.index
+        base_val = _x86_base_value(insns, load_k, B, arch, code, base)
+        if base_val is None:
+            continue
+        table_va = (base_val + mem.disp) & amask
+        # bound: REQUIRED -- without it the table length is unknown and reading "until an entry
+        # leaves .text" over-reads into adjacent data that coincidentally points into code
+        # (observed: 700-case phantom tables), so a bounded, exact recovery beats a guessed one
+        count = _x86_index_bound(insns, load_k, _canon(load.reg_name(index_reg)), arch)
         if count is None or not (0 < count <= _MAX_CASES):
             continue
+        # x86-64 `mov r32, [..]` zero-extends its entry; movsxd (and i386's 32-bit add) sign-extend
+        unsigned = arch != "x86" and load.mnemonic == "mov" and load.operands[0].size == 4
         cases = {}
         for k in range(count):
             entry = read_i32(table_va + 4 * k)
             if entry is None:
                 break
-            target = (table_va + entry) & ((1 << (64 if arch != "x86" else 32)) - 1)
+            if unsigned:
+                entry &= 0xffffffff
+            target = (base_val + entry) & amask
             if not (text_lo <= target < text_hi):
                 break
             cases[k] = target
@@ -149,6 +297,54 @@ def _xr(r):
     return "x" + r[1:] if r and r[0] == "w" and r[1:].isdigit() else r
 
 
+def _a64_index_bound(before, idx):
+    """`cmp r, #K` bounding the table index (count K+1) over `before` (the straight-line instructions
+    preceding the table load), where r holds the SAME value as the index register. Values are
+    numbered forward: a reg-to-reg `mov` copies its source's value (clang: `mov w8, w0; cmp w0, #K;
+    b.hi ..; mov w8, w8; ... ldrb w11, [x9, x8]`); any other write, a call (caller-saved regs) or a
+    block edge gives a fresh value. No bounded value at the load -> None (no bound, no table)."""
+    vals, bound, fresh = {}, {}, [0]
+    saved = {"x%d" % n for n in range(19, 29)} | {"x29", "sp"}
+
+    def new():
+        fresh[0] += 1
+        return fresh[0]
+
+    def val(c):
+        if c not in vals:
+            vals[c] = new()
+        return vals[c]
+    for w in before:
+        m = w.mnemonic
+        if m == "cmp":                           # writes only NZCV (capstone lists Rn as written)
+            mm = _A64_IMM.match(w.op_str)
+            if mm:
+                bound[val(_xr(mm.group(1)))] = int(mm.group(2), 0) + 1
+            continue
+        if m in ("b", "br", "ret", "braa", "brab", "retaa", "retab"):
+            vals.clear()
+            bound.clear()
+            continue
+        if m in ("bl", "blr"):
+            for c in list(vals):
+                if c not in saved:
+                    del vals[c]
+            continue
+        ops = w.op_str.split(", ")
+        if m == "mov" and len(ops) == 2 and _re.fullmatch(r"[wx]\d+", ops[0]) \
+                and _re.fullmatch(r"[wx]\d+", ops[1]):
+            vals[_xr(ops[0])] = val(_xr(ops[1]))
+            continue
+        try:
+            _r, wr = w.regs_access()
+        except Exception:
+            vals.clear()
+            continue
+        for r in wr:
+            vals[_xr(w.reg_name(r))] = new()
+    return bound.get(val(idx))
+
+
 def recover_jump_tables_arm64(code, base, read_i32, text_lo, text_hi, read_bytes=None):
     """AArch64 jump tables. LLVM lowers a dense `match`/`switch` to one of:
         cmp  idx, #K ; b.hi default
@@ -164,6 +360,7 @@ def recover_jump_tables_arm64(code, base, read_i32, text_lo, text_hi, read_bytes
     `read_i32` (which needs 4 readable bytes)."""
     from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
     md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    md.detail = True                     # regs_access: who writes the index between bound and load
     insns = list(md.disasm(code, base))
 
     def read_entry(va, size, signed):
@@ -198,7 +395,7 @@ def recover_jump_tables_arm64(code, base, read_i32, text_lo, text_hi, read_bytes
                 m = _A64_ADDI.match(w.op_str)
                 if m and _xr(m.group(2)) in regs:
                     regs[_xr(m.group(1))] = regs[_xr(m.group(2))] + int(m.group(3), 0)
-        add_a = add_t = tbl_reg = idx_reg = kind = None
+        add_a = add_t = tbl_reg = idx_reg = kind = load_w = None
         shift = 0
         for w in reversed(win):
             if add_a is None and w.mnemonic == "add":
@@ -214,19 +411,14 @@ def recover_jump_tables_arm64(code, base, read_i32, text_lo, text_hi, read_bytes
                     size, _signed, scale = _A64_ENTRY[w.mnemonic]
                     if int(m.group(4) or 0) == scale:
                         tbl_reg, idx_reg, kind = _xr(m.group(2)), _xr(m.group(3)), w.mnemonic
+                        load_w = w
         if tbl_reg is None or add_a is None:
             continue
         table_va, anchor = regs.get(tbl_reg), regs.get(add_a)
         if table_va is None or anchor is None:
             continue
         size, signed, _scale = _A64_ENTRY[kind]
-        count = None
-        for w in reversed(win):
-            if w.mnemonic in ("cmp", "subs") and idx_reg:
-                m = _A64_IMM.match(w.op_str)
-                if m and _xr(m.group(1)) == idx_reg:
-                    count = int(m.group(2), 0) + 1
-                    break
+        count = _a64_index_bound(win[:win.index(load_w)], idx_reg)
         if count is None or not (0 < count <= _MAX_CASES):
             continue
         cases = {}
@@ -251,8 +443,10 @@ def detect_unrolled_loops(code: bytes, base: int, arch: str, min_repeat: int = 3
     [{start_va, stride, count, span}] -- the fact a re-roller needs to collapse the copies to a loop.
 
     Shape-only (mnemonic sequence + stride), so it is not fooled by the immediates/offsets the copies
-    differ in; it does not itself re-roll (lifting the copies back to one loop body is the next tier)."""
+    differ in; it does not itself re-roll (lifting the copies back to one loop body is the next tier).
+    AArch64 is decoded with the ARM64 disassembler (fixed 4-byte instructions), x86 with x86."""
     md = _md(arch)
+    md.detail = False                    # mnemonics + addresses only: much faster over a whole .text
     insns = list(md.disasm(code, base))
     # a per-instruction shape key that ignores operands' concrete values
     shape = [ins.mnemonic for ins in insns]
@@ -277,7 +471,8 @@ def detect_unrolled_loops(code: bytes, base: int, arch: str, min_repeat: int = 3
                     and (addrs[j] - addrs[j - blen]) == stride:
                 reps += 1
                 j += blen
-            if reps >= min_repeat and (best is None or reps * blen > best[2] * best[1]):
+            # keep the run covering the most instructions (reps*blen insns; not the byte stride)
+            if reps >= min_repeat and (best is None or reps * blen > best[2] * best[0]):
                 best = (blen, stride, reps, j)
         if best:
             blen, stride, reps, j = best
