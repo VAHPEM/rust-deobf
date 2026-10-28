@@ -166,7 +166,14 @@ it survives idiom drift and backs up the brittle pattern matchers.
   not recovery.
 
 ## Git
-Work on branch `claude/quirky-fermi-kcvuaa`. Commit messages end with the attribution footer this
-session is configured to use. Don't add a model identifier to commits or any pushed artifact.
+- **Author every commit as the maintainer:** `Ve (VAHPEM) <ve0912084386@gmail.com>` — set
+  `git -c user.name="Ve (VAHPEM)" -c user.email=ve0912084386@gmail.com commit ...` (or `--author`
+  plus the same committer). **Never** author a commit as Claude / `noreply@anthropic.com`; the agent
+  is credited only through the `Co-Authored-By:` trailer at the end of the message.
+- Commit on `master` (or a short-lived feature branch the maintainer asked for), not an
+  auto-generated `claude/*` branch.
+- **Don't push.** The maintainer pushes from his own machine. Never rewrite published history
+  without being asked.
+- Never commit secrets (`.env`, keys) or malware samples — gallery entries are hashes + results only.
 </content>
 </invoke>
