@@ -419,3 +419,28 @@ def test_eh_frame_cie_with_8_byte_personality():
     data += st.pack("<I", len(body)) + body + b"\x00\x00\x00\x00"
     binary = _Obj(sections=[_Obj(name="/4", content=data, virtual_address=va)])
     assert R._pe_eh_frame_starts(binary, 0x400000) == [0x1500]
+
+
+def test_vector_chunk_prefix_is_not_a_separate_indicator():
+    # a decode cut at a 16-byte chunk, used at that length by another function (`https://telemetr`
+    # next to the full URL, PE32 litcrypt size-lto) was kept as a "separate indicator"
+    url = "https://telemetry.northwind.example/api/v3/beacon"
+    recs = [{"string": url, "function": 1, "used": True},
+            {"string": url[:16], "function": 2, "used": True},
+            {"string": url[:32], "function": 3, "used": True}]
+    kept = {r["string"] for r in R._drop_overlap_artifacts(recs)}
+    assert kept == {url}, kept
+
+
+def test_i386_decoder_features():
+    # i386 names data by absolute imm32 (`mov edx, 0x4a3175`: the ciphertext a decoder gets) and
+    # obfstr adds 32-bit keys (`add ebx, 0x403eea6e`) where x86-64 uses movabs: both scored 0, so
+    # i386 decoders were never path-explored (scatter PE32: `nw-agent::stage=collect` missing)
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+    code = bytes.fromhex("81c36eea3e40" "ba75314a00" "81c310000000" "c3")   # add ebx,key; mov edx,ct; add ebx,0x10
+    cipher = bytes(range(0x80, 0x90))
+    img = _Obj(code=code, text_va=0x1000, md=Cs(CS_ARCH_X86, CS_MODE_32), arm=False, x32=True,
+               span=(0x400000, 0x500000), imagebase=0x400000,
+               read=lambda va, n: cipher[:n] if va == 0xa3175 else b"\x00" * n)
+    imm64, xors, ct, callees = R._features(img, 0x1000, len(code))
+    assert (imm64, ct) == (1, 1), (imm64, ct)

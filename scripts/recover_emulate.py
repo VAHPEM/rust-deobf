@@ -2579,6 +2579,13 @@ def _features(img, fva, size):
                         cipher += 1
             elif mn in ("call", "jmp") and ops.startswith("0x"):
                 callees.append(int(ops, 16))       # a jmp out of the function is a tail call
+            elif img.x32 and mn in ("add", "sub") and ", 0x" in ops:
+                # i386 keys: obfstr adds a 32-bit key to each 4-byte word (`add ebx, 0x403eea6e`)
+                # where x86-64 builds a 64-bit one with movabs -- counted the same. (A large
+                # immediate that is an address in the image is not a key.)
+                v = int(ops.rsplit(",", 1)[-1].strip(), 16)
+                if v >= 0x1000000 and not img.span[0] <= v < img.span[1]:
+                    imm64 += 1
             elif img.x32 and mn in ("mov", "push"):
                 # i386 has no RIP-relative form: data is named by an absolute 32-bit immediate
                 # (`mov edx, 0x4a3175` -- the ciphertext a decoder call gets). Without this every
@@ -3221,6 +3228,8 @@ def _drop_overlap_artifacts(records):
         fs = funcs.get(s)
         if not (fs and (s in used or s in exact)):
             return False
+        if len(s) % 16 == 0 and any(o.startswith(s) for o in containers):
+            return False    # a decode cut at a 16-byte vector chunk (`https://telemetr`, PE32)
         if not all(funcs.get(o) and fs.isdisjoint(funcs.get(o)) for o in containers):
             return False
         return bool(_STRONG.intersection(_ioc_tags(s)))
