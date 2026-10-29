@@ -311,7 +311,9 @@ def test_macho_pieces_era_fixture():
         pytest.skip("fixture missing")
     res = R.recover(MACHO_A64, use_libfuncs=False)
     assert res["fmt_encoding"] == "pieces"
-    assert all(f["encoding"] == "pieces" for f in res["fmt_sites"])
+    # every fmt::Arguments site is the pieces form (write_str literal sites carry no Arguments)
+    assert all(f["encoding"] in ("pieces", "write_str") for f in res["fmt_sites"])
+    assert any(f["encoding"] == "pieces" for f in res["fmt_sites"])
     assert any(f["macro"] == "println!" and f["sink"] == "print" for f in res["fmt_sites"])
     roles = {(h["kind"], h["via"]) for h in res["helpers"] if h["role"] == "panic"}
     assert ("bounds_check", "symbol") in roles
@@ -387,3 +389,213 @@ def test_formatter_fns_return_fmt_result_and_empty_vec_is_not_a_tag():
     er = {e["va"]: e for e in res["enum_returns"]}
     assert er[0x10300]["shape"] == "fmt-result" and "fmt::Result" in er[0x10300]["note"]
     assert vec not in er, er.get(vec)
+
+
+# ------------------------------------------------------------------------------------------------
+# round 2: fmt traits, write_str literals, indirect-call identity, i386 / PE32 frames
+# ------------------------------------------------------------------------------------------------
+def test_trait_chars_are_rendered_from_placeholder_records():
+    m = Mem()
+    flags = (3 << 29) | (1 << 23) | (1 << 24) | (1 << 27) | 0x20        # `#0` + width
+    m.put(0x1000, b"\x02a=\xc0\x01 " + bytes([0xC3]) + struct.pack("<IH", flags, 4) + b"\x00")
+    d = R.decode_template(m.read, 0x1000)
+    assert d["text"] == "a={} {:#04}" and d["ph"] == [(1, 0, False), (3, 1, False)]
+    t = R.apply_traits(d, {0: "Debug", 1: "LowerHex"})
+    assert t["text"] == "a={:?} {:#04x}" and t["traits"] == {0: "Debug", 1: "LowerHex"}
+    assert R.apply_traits(d, {0: "Display"})["text"] == "a={} {:#04}"
+    assert R._trait_of_symbol("p1::Shape::core::fmt::Debug::fmt") == "Debug"
+    assert R._trait_of_symbol("core::fmt::num::UpperHex::fmt") == "UpperHex"
+    assert R._trait_of_symbol("core::fmt::Formatter::pad") is None
+
+
+def _fmt_caller(c, base, tmpl, fns, sink):
+    """Code at `base`: an args array of len(fns) (value, formatter) pairs on the stack, then
+    `lea rdi,[tmpl]; lea rsi,[args]; call sink; ret`."""
+    n = len(fns)
+    seq = b"\x48\x83\xec" + bytes([0x10 + 0x10 * n + 8])                 # sub rsp, frame
+    for k, fn in enumerate(fns):
+        seq += b"\x48\x8d\x44\x24\x08"                                  # lea rax,[rsp+8] (value)
+        seq += b"\x48\x89\x44\x24" + bytes([0x10 + 0x10 * k])           # mov [rsp+0x10+16k],rax
+        p = base + len(seq)
+        seq += b"\x48\x8d\x05" + _rel(p, 7, fn)                         # lea rax,[fn]
+        seq += b"\x48\x89\x44\x24" + bytes([0x18 + 0x10 * k])           # mov [rsp+0x18+16k],rax
+    p = base + len(seq)
+    seq += b"\x48\x8d\x3d" + _rel(p, 7, tmpl)
+    seq += b"\x48\x8d\x74\x24\x10"
+    if sink is None:
+        seq += b"\xff\x53\x08"                                        # call [rbx+8]: unresolved
+    else:
+        seq += b"\xe8" + _rel(base + len(seq), 5, sink)
+    seq += b"\x48\x83\xc4" + bytes([0x10 + 0x10 * n + 8]) + b"\xc3"
+    c.at(base, seq)
+
+
+def test_stripped_formatter_traits_debug_builder_and_hex():
+    """No names: a Debug impl calls a debug builder (a fn referencing a punctuation-only literal);
+    a hex formatter references the "0x" prefix and masks digits with `and 0xf`."""
+    m = Mem()
+    m.put(0x1000, b"\x02v=\xc0\x01 \xc0\x00")
+    m.put(0x2000, b", {\n}")                                            # debug punctuation
+    m.put(0x2100, b"0xother text")                                      # radix prefix (no NUL)
+    c = Code(0x10000, size=0x800)
+    sink, dbg, builder, hexf = 0x10400, 0x10480, 0x10500, 0x10580
+    _fmt_caller(c, 0x10000, 0x1000, [dbg, hexf], sink)
+    c.at(sink, b"\xc3")
+    c.at(dbg, b"\xe8" + _rel(dbg, 5, builder) + b"\xc3")                # Debug impl: call builder
+    c.at(builder, b"\x48\x8d\x05" + _rel(builder, 7, 0x2000) + b"\xc3")
+    c.at(hexf, b"\x83\xe0\x0f" + b"\x48\x8d\x05" + _rel(hexf + 3, 7, 0x2100) + b"\xc3")
+    res = R.run(c.prog(m, [0x10000, sink, dbg, builder, hexf]))
+    (f,) = [x for x in res["fmt_sites"] if x["function"] == 0x10000]
+    assert f["format"] == "v={:?} {:x}" and f["traits"] == {0: "Debug", 1: "LowerHex"}, f
+
+
+def test_write_str_through_dyn_write_vtable_slot():
+    """`write!(f, "empty input")` lowered to `(*f.out.vtable).write_str(f.out.data, "...")`."""
+    m = Mem()
+    m.put(0x3000, b"empty input")
+    c = Code(0x10000)
+    seq = b"\x48\x8b\x3e\x48\x8b\x46\x08\x48\x8b\x40\x18"               # rdi=[rsi]; rax=[rsi+8]; rax=[rax+0x18]
+    seq += b"\x48\x8d\x35" + _rel(0x10000 + len(seq), 7, 0x3000)        # lea rsi,[lit]
+    seq += b"\xba\x0b\x00\x00\x00\xff\xe0"                              # mov edx,11; jmp rax
+    c.at(0x10000, seq)
+    res = R.run(c.prog(m, [0x10000]))
+    (f,) = res["fmt_sites"]
+    assert f["macro"] == "write!" and f["format"] == "empty input" and f["encoding"] == "write_str"
+
+
+def test_unresolved_indirect_calls_never_share_an_identity():
+    """One indirect call receives validated Arguments; another indirect call passing (ptr, 11) must
+    not inherit "takes Arguments at position 1" and be decoded as from_str "empty"."""
+    m = Mem()
+    m.put(0x1000, b"\x02v=\xc0\x00")
+    m.put(0x3000, b"empty input")
+    c = Code(0x10000, size=0x400)
+    _fmt_caller(c, 0x10000, 0x1000, [0x10300], None)                   # strong site, indirect
+    seq = b"\x48\x8b\x46\x08"                                           # rax = [rsi+8] (unknown)
+    seq += b"\x48\x8d\x3d" + _rel(0x10100 + len(seq), 7, 0x3000)        # lea rdi,[lit]
+    seq += b"\xbe\x0b\x00\x00\x00\xff\xd0\xc3"                          # mov esi,11; call rax; ret
+    c.at(0x10100, seq)
+    c.at(0x10300, b"\xc3")
+    res = R.run(c.prog(m, [0x10000, 0x10100, 0x10300]))
+    assert [f for f in res["fmt_sites"] if f["function"] == 0x10000]   # the strong site is found
+    assert not [f for f in res["fmt_sites"] if f["function"] == 0x10100], res["fmt_sites"]
+
+
+def test_function_after_padding_reached_only_by_pointer_is_analyzed():
+    """A stripped PE32 `main` is only reached through a pointer: code after padding that no start
+    list knows must still be analyzed (its fmt site found), not dropped."""
+    m = Mem()
+    m.put(0x1000, b"\x02v=\xc0\x00")
+    c = Code(0x10000, size=0x400)
+    c.at(0x10000, b"\xc3")                                              # f1: ret
+    _fmt_caller(c, 0x10010, 0x1000, [0x10300], 0x10200)                 # after int3 padding
+    c.at(0x10200, b"\xc3")
+    c.at(0x10300, b"\xc3")
+    res = R.run(c.prog(m, [0x10000, 0x10200, 0x10300]))                 # 0x10010 not a start
+    assert [f for f in res["fmt_sites"] if f["function"] == 0x10010], res["fmt_sites"]
+
+
+def test_i386_ret_n_callee_pops_keeps_the_frame():
+    """i386: a callee ending in `ret 8` pops its stack arguments; esp must move with it so a
+    later push-based fmt site still decodes."""
+    m = Mem(4)
+    m.put(0x9000, b"\x02v=\xc0\x00")
+    c = Code(0x8000)
+    a = 0x8000
+    seq = b"\x55\x89\xe5\x83\xec\x10"                                    # push ebp; mov ebp,esp; sub esp,0x10
+    seq += b"\x6a\x01\x6a\x02"                                          # push 1; push 2
+    seq += b"\xe8" + _rel(a + len(seq), 5, 0x8200)                      # call stdcall (ret 8)
+    seq += b"\xc7\x45\xf4" + struct.pack("<I", 0x8300)                  # mov [ebp-0xc], fmtfn
+    seq += b"\x89\xe0"                                                  # mov eax,esp (= ebp-0x10
+    #                                                                    only if the callee popped 8)
+    seq += b"\x50\x68" + struct.pack("<I", 0x9000)                      # push eax; push tmpl
+    seq += b"\xe8" + _rel(a + len(seq), 5, 0x8280)                      # call sink
+    seq += b"\xc9\xc3"
+    c.at(a, seq)
+    c.at(0x8200, b"\xc2\x08\x00")                                       # ret 8
+    c.at(0x8280, b"\xc3")
+    c.at(0x8300, b"\xc3")
+    res = R.run(c.prog(m, [a, 0x8200, 0x8280, 0x8300], arch="x86", abi="i386", psize=4))
+    assert [f for f in res["fmt_sites"] if f["function"] == a and f["format"] == "v={}"], res["fmt_sites"]
+
+
+def test_fmt_result_reaches_dyn_debug_vtable_methods_and_tail_callees():
+    """A builder call passing a `&dyn Debug` (data, vtable) marks vtable method 0 as a Debug impl
+    returning fmt::Result; a formatter's tail callee returns fmt::Result too."""
+    m = Mem()
+    m.put(0x1000, b"\x02v=\xc0\x00")
+    m.put(0x2000, b", {\n}")
+    c = Code(0x10000, size=0x800)
+    sink, fmtfn, builder, vmeth, tailee = 0x10400, 0x10480, 0x10500, 0x10600, 0x10680
+    vt = 0x4000
+    m.put(vt, struct.pack("<QQQQ", 0, 8, 8, vmeth))                     # drop, size, align, fmt
+    _fmt_caller(c, 0x10000, 0x1000, [fmtfn], sink)
+    c.at(sink, b"\xc3")
+    # fmtfn: lea rdx,[vt]; call builder; jmp tailee
+    seq = b"\x48\x8d\x15" + _rel(fmtfn, 7, vt) + b"\xe8" + _rel(fmtfn + 7, 5, builder)
+    seq += b"\xe9" + _rel(fmtfn + 12, 5, tailee)
+    c.at(fmtfn, seq)
+    c.at(builder, b"\x48\x8d\x05" + _rel(builder, 7, 0x2000) + b"\xc3")
+    c.at(vmeth, b"\x31\xc0\xc3")
+    c.at(tailee, b"\x31\xc0\xc3")
+    res = R.run(c.prog(m, [0x10000, sink, fmtfn, builder, vmeth, tailee]))
+    er = {e["va"]: e["shape"] for e in res["enum_returns"]}
+    assert er.get(vmeth) == "fmt-result" and er.get(tailee) == "fmt-result", er
+
+
+def test_returned_value_handed_to_result_unwrap_helper_is_result_like():
+    """`f()?`/`.unwrap()` on a one-register Result: the caller passes f's returned value to
+    result::unwrap_failed (identified by its "{}: {}" panic body)."""
+    m = Mem()
+    m.put(0x1000, b"\xc0\x02: \xc0\x00")                                # "{}: {}"
+    c = Code(0x10000, size=0x800)
+    f, unwrap, pfmt, fmtfn = 0x10100, 0x10200, 0x10300, 0x10380
+    seq = b"\xe8" + _rel(0x10000, 5, f)                                 # call f
+    seq += b"\x84\xc0\x75\x01\xc3"                                      # test al,al; jne +1; ret
+    seq += b"\x48\x89\xc7"                                              # mov rdi,rax (the Err)
+    seq += b"\xe8" + _rel(0x10000 + len(seq), 5, unwrap)                # call unwrap_failed
+    c.at(0x10000, seq)
+    c.at(f, b"\x31\xc0\xc3")                                            # f: xor eax,eax; ret
+    # unwrap_failed: args array [(value, fmtfn) x2] then panic_fmt("{}: {}", args); no ret
+    seq = b"\x48\x83\xec\x38"
+    for k in range(2):
+        seq += b"\x48\x8d\x44\x24\x30\x48\x89\x44\x24" + bytes([0x10 + 0x10 * k])
+        p = unwrap + len(seq)
+        seq += b"\x48\x8d\x05" + _rel(p, 7, fmtfn) + b"\x48\x89\x44\x24" + bytes([0x18 + 0x10 * k])
+    p = unwrap + len(seq)
+    seq += b"\x48\x8d\x3d" + _rel(p, 7, 0x1000) + b"\x48\x8d\x74\x24\x10"
+    seq += b"\xe8" + _rel(unwrap + len(seq), 5, pfmt)
+    c.at(unwrap, seq)
+    c.at(pfmt, b"\x0f\x0b")
+    c.at(fmtfn, b"\xc3")
+    # a bounds-check helper whose core message identifies pfmt as panic_fmt
+    m.put(0x7000, b" index out of bounds: the len is \xc0\x12 but the index is \xc0\x00")
+    bnd = 0x10500
+    seq = b"\x48\x83\xec\x28"
+    for k in range(2):
+        seq += b"\x48\x8d\x44\x24\x20\x48\x89\x44\x24" + bytes([0x00 + 0x10 * k])
+        p = bnd + len(seq)
+        seq += b"\x48\x8d\x05" + _rel(p, 7, fmtfn) + b"\x48\x89\x44\x24" + bytes([0x08 + 0x10 * k])
+    p = bnd + len(seq)
+    seq += b"\x48\x8d\x3d" + _rel(p, 7, 0x7000) + b"\x48\x8d\x34\x24"
+    seq += b"\xe8" + _rel(bnd + len(seq), 5, pfmt)
+    c.at(bnd, seq)
+    res = R.run(c.prog(m, [0x10000, f, unwrap, pfmt, fmtfn, bnd]))
+    roles = {h["va"]: h["kind"] for h in res["helpers"]}
+    assert roles.get(unwrap) == "unwrap_err", roles
+    er = {e["va"]: e["shape"] for e in res["enum_returns"]}
+    assert er.get(f) == "result-consumed", er
+
+
+def test_empty_vec_len_field_is_not_a_tag():
+    """{cap 0, ptr 8, len 0} on one path and {cap 4, ptr p, len 1} on another: not an enum."""
+    c = Code(0x10000)
+    v = 0x10100
+    seq = b"\x48\x85\xf6\x74\x14"                                      # test rsi,rsi; je empty
+    seq += b"\x48\xc7\x07\x04\x00\x00\x00\x48\x89\x77\x08"              # cap 4; ptr rsi
+    seq += b"\x48\xc7\x47\x10\x01\x00\x00\x00\xc3"                      # len 1; ret
+    seq += b"\x48\xc7\x07\x00\x00\x00\x00\x48\xc7\x47\x08\x08\x00\x00\x00"
+    seq += b"\x48\xc7\x47\x10\x00\x00\x00\x00\xc3"                      # empty vec
+    c.at(v, seq)
+    res = R.run(c.prog(Mem(), [v]))
+    assert v not in {e["va"] for e in res["enum_returns"]}

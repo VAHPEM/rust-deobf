@@ -13,9 +13,12 @@ STRIPPED binaries, statically (nothing is executed), and reports it as observati
      `panic_fmt` / `write_fmt`. The literal text comes back even with no symbols:
        * newer rustc (1.97 measured; 1.91 still uses pieces): the compact *template* encoding
          (`template: *const u8` -> b"\\x06hello \\xc0\\x00", `args: &[Argument]` or
-         `len << 1 | 1` for a plain `&'static str`); decoded
-         byte-for-byte, including `{:>8.3}`-style options (the formatting *trait* -- `?`, `x` -- is
-         chosen by the argument's formatter fn, not the template, so it is shown as `{}`);
+         `len << 1 | 1` for a plain `&'static str`); decoded byte-for-byte, including
+         `{:>8.3}`-style options. The formatting *trait* (`?`, `x`, `X`, `o`, `b`, `e`) is not in
+         the template: it is recovered from each argument's formatter fn (its symbol, else
+         structure: a Debug impl calls a Formatter debug builder, quotes and escapes, or tests the
+         debug-hex flags; a radix formatter references its "0x"/"0o"/"0b" prefix and digit mask);
+         unknown traits render as `{}`;
        * older rustc: the `pieces: &[&str]` array (+ args / fmt slices) the struct points at.
      Reported as `println!("hello {} you are {}")`, `format!(...)`, `panic!(...)`, or
      `format_args!(...)` when the consuming function is not identified.
@@ -159,9 +162,16 @@ def _esc(s: str) -> str:
     return s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t").replace("\x1b", "\\x1b")
 
 
-def _render_spec(flags, width, prec, w_ind, p_ind, arg_idx):
-    """`{...}` for a template placeholder. The trait (Display/Debug/hex) is not in the template."""
+# fmt trait -> the type character in a `{:...}` placeholder (Display is the bare `{}`)
+_TRAIT_CHAR = {"Display": "", "Debug": "?", "LowerHex": "x", "UpperHex": "X", "Octal": "o",
+               "Binary": "b", "LowerExp": "e", "UpperExp": "E"}
+
+
+def _render_spec(flags, width, prec, w_ind, p_ind, arg_idx, trait=None):
+    """`{...}` for a template placeholder. `trait` is the formatting trait the argument's formatter
+    fn implements (recovered from that fn, not from the template), or None (shown as Display)."""
     spec = ""
+    debug_hex = ""
     if flags is not None:
         fill = chr(flags & 0x1FFFFF) if (flags & 0x1FFFFF) < 0x110000 else " "
         align = (flags >> 29) & 3
@@ -175,12 +185,17 @@ def _render_spec(flags, width, prec, w_ind, p_ind, arg_idx):
             spec += "#"
         if flags & (1 << 24):
             spec += "0"
+        if flags & (3 << 25):
+            debug_hex = "x" if flags & (1 << 25) else "X"   # {:x?} / {:X?}
     if width is not None:
         spec += ("%d$" % width) if w_ind else str(width)
     if prec is not None:
         spec += "." + (("%d$" % prec) if p_ind else str(prec))
-    if flags is not None and flags & (3 << 25):
-        spec += "x?" if flags & (1 << 25) else "X?"
+    # the type char: the Debug-hex flags force `?` (with an x/X prefix); otherwise use the trait
+    if debug_hex:
+        spec += debug_hex + "?"
+    elif trait:
+        spec += _TRAIT_CHAR.get(trait, "")      # Display (and unknown) -> no type char
     head = "" if arg_idx is None else str(arg_idx)
     return "{" + head + (":" + spec if spec else "") + "}"
 
@@ -195,7 +210,7 @@ def decode_template(read, va):
     buf = read(va, TEMPLATE_MAX)
     if not buf:
         return None
-    i, out, lits, nph, nxt, max_arg = 0, [], [], 0, 0, -1
+    i, out, lits, nph, nxt, max_arg, ph = 0, [], [], 0, 0, -1, []
     while True:
         if i >= len(buf):
             return None                          # unterminated within the window
@@ -252,13 +267,14 @@ def decode_template(read, va):
             nph += 1
             if nph > MAX_ARGS or max_arg >= MAX_ARGS:
                 return None
+            ph.append((len(out), use, bool(flags and flags & (3 << 25))))
             out.append(_render_spec(flags, width, prec, b & 0x10, b & 0x20, idx))
         else:
             return None                          # 0x81..0xBF: not a valid tag
     if not out:
         return None
     return {"text": "".join(out), "literals": lits, "placeholders": nph, "nargs": max_arg + 1,
-            "size": i}
+            "size": i, "out": out, "ph": ph}
 
 
 def decode_str(read, va, n):
@@ -295,13 +311,14 @@ def decode_pieces(read, ptr_at, pieces_va, npieces, nargs, psize):
             if s is None:
                 return None
         lits.append(s)
-    out = []
+    out, ph = [], []
     for k, s in enumerate(lits):
         out.append(_esc(s))
         if k < nargs:
+            ph.append((len(out), k, False))       # pieces args are positional, in order
             out.append("{}")
     return {"text": "".join(out), "literals": lits, "placeholders": nargs, "nargs": nargs,
-            "size": npieces}
+            "size": npieces, "out": out, "ph": ph}
 
 
 def read_location(read, ptr_at, va, psize):
@@ -396,8 +413,27 @@ class Prog:
         imports = {E.TRAMP + 16 * i: nm for i, nm in enumerate(img.tramp)}
         funcs = [a for a, _ in img.functions()]   # (also names static C-runtime fns: img.named)
         if img.x32:
-            # i386 PIC `call next; pop ebx`: the call "target" is the next instruction, not a function
             code, base = img.code, img.text_va
+            # Image.call_targets decodes in 64-bit mode; take the 32-bit direct call targets here
+            # (E8 rel32 decoded as i386), and on a stripped PE32 -- no .pdata, no symbols -- seed
+            # starts by recursive descent from the entry point (recover_cfg._seed_starts)
+            extra = set()
+            from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+            md32 = Cs(CS_ARCH_X86, CS_MODE_32)
+            for _a, _sz, mn, ops in md32.disasm_lite(code, base):
+                if mn == "call" and ops.startswith("0x"):
+                    t = int(ops, 16)
+                    if base <= t < base + len(code):
+                        extra.add(t)
+            funcs = sorted(set(funcs) | extra)
+            if pe:
+                try:
+                    import recover_cfg
+                    ep0 = img.binary.entrypoint - img.imagebase
+                    funcs = sorted(recover_cfg._seed_starts(img, set(funcs), ep0))
+                except Exception:
+                    pass
+            # i386 PIC `call next; pop ebx`: the call "target" is the next instruction, not a function
             funcs = [a for a in funcs if not (a - base >= 5 and code[a - base - 5:a - base] == b"\xe8\0\0\0\0")]
         func_end = {}
         if pe:
@@ -571,28 +607,46 @@ def _base_off(v):
 
 
 class _State:
-    __slots__ = ("regs", "slots", "sp")
+    # spec: the state of code no known branch reaches (after a dead end: landing pads, data
+    # decoded as code) -- it must not dilute a join that has real predecessors
+    __slots__ = ("regs", "slots", "sp", "spec")
 
-    def __init__(self, regs=None, slots=None, sp=None):
+    def __init__(self, regs=None, slots=None, sp=None, spec=False):
         self.regs = regs if regs is not None else {}
         self.slots = slots if slots is not None else {}
         self.sp = sp
+        self.spec = spec
 
     def copy(self):
-        return _State(dict(self.regs), dict(self.slots), self.sp)
+        return _State(dict(self.regs), dict(self.slots), self.sp, self.spec)
 
     @staticmethod
     def meet(states):
         states = [s for s in states if s is not None]
         if not states:
             return None
+        real = [s for s in states if not s.spec]
+        if real:
+            states = real
         if len(states) == 1:
             return states[0].copy()
         a = states[0]
         regs = {k: v for k, v in a.regs.items() if all(s.regs.get(k) == v for s in states[1:])}
         slots = {k: v for k, v in a.slots.items() if all(s.slots.get(k) == v for s in states[1:])}
         sp = a.sp if all(s.sp == a.sp for s in states[1:]) else None
-        return _State(regs, slots, sp)
+        if sp is None:
+            # predecessors disagree on the stack pointer -- on correct code only because one path
+            # was mis-modelled (an unknown callee-pop): keep the majority, so one bad path does
+            # not erase the frame for everything after the join
+            votes = {}
+            for s_ in states:
+                if s_.sp is not None:
+                    votes[s_.sp] = votes.get(s_.sp, 0) + 1
+            if votes:
+                sp = max(votes.items(), key=lambda kv: kv[1])[0]
+                if "rsp" in a.regs or "sp" in a.regs:
+                    regs["rsp" if "rsp" in a.regs else "sp"] = sp
+        return _State(regs, slots, sp, spec=all(s_.spec for s_ in states))
 
 
 class FuncFacts:
@@ -609,12 +663,14 @@ class FuncFacts:
         self.has_ret = False
         self.has_trap = False    # ud2 / brk / udf reached
         self.first_mn = None
+        self.pushed = 0          # i386: words pushed since the last call (stdcall import pops)
         self.cmp_in = set()      # entry registers compared / tested before being overwritten
         self.has_indirect_jmp = False
         self.tail_targets = set()
         self.back_jumps = []     # (target, state) of jumps to an already-processed address
         self.merged_calls = []   # per-predecessor replays of a call in a tail-merged block
         self.first_tests = []    # registers tested with `test r, 1` near the entry (as_str check)
+        self.split_at = None     # where an unreached, padded-off next function begins
         self.ninsn = 0           # reachable (non-padding) instructions
         self.eff_end = start     # end of the last such instruction
 
@@ -714,6 +770,7 @@ def analyze_function(prog, start, end, md):
             else:
                 st.regs.setdefault("rsp", st.sp)
             live = True
+            F.pushed = 0
             if post is not None:
                 post.finish()
                 post = None
@@ -723,9 +780,12 @@ def analyze_function(prog, start, end, md):
                 continue                          # inter-function / alignment padding
             if padded and a % 16 == 0 and not arm:
                 # unreached code after alignment padding is the next function (one without an
-                # unwind entry: leaf / tail-call-only functions in a stripped PE), not ours
+                # unwind entry, or only reached through a pointer: `main` handed to lang_start in
+                # a stripped PE32), not ours -- run() analyzes it as a function of its own
+                F.split_at = a
                 break
             st = dead.copy() if dead is not None else _State(sp=last_sp)
+            st.spec = True
             dead = None
             if arm:
                 st.regs.setdefault("sp", last_sp)
@@ -867,7 +927,9 @@ def _record_call(prog, F, st, ins, abi, target_val, tail=False):
         for k in range(abi["stack_args"]):
             args.append(st.slots.get(sp[1] + sb + 4 * k) if isinstance(sp, tuple) else None)
         args += [st.regs.get(r) for r in abi["fast"]]
+    vslot = target_val[1] if isinstance(target_val, tuple) and target_val[0] == "slot" else None
     rec = {"site": ins.address, "size": ins.size, "target": tgt, "imp": imp, "args": args,
+           "vslot": vslot,
            "slots": dict(st.slots), "tail": tail, "sret": st.regs.get(abi["sret"]) if abi["sret"] else None,
            "post": None}
     F.calls.append(rec)
@@ -887,6 +949,10 @@ def _clobber(st, abi, rec=None):
             if isinstance(v, tuple) and v[0] == "s":
                 for k in [k for k in st.slots if v[1] <= k < v[1] + 0x40]:
                     del st.slots[k]
+        # the returned value: symbolic, so its flow into a later call is visible (a `?` / unwrap
+        # handing an Err to a Result-consuming helper)
+        st.regs[abi["ret"][0]] = ("ret", rec["site"], 0)
+        st.regs[abi["ret"][1]] = ("ret", rec["site"], 1)
 
 
 def _x86_mem_addr(prog, st, ins, op):
@@ -909,6 +975,16 @@ def _x86_mem_addr(prog, st, ins, op):
     if isinstance(bv, int) and prog.arch == "x86":
         return prog.norm((bv + m.disp) & 0xFFFFFFFF)
     return _add(bv, m.disp)
+
+
+def _vslot_x86(ins, op):
+    """("slot", disp) for a pointer loaded from [reg + disp] whose base we do not know: what a
+    `dyn Trait` call reads out of its vtable."""
+    m = op.mem
+    from capstone.x86 import X86_REG_RIP, X86_REG_EIP
+    if m.base and not m.index and m.base not in (X86_REG_RIP, X86_REG_EIP) and 0 <= m.disp < 0x400:
+        return ("slot", m.disp)
+    return None
 
 
 def _load(prog, st, addr, width):
@@ -1044,6 +1120,8 @@ def _step_x86(prog, F, st, ins, abi, mask, pending, post, idx, insns):
                     return True, post
         elif op is not None and op.type == X86_OP_MEM:
             a = _x86_mem_addr(prog, st, ins, op)
+            if a is None:
+                tv = _vslot_x86(ins, op)            # call [vtable + slot]
             if isinstance(a, int):
                 tv = prog.ptr_at(a)
                 if tv is not None and tv not in prog.imports and prog.arch == "x86":
@@ -1066,6 +1144,27 @@ def _step_x86(prog, F, st, ins, abi, mask, pending, post, idx, insns):
             post.finish()
         post = _Post(rec, abi["ret"][0], abi["ret"][1])
         _clobber(st, abi, rec)
+        if prog.arch == "x86":
+            # callee-pops conventions (stdcall Win32 imports, `ret N` functions): the callee
+            # removes its stack arguments, so esp moves up after the call
+            pops = 0
+            if isinstance(rec["target"], int) and rec["imp"] is None:
+                pops = getattr(prog, "callee_pops", {}).get(rec["target"], 0)
+            elif rec["imp"] and prog.fmt == "PE":
+                # a stdcall import pops its arguments: with mov-style arguments the compiler
+                # re-reserves them right after the call (`sub esp, N`), else they were pushed
+                nxt = insns[idx + 1] if idx + 1 < len(insns) else None
+                if nxt is not None and nxt.mnemonic == "sub" and nxt.op_str.startswith("esp, "):
+                    try:
+                        pops = int(nxt.op_str.split(",")[1], 0)
+                    except ValueError:
+                        pops = 0
+                else:
+                    pops = 4 * F.pushed
+            sp = regs.get("rsp")
+            if pops and isinstance(sp, tuple):
+                regs["rsp"] = ("s", sp[1] + pops)
+        F.pushed = 0
         return True, post
 
     if m in ("ret", "retf"):
@@ -1093,6 +1192,7 @@ def _step_x86(prog, F, st, ins, abi, mask, pending, post, idx, insns):
                 regs[dr] = (s.imm & ((1 << (8 * dw)) - 1)) if dw >= 4 else None
                 if prog.arch == "x86" and regs[dr] is not None:
                     regs[dr] = prog.norm(regs[dr])          # i386 PE: absolute VA -> RVA
+                    F.lea_consts.append((ins.address, regs[dr]))   # i386 has no rip-relative lea
             elif s.type == X86_OP_REG:
                 sr, sw = reg_of(s)
                 v = regs.get(sr)
@@ -1105,6 +1205,8 @@ def _step_x86(prog, F, st, ins, abi, mask, pending, post, idx, insns):
             elif s.type == X86_OP_MEM:
                 a = _x86_mem_addr(prog, st, ins, s)
                 regs[dr] = _load(prog, st, a, dw) if dw >= 4 else None
+                if regs[dr] is None and a is None and dw == psz:
+                    regs[dr] = _vslot_x86(ins, s)       # a method pointer out of a vtable
             if dw < 4:
                 regs[dr] = None
             return True, post
@@ -1114,6 +1216,7 @@ def _step_x86(prog, F, st, ins, abi, mask, pending, post, idx, insns):
                 v = s.imm & ((1 << (8 * d.size)) - 1)
                 if prog.arch == "x86" and d.size == 4:
                     v = prog.norm(v)
+                    F.lea_consts.append((ins.address, v))
             elif s.type == X86_OP_REG:
                 sr, sw = reg_of(s)
                 v = regs.get(sr)
@@ -1146,12 +1249,14 @@ def _step_x86(prog, F, st, ins, abi, mask, pending, post, idx, insns):
             v = ops[0].imm & mask
             if prog.arch == "x86":
                 v = prog.norm(v)
+                F.lea_consts.append((ins.address, v))
         elif ops[0].type == X86_OP_MEM:
             v = _load(prog, st, _x86_mem_addr(prog, st, ins, ops[0]), psz)
         if isinstance(sp, tuple):
             sp = ("s", sp[1] - psz)
             regs["rsp"] = sp
             st.slots[sp[1]] = v
+        F.pushed += 1
         return True, post
     if m == "pop" and ops:
         sp = regs.get("rsp")
@@ -1163,6 +1268,8 @@ def _step_x86(prog, F, st, ins, abi, mask, pending, post, idx, insns):
         return True, post
     if m in ("add", "sub") and len(ops) == 2 and ops[0].type == X86_OP_REG and ops[1].type == X86_OP_IMM:
         dr, dw = reg_of(ops[0])
+        if dr == "rsp":
+            F.pushed = 0                          # a frame / argument-area adjustment
         v = regs.get(dr)
         k = ops[1].imm if m == "add" else -ops[1].imm
         if dw == psz and v is not None:
@@ -1204,6 +1311,14 @@ def _step_x86(prog, F, st, ins, abi, mask, pending, post, idx, insns):
             and len({o.reg for o in ops}) == 1:
         regs[ins.reg_name(ops[0].reg)] = ("q", 0, 0)
         return True, post
+    # an indexed table read off a known base (`movzx eax, byte [ebx + esi + digits]`): record the
+    # table address as a referenced constant (the hex digit alphabet behind a PIC base)
+    for o in ops:
+        if o.type == X86_OP_MEM and o.mem.index and o.mem.base and o.mem.segment == 0:
+            bv = regs.get(_X86_FAM.get(ins.reg_name(o.mem.base), (None,))[0])
+            if isinstance(bv, int):
+                tv = (bv + o.mem.disp) & mask
+                F.lea_consts.append((ins.address, prog.norm(tv) if prog.arch == "x86" else tv))
     # anything else: forget the registers it writes, and the stack bytes it may write
     _forget_mem_writes(prog, st, ins, lambda op: _x86_mem_addr(prog, st, ins, op), X86_OP_MEM)
     for r in _written(ins, False):
@@ -1433,6 +1548,9 @@ def _step_a64(prog, F, st, ins, abi, mask, pending, post, idx, insns):
                         if addr is not None else None
                 else:
                     v = _load(prog, st, _add(addr, off), w) if addr is not None and w in (4, 8) else None
+                    if v is None and addr is None and w == 8 and m == "ldr" and len(regops) == 1 \
+                            and not memop.mem.index and 0 <= memop.mem.disp < 0x400 and not ins.writeback:
+                        v = ("slot", memop.mem.disp)        # a method pointer out of a vtable
                 if m == "ldrsw":
                     v = None
                 regs[d] = v
@@ -1496,6 +1614,277 @@ def formatter_fns(prog, slots, args_val, nargs):
     return out
 
 
+def formatter_by_index(prog, slots, args_val, nargs):
+    """[formatter fn | None] per argument slot: the executable word of each rt::Argument pair
+    (the `fmt` fn pointer; the other word is the value pointer)."""
+    psz, out = prog.psize, []
+    for k in range(min(nargs, MAX_ARGS)):
+        if isinstance(args_val, tuple) and args_val[0] == "s":
+            ws = (slots.get(args_val[1] + 2 * psz * k), slots.get(args_val[1] + 2 * psz * k + psz))
+        elif isinstance(args_val, int):
+            ws = (prog.ptr_at(args_val + 2 * psz * k), prog.ptr_at(args_val + 2 * psz * k + psz))
+        else:
+            out.append(None)
+            continue
+        # the formatter is the second word; fall back to whichever word is a code address
+        cand = [w for w in (ws[1], ws[0]) if isinstance(w, int) and prog.executable(w)]
+        out.append(cand[0] if cand else None)
+    return out
+
+
+# fmt traits, by the symbol segment before `::fmt`
+_TRAITS = ("Debug", "Display", "LowerHex", "UpperHex", "Octal", "Binary", "LowerExp", "UpperExp")
+
+
+def _trait_of_symbol(name):
+    if not name:
+        return None
+    # `<...>::<Trait>::fmt` (the formatter is an impl of core::fmt::<Trait> for some type)
+    segs = name.split("::")
+    for i in range(len(segs) - 1, 0, -1):
+        if segs[i] == "fmt" and segs[i - 1] in _TRAITS:
+            return segs[i - 1]
+    return None
+
+
+# structural trait classification of a stripped formatter fn, by what it calls / references.
+_DEBUG_BUILDER = re.compile(r"Formatter(?:\d+)?(?:debug_(?:struct|tuple|list|set|map)|"
+                            r"debug_(?:struct|tuple)_field\d|pad\b)")
+_RADIX_TRAIT = re.compile(r"::(LowerHex|UpperHex|Octal|Binary|LowerExp|UpperExp)::fmt")
+
+
+# a literal made only of Rust Debug punctuation ({ } ( ) [ ] , space : newline), referenced by the
+# Formatter debug-builder functions (debug_struct/tuple/list + the *_field*_finish shortcuts)
+_DEBUG_PUNCT = re.compile(rb"^[{}()\[\], :\n]{4,}$")
+_RADIX_PREFIX = {b"0x": "LowerHex", b"0o": "Octal", b"0b": "Binary"}
+_HEX_LOWER = b"0123456789abcdef"
+_HEX_UPPER = b"0123456789ABCDEF"
+
+
+def _debug_builders(prog, facts):
+    """Addresses of the core::fmt debug-builder functions in this binary, found structurally: a
+    function that references a rodata literal of only Debug punctuation. Derived `Debug` impls
+    funnel into these, so a formatter that calls one is a Debug impl."""
+    out = set()
+    for f, F in facts.items():
+        for _s, a in F.lea_consts:
+            b = prog.read(a, 10)
+            z = b.split(b"\x00", 1)[0]
+            if len(z) >= 4 and _DEBUG_PUNCT.match(z):
+                out.add(f)
+                break
+    return out
+
+
+_IMM_RX = re.compile(r"(?:#|, |\$)(0x[0-9a-f]+|\d+)\b")
+
+
+def _quotes_debug(prog, start, end):
+    """True when [start, end) uses the quote char '"' (or '\'') at least twice and '\\' as
+    immediates: the quoted, escaped rendering of `{:?}` on a str / char."""
+    if end - start > 0x1000 or end <= start:
+        return False
+    try:
+        if prog.arch == "aarch64":
+            from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+            md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+        else:
+            from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
+            md = Cs(CS_ARCH_X86, CS_MODE_32 if prog.arch == "x86" else CS_MODE_64)
+        imms = {}
+        code = prog.code[start - prog.text_va:end - prog.text_va]
+        for _a, _sz, mn, ops in md.disasm_lite(code, start):
+            if mn.startswith(("mov", "cmp", "orr", "push")):
+                for m in _IMM_RX.finditer(ops):
+                    v = int(m.group(1), 0)
+                    if v in (0x22, 0x27, 0x5C):
+                        imms[v] = imms.get(v, 0) + 1
+    except Exception:
+        return False
+    return imms.get(0x5C, 0) >= 1 and (imms.get(0x22, 0) >= 2 or imms.get(0x27, 0) >= 2)
+
+
+def _debug_hex_flags(prog, start, end):
+    """True when the first instructions test both Formatter debug-hex flag bits (25 = `{:x?}`,
+    26 = `{:X?}`): an integer `Debug` impl dispatching to LowerHex / UpperHex / Display."""
+    try:
+        if prog.arch == "aarch64":
+            from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+            md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+        else:
+            from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
+            md = Cs(CS_ARCH_X86, CS_MODE_32 if prog.arch == "x86" else CS_MODE_64)
+        code = prog.code[start - prog.text_va:min(end, start + 0x60) - prog.text_va]
+        seen = set()
+        for _a, _sz, mn, ops in md.disasm_lite(code, start):
+            if prog.arch == "aarch64":
+                if mn in ("tbz", "tbnz"):
+                    parts = [x.strip() for x in ops.split(",")]
+                    if len(parts) >= 2 and parts[1] in ("#0x19", "#25"):
+                        seen.add(25)
+                    if len(parts) >= 2 and parts[1] in ("#0x1a", "#26"):
+                        seen.add(26)
+            elif mn in ("test", "bt", "and"):
+                if "0x2000000" in ops or ops.endswith(", 0x19"):
+                    seen.add(25)
+                if "0x4000000" in ops or ops.endswith(", 0x1a"):
+                    seen.add(26)
+        return seen == {25, 26}
+    except Exception:
+        return False
+
+
+def classify_formatter(prog, facts, va, names, builders=None, depth=0):
+    """The fmt trait a (possibly stripped) formatter fn at `va` implements: its symbol / libfunc
+    name when known, else a structural guess (a Debug derive calls a Formatter debug builder; an
+    integer radix formatter references its "0x"/"0o"/"0b" prefix and digit alphabet; a short
+    pass-through inherits the trait of the one formatter it forwards to). Returns a trait name or
+    None (treated as Display)."""
+    nm = names.get(va)
+    t = _trait_of_symbol(nm[0] if nm else None)
+    if t:
+        return t
+    F = facts.get(va)
+    if F is None or depth > 5:
+        return None
+    if builders is None:
+        builders = _debug_builders(prog, facts)
+    # a jmp/bl thunk (`jmp real` / `b real`) to one function: follow it at any depth
+    if len(F.calls) == 1 and F.calls[0]["tail"] and isinstance(F.calls[0]["target"], int) \
+            and F.calls[0]["target"] != va and (F.eff_end - va) <= 0x14:
+        return classify_formatter(prog, facts, F.calls[0]["target"], names, builders, depth + 1)
+    # a Debug impl calls a Formatter debug builder (named, or found structurally)
+    for c in F.calls:
+        tgt = c["target"]
+        cn = names.get(tgt) if isinstance(tgt, int) else None
+        if cn and _DEBUG_BUILDER.search(cn[0].replace("::", "")):
+            return "Debug"
+        if cn and _trait_of_symbol(cn[0]) in _TRAITS:
+            return _trait_of_symbol(cn[0])
+        if isinstance(tgt, int) and tgt in builders:
+            return "Debug"
+    # <str as Debug> / <char as Debug>: write the quote char and escape backslashes, as
+    # immediates ('"' or '\'' and '\\'); a Display impl of a string never quotes it
+    if _quotes_debug(prog, va, F.eff_end) or _debug_hex_flags(prog, va, F.eff_end):
+        return "Debug"
+    # integer radix formatters reference their prefix / digit alphabet
+    lits = [prog.read(a, 16) for _s, a in F.lea_consts]
+    hexy = any(_HEX_UPPER in b or _HEX_LOWER in b for b in lits)
+    if hexy and _sets_alternate(prog, va, F.eff_end):
+        return "Debug"              # pointer Debug: `{:#x}` of the address (alternate flag set)
+    for b in lits:
+        if _HEX_UPPER in b:
+            return "UpperHex"
+        if _HEX_LOWER in b:
+            return "LowerHex"
+    # the radix prefix handed to pad_integral ("0x"/"0o"/"0b"; Rust strs are not NUL-terminated,
+    # so it is just the first two bytes at the referenced address) plus the digit extraction mask
+    # (`and r, 0xf` / 7 / 1) when the alphabet is reached through a PIC base we cannot see
+    masks = _digit_masks(prog, va, F.eff_end)
+    for b in lits:
+        pre = b[:2]
+        if pre == b"0x" and 0xF in masks:
+            return "UpperHex" if 0x37 in masks and 0x57 not in masks else "LowerHex"
+        if pre == b"0o" and 7 in masks:
+            return "Octal"
+        if pre == b"0b" and 1 in masks:
+            return "Binary"
+    # a thin wrapper that forwards to exactly one other formatter inherits its trait
+    fcalls = [c for c in F.calls if isinstance(c["target"], int) and c["target"] != va]
+    if len(fcalls) == 1 and (F.eff_end - va) <= 0x60:
+        return classify_formatter(prog, facts, fcalls[0]["target"], names, builders, depth + 1)
+    # a composite Debug impl (Range, tuples, wrappers) formats its parts with their Debug impls
+    if depth < 2 and len(fcalls) <= 6 and (F.eff_end - va) <= 0x200:
+        for c in fcalls:
+            if classify_formatter(prog, facts, c["target"], names, builders, depth + 2) == "Debug":
+                return "Debug"
+    return None
+
+
+def _digit_masks(prog, start, end):
+    """Immediates of `and` (digit masks 0xf / 7 / 1) and of the ASCII digit offsets 'a'-10 (0x57)
+    / 'A'-10 (0x37) in [start, end)."""
+    out = set()
+    try:
+        if prog.arch == "aarch64":
+            from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+            md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+        else:
+            from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
+            md = Cs(CS_ARCH_X86, CS_MODE_32 if prog.arch == "x86" else CS_MODE_64)
+        code = prog.code[start - prog.text_va:min(end, start + 0x200) - prog.text_va]
+        for _a, _sz, mn, ops in md.disasm_lite(code, start):
+            for m in _IMM_RX.finditer(ops):
+                v = int(m.group(1), 0)
+                if mn in ("and", "ands") and v in (0xF, 7, 1):
+                    out.add(v)
+                elif v in (0x37, 0x57) and mn in ("add", "lea", "mov", "orr", "cmp"):
+                    out.add(v)
+    except Exception:
+        pass
+    return out
+
+
+def _sets_alternate(prog, start, end):
+    """True when [start, end) ORs the alternate flag (1 << 23) into the Formatter flags."""
+    try:
+        if prog.arch == "aarch64":
+            from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+            md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+        else:
+            from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
+            md = Cs(CS_ARCH_X86, CS_MODE_32 if prog.arch == "x86" else CS_MODE_64)
+        code = prog.code[start - prog.text_va:min(end, start + 0x400) - prog.text_va]
+        for _a, _sz, mn, ops in md.disasm_lite(code, start):
+            if mn in ("or", "orr", "bts") and ("0x800000" in ops or ops.endswith(", 0x17")):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def apply_traits(dec, traits):
+    """Rebuild dec['text'] with each placeholder's trait char filled in. `traits` maps argument
+    index -> trait name. Mutates and returns dec."""
+    out = list(dec.get("out") or [])
+    ph = dec.get("ph") or []
+    if not out:
+        return dec
+    changed = False
+    for oi, arg_idx, debug_hex in ph:
+        if debug_hex:
+            continue                              # {:x?}/{:X?}: the template already fixes it
+        tr = traits.get(arg_idx)
+        if not tr or tr == "Display":
+            continue
+        rebuilt = _retrait(out[oi], tr)
+        if rebuilt is not None:
+            out[oi] = rebuilt
+            changed = True
+    if changed:
+        dec = dict(dec)
+        dec["text"] = "".join(out)
+        dec["traits"] = {k: v for k, v in sorted(traits.items())}
+    return dec
+
+
+def _retrait(spec_text, trait):
+    """Insert the trait's type char into an already-rendered `{...}` placeholder."""
+    ch = _TRAIT_CHAR.get(trait)
+    if not ch:
+        return None
+    inner = spec_text[1:-1]                       # strip { }
+    if ":" in inner:
+        head, spec = inner.split(":", 1)
+    else:
+        head, spec = inner, None
+    if spec is None:
+        return "{%s:%s}" % (head, ch)
+    if spec and spec[-1] in "?xXoObeE":            # already has a type char
+        return None
+    return "{%s:%s%s}" % (head, spec, ch)
+
+
 def decode_arguments(prog, args, slots):
     """Find a fmt::Arguments among a call's argument values.
 
@@ -1544,7 +1933,8 @@ def _decode_pair(prog, tmpl, second, slots):
         return None
     if not _args_array_ok(prog, slots, second, dec["nargs"]):
         return None
-    dec = dict(dec, formatters=sorted(formatter_fns(prog, slots, second, dec["nargs"])))
+    dec = dict(dec, formatters=sorted(formatter_fns(prog, slots, second, dec["nargs"])),
+               fmt_arg_fns=formatter_by_index(prog, slots, second, dec["nargs"]))
     return "template", dec, "strong"
 
 
@@ -1574,6 +1964,7 @@ def _decode_old(prog, off, slots):
             dec = decode_pieces(prog.read, prog.ptr_at, p, n, an, psz)
             if dec:
                 dec["formatters"] = sorted(formatter_fns(prog, slots, ap, an)) if an else []
+                dec["fmt_arg_fns"] = formatter_by_index(prog, slots, ap, an) if an else []
                 return dec
     return None
 
@@ -1626,16 +2017,73 @@ def _ranges(prog):
     return out
 
 
+def analyze_all(prog, md):
+    """FuncFacts for every function: the known starts, plus functions found behind padding that
+    no start list knew (F.split_at). evaluate() uses the same enumeration for its ground truth."""
+    facts = {}
+    work = list(_ranges(prog))
+    while work:
+        s, e = work.pop(0)
+        if s in facts:
+            continue
+        F = analyze_function(prog, s, e, md)
+        facts[s] = F
+        if F.split_at is not None and F.split_at < e and F.split_at not in facts:
+            work.append((F.split_at, e))          # a function the start list did not know
+    return facts
+
+
 def run(prog, libfunc_names=None):
     """Analyze a Prog. `libfunc_names`: {va: name} from recover_libfuncs (optional)."""
     md = _a64_cs() if prog.arch == "aarch64" else _x86_cs(prog.arch)
-    facts = {}
-    for s, e in _ranges(prog):
-        facts[s] = analyze_function(prog, s, e, md)
+    if prog.arch == "x86" and not hasattr(prog, "callee_pops"):
+        prog.callee_pops = _callee_pops(prog)
+    facts = analyze_all(prog, md)
     names = dict(prog.names)
     for va, nm in (libfunc_names or {}).items():
         names.setdefault(va, (nm, "libfuncs"))
     return _classify(prog, facts, names)
+
+
+def _vtable_methods(prog, v, nmethods):
+    """The first `nmethods` method pointers of a Rust trait-object vtable at constant `v`
+    ({drop_in_place, size, align, methods...}), or [] when `v` does not look like one."""
+    if not isinstance(v, int) or v == 0 or prog.executable(v):
+        return []
+    psz = prog.psize
+    size, align = prog.ptr_at(v + psz), prog.ptr_at(v + 2 * psz)
+    if size is None or align is None or size > 0x100000 or align == 0 or align & (align - 1) \
+            or align > 4096:
+        return []
+    drop = prog.ptr_at(v)
+    if drop and not prog.executable(drop):
+        return []
+    out = []
+    for k in range(nmethods):
+        m = prog.ptr_at(v + (3 + k) * psz)
+        if not (isinstance(m, int) and prog.executable(m)):
+            return []
+        out.append(m)
+    return out
+
+
+def _callee_pops(prog):
+    """i386: {function start: bytes its `ret N` pops} (stdcall / thiscall / sret-pop callees)."""
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+    md = Cs(CS_ARCH_X86, CS_MODE_32)
+    out = {}
+    for s, e in _ranges(prog):
+        code = prog.code[s - prog.text_va:e - prog.text_va]
+        for _a, _sz, mn, ops in md.disasm_lite(code, s):
+            if mn == "ret" and ops:
+                try:
+                    out[s] = int(ops, 0)
+                except ValueError:
+                    pass
+                break
+            if mn == "ret":
+                break
+    return out
 
 
 def _callee_key(c):
@@ -1827,7 +2275,8 @@ def _classify(prog, facts, names):
     sink_cands = {}
     arg_pos = {}          # callee -> argument positions where it receives validated Arguments
     for c in base_sites:
-        if c["fmt"] and c["fmt"][3] == "strong":
+        if c["fmt"] and c["fmt"][3] == "strong" and _callee_key(c) is not None:
+            # (unresolved indirect calls have no identity: never pool them under one key)
             sink_cands.setdefault(_callee_key(c), []).append(c)
             arg_pos.setdefault(_callee_key(c), set()).add(c["fmt"][0])
     for k in sink_cands:
@@ -1886,7 +2335,9 @@ def _classify(prog, facts, names):
     # __rust_dealloc(ptr, size, align) is called from many places with a constant power-of-two
     # `align` and its (nonexistent) result is never tested -- __rust_realloc / __rust_alloc share
     # the align argument but their callers null-test the returned pointer
-    if not dealloc:
+    # (run even when a free() wrapper was already found: on PE that is often the C runtime's own
+    # wrapper, not the Rust allocator shim the program's drops call)
+    if facts:
         apos = _align_pos(prog)
         by = {}
         for c in base_sites:
@@ -1898,7 +2349,7 @@ def _classify(prog, facts, names):
             Fk = facts[k]
             # __rust_dealloc itself is a forwarding thunk to __rdl_dealloc (or the user's
             # #[global_allocator]): tiny, one tail call
-            if len(cs) < 10 or k in panic_kind or k in noret or k in sink_kind or fsize[k] > 0x20 \
+            if len(cs) < 10 or k in dealloc or k in panic_kind or k in noret or k in sink_kind or fsize[k] > 0x20 \
                     or len(Fk.calls) != 1 or not Fk.calls[0]["tail"]:
                 continue
             av = [c["args"][apos] if apos < len(c["args"]) else None for c in cs]
@@ -1954,6 +2405,41 @@ def _classify(prog, facts, names):
                 drop[f] = "inferred"
                 changed = True
 
+    # trait recovery: each placeholder's argument formatter fn implements one fmt trait
+    # (Debug / LowerHex / ...), recovered from the fn (symbol, libfunc, or structure), so the
+    # bare `{}` becomes `{:?}` / `{:x}` / ... . Cached per formatter fn.
+    _tcache = {}
+    _builders = _debug_builders(prog, facts)
+    # the `&dyn Debug` field vtables handed to the debug builders: method 0 is a Debug::fmt
+    debug_vt_methods = set()
+    for c in base_sites:
+        if isinstance(c["target"], int) and c["target"] in _builders:
+            for v in c["args"]:
+                for m in _vtable_methods(prog, v, 1):
+                    if m in facts:
+                        debug_vt_methods.add(m)
+                        _tcache.setdefault(m, "Debug")
+
+    def trait_of(va):
+        if va not in _tcache:
+            _tcache[va] = classify_formatter(prog, facts, va, names, _builders)
+        return _tcache[va]
+    for c in sites:
+        d = c["fmt"]
+        if not d or d[3] != "strong":
+            continue
+        fns = d[2].get("fmt_arg_fns")
+        if not fns:
+            continue
+        traits = {}
+        for k, fva in enumerate(fns):
+            if isinstance(fva, int):
+                t = trait_of(fva)
+                if t:
+                    traits[k] = t
+        if traits:
+            c["fmt"] = (d[0], d[1], apply_traits(d[2], traits), d[3])
+
     # ---- 3. emit ----
     fmt_sites, panic_sites, drop_sites = [], [], []
     seen_fmt, seen_site = set(), set()
@@ -1964,7 +2450,6 @@ def _classify(prog, facts, names):
                          (c.get("merged") and c["fmt"][3] != "strong")):
             c = dict(c, fmt=None)                 # a replay: same text, or only a weak decode
         if c["fmt"]:
-            seen_fmt.add((c["site"], c["fmt"][2]["text"]))
             pos, form, dec, strength = c["fmt"]
             sk = sink_kind.get(callee)
             kind = sk[0] if sk else None
@@ -1984,11 +2469,27 @@ def _classify(prog, facts, names):
                        "callee_name": fn, "sink": kind, "sink_via": (sink_kind.get(callee) or
                                                                      panic_kind.get(callee) or (None, None))[1],
                        "macro": macro, "format": text, "args": dec.get("nargs", 0),
-                       "literals": dec.get("literals", []), "encoding": form, "confidence":
+                       "literals": dec.get("literals", []), "traits": dec.get("traits") or {},
+                       "encoding": form, "confidence":
                        "high" if strength == "strong" and kind else ("medium" if strength == "strong" else "low")}
                 if c["loc"]:
                     rec["location"] = "%s:%d:%d" % c["loc"][2]
                 fmt_sites.append(rec)
+                seen_fmt.add((c["site"], dec["text"]))      # only emitted records count
+        emitted_here = any(k[0] == c["site"] for k in seen_fmt)
+        if not (c["fmt"] and c["fmt"][3] == "strong") and c.get("vslot") == 3 * prog.psize \
+                and len(c["args"]) > 2 and not emitted_here:
+            # `write!(f, "literal")` / `f.write_str("literal")`: rustc lowers it to the dyn
+            # fmt::Write vtable's write_str (slot 3, after drop/size/align) with a (ptr, len) str
+            txt = None
+            if isinstance(c["args"][1], int) and isinstance(c["args"][2], int):
+                txt = decode_str(prog.read, c["args"][1], c["args"][2])
+            if txt:
+                seen_fmt.add((c["site"], txt))
+                fmt_sites.append({"site": c["site"], "function": c["func"], "callee": None,
+                                  "callee_name": None, "sink": "write_str", "sink_via": "shape",
+                                  "macro": "write!", "format": _esc(txt), "args": 0,
+                                  "literals": [txt], "encoding": "write_str", "confidence": "medium"})
         if c["site"] in seen_site:
             continue                              # one panic / drop record per call site
         is_panic = callee in panic_kind or (c["loc"] and callee in noret)
@@ -2036,6 +2537,38 @@ def _classify(prog, facts, names):
             for w in c["fmt"][2].get("formatters") or []:
                 if w in facts:
                     fmt_fns[w] = fmt_fns.get(w, 0) + 1
+    # vtables whose methods have a fmt signature: the `&dyn Debug` field vtables handed to the
+    # Formatter debug builders (method 0 = Debug::fmt), and the `dyn fmt::Write` vtable handed to
+    # core::fmt::write (methods write_str / write_char / write_fmt) -- all return fmt::Result
+    write_sinks = {k for k, (kd, _v) in sink_kind.items() if kd == "write"}
+    for c in base_sites:
+        callee = c["target"]
+        if not isinstance(callee, int):
+            continue
+        if callee in _builders:
+            for m in debug_vt_methods:
+                fmt_fns.setdefault(m, 0)
+        elif callee in write_sinks and c["fmt"] and c["fmt"][3] == "strong" and c["fmt"][0] >= 1:
+            ms = _vtable_methods(prog, c["args"][c["fmt"][0] - 1], 3)
+            for m in ms:
+                if m in facts:
+                    fmt_fns.setdefault(m, 0)
+    # a tail call returns the callee's value as the caller's own: a formatter that tail-calls G
+    # (`<&T as Debug>::fmt -> T::fmt`, Display -> Formatter::pad / write_str) means G returns
+    # fmt::Result too (fixed point; tail calls only -- a regular call's result may be discarded)
+    changed = True
+    while changed:
+        changed = False
+        for f in list(fmt_fns):
+            F = facts.get(f)
+            if F is None:
+                continue
+            for c in F.calls:
+                g = c["target"]
+                if c["tail"] and isinstance(g, int) and g in facts and g not in fmt_fns \
+                        and g not in noret and g not in panic_kind:
+                    fmt_fns[g] = 0                 # 0 = inferred through a tail call
+                    changed = True
     enum_returns = _enum_returns(prog, facts, sites, panic_kind, noret, sink_kind, fmt_fns)
 
     helpers = []
@@ -2077,7 +2610,8 @@ def _enum_returns(prog, facts, sites, panic_kind, noret, sink_kind, fmt_fns=None
     # their signature is fn(&T, &mut Formatter) -> fmt::Result = Result<(), fmt::Error> -- a type
     # fact from how they are used, independent of the (bool-like, one-register) return shape
     fmt_out = [{"va": f, "shape": "fmt-result", "confidence": "high", "score": 1.0, "callers": 0,
-                "evidence": ["used as the formatter of %d fmt::Arguments argument(s)" % n],
+                "evidence": ["used as the formatter of %d fmt::Arguments argument(s)" % n if n else
+                             "tail-called by a fmt::Result function (returns its value)"],
                 "note": "returns core::fmt::Result (Result<(), fmt::Error>)"}
                for f, n in sorted((fmt_fns or {}).items())]
     done = set(fmt_fns or ())
@@ -2094,6 +2628,17 @@ def _enum_returns(prog, facts, sites, panic_kind, noret, sink_kind, fmt_fns=None
         if c["imp"] or not isinstance(k, int) or k not in facts or c["tail"]:
             continue
         by_callee.setdefault(k, []).append(c)
+    # which callees' returned values reach a Result-consuming helper as an argument
+    consumers = {k for k, (kind, _v) in panic_kind.items()
+                 if kind in ("unwrap_err", "expect", "alloc_error", "capacity_overflow")}
+    site_target = {c["site"]: c["target"] for c in sites if isinstance(c["target"], int)}
+    ret_consumed = {}
+    for c in sites:
+        if c.get("merged") or c["target"] not in consumers:
+            continue
+        for v in c["args"]:
+            if isinstance(v, tuple) and v[0] == "ret" and site_target.get(v[1]) in facts:
+                ret_consumed.setdefault(site_target[v[1]], set()).add(panic_kind[c["target"]][0])
     out = []
     excluded = set(panic_kind) | set(noret) | set(sink_kind) | done
     out.extend(fmt_out)
@@ -2138,18 +2683,24 @@ def _enum_returns(prog, facts, sites, panic_kind, noret, sink_kind, fmt_fns=None
                 if base == want:
                     byoff.setdefault(off, []).append((val, width))
             niche_lo = 1 << (8 * prog.psize - 1)
+            # every field of an empty Vec / String {cap 0, ptr = align (dangling), len 0} written on
+            # one path: cap / len differing from another path's constants is not a discriminant
+            vec_fields = set()
+            for b in byoff:
+                c0 = {v for v, _w in byoff.get(b, []) if v is not None}
+                c1 = {v for v, _w in byoff.get(b + prog.psize, []) if v is not None}
+                c2 = {v for v, _w in byoff.get(b + 2 * prog.psize, []) if v is not None}
+                if 0 in c0 and c1 & {1, 2, 4, 8, 16} and 0 in c2:
+                    vec_fields |= {b, b + prog.psize, b + 2 * prog.psize}
             for off, vals in sorted(byoff.items()):
+                if off in vec_fields and not any(v is not None and v >= niche_lo for v, _w in vals):
+                    continue
                 consts = {v for v, _w in vals if v is not None}
                 small = {v for v in consts if v <= 0xFF}
                 niche = {v for v, w in vals if v is not None and w == prog.psize and v >= niche_lo}
                 other = any(v is None for v, _w in vals) or forwards
                 hit = None
-                # an empty Vec / String is {cap: 0, ptr: align (dangling), len: 0}: cap 0 vs.
-                # a constant initial capacity on another path is not a discriminant
-                nxt = {v for v, _w in byoff.get(off + prog.psize, []) if v is not None}
-                nxt2 = {v for v, _w in byoff.get(off + 2 * prog.psize, []) if v is not None}
-                empty_vec = 0 in consts and nxt & {1, 2, 4, 8, 16} and 0 in nxt2
-                if len(consts) >= 2 and len(small) >= 2 and not empty_vec:
+                if len(consts) >= 2 and len(small) >= 2:
                     hit = "stores tags %s to result-slot field +%#x on different paths" % (
                         sorted(hex(v) for v in small)[:6], off)
                 elif niche and (other or len(consts) >= 2):
@@ -2160,6 +2711,13 @@ def _enum_returns(prog, facts, sites, panic_kind, noret, sink_kind, fmt_fns=None
                     ev = 0.75 if (off == 0 or niche) else 0.5
                     reasons.append(hit)
                     break
+        # (e) `?` / unwrap: a caller hands the returned value itself to a helper that consumes a
+        # Result's Err (result::unwrap_failed / expect / raw_vec::handle_error / ...)
+        if shape is None and f in ret_consumed:
+            shape = "result-consumed"
+            ev = 0.75
+            reasons.append("the returned value is passed to a Result-consuming panic helper (%s)"
+                           % ", ".join(sorted(ret_consumed[f]))[:80])
         if shape is None and cs and nullable and nullable * 2 >= len(cs):
             shape = "nullable-pointer"
             ev = 0.3 if nullable >= 2 else 0.2
@@ -2352,7 +2910,9 @@ def evaluate(unstripped, stripped=None, use_libfuncs=True):
     gt_panic, gt_fmt, gt_drop = {}, {}, {}
     unresolved = set()
     md = _a64_cs() if truth_prog.arch == "aarch64" else _x86_cs(truth_prog.arch)
-    tfacts = {s: analyze_function(truth_prog, s, e, md) for s, e in _ranges(truth_prog)}
+    if truth_prog.arch == "x86" and not hasattr(truth_prog, "callee_pops"):
+        truth_prog.callee_pops = _callee_pops(truth_prog)
+    tfacts = analyze_all(truth_prog, md)
     # LLVM's machine outliner (AArch64) leaves `OUTLINED_FUNCTION_n: mov w2,#8; b __rust_dealloc`
     # fragments: a call to one is a call to what it tail-calls
     for s, F in tfacts.items():
@@ -2445,6 +3005,46 @@ def evaluate(unstripped, stripped=None, use_libfuncs=True):
             "wrong": sorted("%s %s" % (tnames.get(va, hex(va))[:70], rk[va][1]) for va in judged
                             if rk[va][0] != "enum")[:20],
         }
+    # trait recovery: ground truth is each placeholder's formatter fn's trait, read from the
+    # unstripped symbol; the stripped run must recover the same non-Display trait
+    tnames_full = dict(truth_prog.names)
+    gt_traits = {}                    # site -> {arg_index: trait}
+    for s, F in tfacts.items():
+        for c in F.calls:
+            d = decode_arguments(truth_prog, c["args"], c["slots"])
+            if not d or d[3] != "strong":
+                continue
+            fns = d[2].get("fmt_arg_fns") or []
+            site_t = {}
+            for k, fva in enumerate(fns):
+                if isinstance(fva, int):
+                    nm2 = tnames_full.get(fva)
+                    t = _trait_of_symbol(nm2[0]) if nm2 else None
+                    if t:
+                        site_t[k] = t
+            if site_t:
+                gt_traits[c["site"]] = site_t
+    rec_traits = {f["site"]: (f.get("traits") or {}) for f in res["fmt_sites"]}
+    tt = tc = tp_found = fp = 0
+    for site, gt in gt_traits.items():
+        got = {int(k): v for k, v in rec_traits.get(site, {}).items()}
+        for k, want in gt.items():
+            if want == "Display":
+                continue
+            tt += 1
+            if got.get(k) == want:
+                tc += 1
+    for site, got in rec_traits.items():
+        for k, v in got.items():
+            g = gt_traits.get(site, {}).get(int(k))
+            if g is None:
+                continue                      # the unstripped build cannot name it either
+            tp_found += 1
+            if g != v:
+                fp += 1
+    out["traits"] = {"truth_nondisplay": tt, "recovered": tp_found, "recovered_wrong": fp,
+                     "recall": round(tc / tt, 3) if tt else None,
+                     "precision": round((tp_found - fp) / tp_found, 3) if tp_found else None}
     out["fmt_texts"] = sorted({f["macro"] + '("' + f["format"] + '")' for f in res["fmt_sites"]})
     return out
 
