@@ -6,7 +6,11 @@ at test time -- nested async fns, a loop with an await, async blocks, a `Box<dyn
 symbols stripped (`-C strip=symbols`), and the recovered machines are checked against the source:
 one machine per coroutine instance, the exact suspend-point count per async fn (identified through
 the `&Location` the resume panics carry, which survives stripping), and the nesting edges. Builds
-for the host arch; also AArch64 when the musl target is installed. Skips without rustc.
+for the host arch; also AArch64 / i386 / Mach-O / PE when those targets are installed, and under
+rustc 1.70, 1.85 and 1.99 when those toolchains are installed. The outer future is boxed so `top`
+survives as a real poll function on every rustc -- a bare top-level future is inlined into the
+executor, and rustc 1.99 linearizes it away entirely (so looper/top/the async block would vanish).
+Skips without rustc.
 """
 import json
 import platform
@@ -80,9 +84,15 @@ fn block_on<F: Future>(fut: F) -> F::Output {
 
 fn main() {
     let n = std::env::args().count() as u64 + 2;
-    println!("{}", block_on(top(n)));
+    let fut: Pin<Box<dyn Future<Output = u64>>> = Box::pin(top(n));
+    println!("{}", block_on(fut));
 }
 """
+
+
+PROGRAM_INLINE = PROGRAM.replace(
+    "    let fut: Pin<Box<dyn Future<Output = u64>>> = Box::pin(top(n));\n    println!(\"{}\", block_on(fut));",
+    "    println!(\"{}\", block_on(top(n)));")
 
 
 def _line(marker):
@@ -184,11 +194,13 @@ def _check(res, arch):
     # rest once; middle's two copies share one state field but no resume target -> two machines
     count = {ln: sum(m["source"]["line"] == ln for m in ms) for ln in AWAITS}
     assert count[_line("async fn leaf")] == 4 and len(ms) == 9, count
-    # the two coroutines emitted as their own functions are poll functions with self-relative state
+    # the coroutines emitted as their own poll functions (reached by a direct or vtable call, not
+    # inlined into a caller): middle, the boxed async block, and top (its future is boxed in main)
     polls = [m for m in ms if m["role"] == "poll"]
-    assert {m["source"]["line"] for m in polls} == {_line("async fn middle"), _line("Box::pin(async move")}
+    assert {m["source"]["line"] for m in polls} == {
+        _line("async fn middle"), _line("Box::pin(async move"), _line("async fn top")}
     assert all(m["state_field"]["base"] == "self" for m in polls)
-    assert len(res["poll_functions"]) == 2
+    assert len(res["poll_functions"]) == 3
     boxed = next(m for m in polls if m["source"]["line"] == _line("Box::pin(async move"))
     middle = next(m for m in polls if m["source"]["line"] == _line("async fn middle"))
     # boxed -> awaits middle through a direct call to middle's poll
@@ -203,7 +215,7 @@ def _check(res, arch):
         leafs.append(by_id[i["machine"]])
     assert leafs[0]["id"] != leafs[1]["id"]
     assert leafs[0]["state_field"] == leafs[1]["state_field"]
-    # top (inlined into block_on/main): middle direct, looper inlined, boxed through the dyn vtable
+    # top (its own poll function): middle direct, looper inlined, boxed through the dyn vtable
     top = next(m for m in ms if m["source"]["line"] == _line("async fn top"))
     kinds = [top["states"][str(k)]["inner"] for k in range(3, 7)]
     assert kinds[0]["kind"] == "direct" and kinds[0].get("machine") == middle["id"], kinds
@@ -290,9 +302,15 @@ fn main() {
 @pytest.mark.skipif(not shutil.which("rustc"), reason="rustc not available")
 @pytest.mark.parametrize("target", [None, "aarch64-unknown-linux-musl"])
 def test_dyn_await_resolved_per_call_site(tmp_path, target):
-    """One coroutine awaits two different `Pin<Box<dyn Future>>` types through the same vtable
-    slot: each await resolves to its own boxed coroutine (first, second, first) -- not "ambiguous
-    because the function references two vtables"."""
+    """One coroutine (`both`) awaits two different `Pin<Box<dyn Future>>` types through the same
+    vtable slot: a straight-line awaiter's awaits resolve per call site to their own boxed
+    coroutine (first, second, first), not "ambiguous because the function references two vtables".
+
+    `both` is the top-level future here, so <=1.97 inlines it into the executor as a single
+    straight-line first-poll (the sweet spot: each await's vtable is pinned at its call site);
+    rustc 1.99 linearizes the top-level future away entirely. The boxed `first`/`second` always
+    survive as their own poll functions. Where `both` survives, the exact per-site chain is
+    checked; the boxed futures are checked either way."""
     if target and not _aarch64_target():
         pytest.skip("aarch64-unknown-linux-musl target not installed")
     exe = _build(tmp_path, target, DYN2)
@@ -302,11 +320,14 @@ def test_dyn_await_resolved_per_call_site(tmp_path, target):
     ln = {k: next(i for i, t in enumerate(lines, 1) if k in t) for k in
           ("n.wrapping_mul(7)", "n ^ 0x99", "async fn both")}
     first_m, second_m = by_line[ln["n.wrapping_mul(7)"]], by_line[ln["n ^ 0x99"]]
-    both = by_line[ln["async fn both"]]
-    got = [both["states"][str(k)]["inner"] for k in (3, 4, 5)]
-    assert all(i["kind"] == "dyn" and i["dyn_future_poll"] for i in got), got
-    assert [i.get("machine") for i in got] == [first_m["id"], second_m["id"], first_m["id"]], got
+    assert first_m["role"] == "poll" and second_m["role"] == "poll"
     assert first_m["size"]["vtable"] and second_m["size"]["vtable"]
+    assert first_m["suspend_points"] == 1 and second_m["suspend_points"] == 2
+    both = by_line.get(ln["async fn both"])
+    if both is not None:
+        got = [both["states"][str(k)]["inner"] for k in (3, 4, 5)]
+        assert all(i["kind"] == "dyn" and i["dyn_future_poll"] for i in got), got
+        assert [i.get("machine") for i in got] == [first_m["id"], second_m["id"], first_m["id"]], got
 
 
 @pytest.mark.skipif(not (shutil.which("rustc") and _target("i686-unknown-linux-musl")),
@@ -314,24 +335,46 @@ def test_dyn_await_resolved_per_call_site(tmp_path, target):
 def test_hand_executor_i386(tmp_path):
     """i386: cdecl stack arguments (self at [esp+8] behind the sret pointer), GOT-relative PIC
     jump tables (`[pic + idx*4 - d]`, the PC base fetched by `call $+5; pop`), fastcc self in
-    ecx. LLVM inlines more here: middle into boxed, and `top`'s register-promoted dispatch loses
-    its Returned/Panicked arms (both reach one `ud2`)."""
+    ecx. The boxed program recovers the full nesting on every rustc; the i386 specifics are the
+    self location of a poll function and the dyn vtable slot (0xc = slot 3 at 4-byte pointers)."""
     res = RA.recover(_build(tmp_path, "i686-unknown-linux-musl"))
     assert res["supported"] and res["arch"] == "x86"
     ms = res["machines"]
-    armless = [m for m in ms if not m["source"]]
-    assert len(armless) == 1 and armless[0]["suspend_points"] == AWAITS[_line("async fn top")]
-    assert armless[0]["states"]["1"]["target"] == armless[0]["states"]["2"]["target"]
-    sourced = [m for m in ms if m["source"]]
-    assert {m["source"]["line"] for m in sourced} == set(AWAITS) - {_line("async fn top")}
-    for m in sourced:
+    assert {m["source"]["line"] for m in ms} == set(AWAITS)
+    for m in ms:
         assert m["suspend_points"] == AWAITS[m["source"]["line"]], (m["source"], m["suspend_points"])
         assert m["validated"], m["notes"]
-    boxed = next(m for m in ms if m["role"] == "poll")
-    assert boxed["source"]["line"] == _line("Box::pin(async move") and boxed["self_register"] == "[esp+0x8]"
-    # top awaits the boxed future through the dyn Future vtable (slot 3 = 0xc on i386)
-    dyn = [st["inner"] for st in armless[0]["states"].values() if st.get("inner", {}).get("kind") == "dyn"]
-    assert dyn and dyn[0]["slot_offset"] == 12 and dyn[0].get("machine") == boxed["id"], dyn
+    top = next(m for m in ms if m["source"]["line"] == _line("async fn top"))
+    boxed = next(m for m in ms if m["source"]["line"] == _line("Box::pin(async move"))
+    # a poll function's self arrives either on the stack (cdecl: [esp+4] sret ptr, [esp+8] self)
+    # or in a fastcc register (ecx/edx) -- LLVM picks per function, and 1.99 moved some to edx
+    for m in ms:
+        if m["role"] == "poll":
+            assert m["self_register"] in ("[esp+0x8]", "ecx", "edx"), (m["id"], m["self_register"])
+    assert any(m["self_register"] == "[esp+0x8]" for m in ms if m["role"] == "poll")
+    # top awaits the boxed future through the dyn Future vtable (slot 3 = 0xc at 4-byte pointers)
+    dyn = next(st["inner"] for st in top["states"].values()
+               if st.get("inner", {}).get("kind") == "dyn")
+    assert dyn["slot_offset"] == 12 and dyn.get("machine") == boxed["id"], dyn
+
+
+@pytest.mark.skipif(not (shutil.which("rustc") and _target("i686-unknown-linux-musl")),
+                    reason="i686-unknown-linux-musl target not installed")
+def test_i386_armless_executor_tolerant(tmp_path):
+    """The unboxed executor (`block_on(top(n))`): older rustc inlines `top` into the executor and
+    register-promotes its dispatch, dropping the Returned/Panicked arms (an "armless" machine with
+    both states reaching one trap); rustc 1.99 linearizes it away so there is none. Either way:
+    at most one armless machine, and every machine still validates with an exact suspend count."""
+    res = RA.recover(_build(tmp_path, "i686-unknown-linux-musl", PROGRAM_INLINE))
+    armless = [m for m in res["machines"] if not m["source"]]
+    assert len(armless) <= 1, [m["id"] for m in armless]
+    for m in armless:
+        assert m["states"]["1"]["target"] == m["states"]["2"]["target"]  # arms merged into a trap
+        assert m["suspend_points"] == AWAITS[_line("async fn top")]
+    for m in res["machines"]:
+        if m["source"]:
+            assert m["suspend_points"] == AWAITS[m["source"]["line"]], m["source"]
+            assert m["validated"], m["notes"]
 
 
 def _check_by_location(res):
@@ -358,7 +401,7 @@ def test_hand_executor_macho(tmp_path, target, arch):
     res = RA.recover(exe)
     assert res["format"] == "MACHO" and res["arch"] == arch
     _check_by_location(res)
-    assert len(res["machines"]) == 9 and len(res["poll_functions"]) == 2
+    assert len(res["machines"]) == 9 and len(res["poll_functions"]) == 3
 
 
 @pytest.mark.skipif(not shutil.which("rustup"), reason="rustup not available")
