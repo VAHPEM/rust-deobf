@@ -130,6 +130,11 @@ crypto-clipper config, staging paths. [More below](#-real-malware).
   validated on goldberg, OLLVM `-fla` and a real LLVM-18 flattening pass), MBA / opaque-predicate
   simplification with Z3, Rust trait-object vtable recovery (`recover_types.py`), and
   optimization-reversal (jump-table un-switching, unrolled-loop detection — `premium/opt_reverse.py`).
+- **Rust idioms in stripped binaries** — `recover_idioms.py` brings back the format string of every
+  `println!` / `format!` / `panic!` site (both `fmt::Arguments` encodings: newer rustc's compact
+  template and the older pieces array), marks bounds / overflow / unwrap panic paths as cold
+  safety checks with their `file:line:col`, flags drop / dealloc calls and enum-like
+  (Option/Result?) returns, and annotates all of it in Ghidra — no symbols needed.
 - **Code virtualization** — `detect_vm.py` flags VMProtect/Themida/Tigress-style bytecode VMs; the
   premium devirtualizer lifts them back. From a VM with **randomized opcodes and encrypted
   operands**, it reconstructs:

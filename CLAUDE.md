@@ -116,6 +116,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64, ELF + PE |
 | `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64 + i386, ELF + PE |
 | `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64 + i386, ELF + PE + Mach-O; rustc 1.70 (inline `panic("...")`) to 1.97 (panic_const) |
+| `recover_idioms.py` | Rust idioms in stripped binaries: fmt macro sites → `println!("…")` text (newer rustc template encoding (1.97 measured) + older pieces array), panic / safety-check call sites (kind, `Location` file:line:col, guarding branch), drop / `__rust_dealloc` calls, enum-like (Option/Result?) returns; helpers named by symbols / libfuncs / message anchors; per-function register+stack dataflow (x86-64 SysV/Win64, i386, AArch64); `--eval <unstripped> <stripped>` measures P/R; → `ghidra_annotate.py` (`idioms`) |
 | `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
@@ -131,6 +132,10 @@ which cites the plugin source each stand-in follows) · `decompiler_selfcheck.py
 against a REAL GhidraMCP / ida-pro-mcp: mapping on N function starts, identity, `--write-test`
 comment write/read-back/restore; PASS/FAIL report) ·
 `ghidra_annotate.py` + `ghidra_run.sh` / `ghidra_dump_annotations.py` (Ghidra) ·
+`floss_export.py` / `export_rules.py` (FLOSS / capa+YARA output) · `mcp_server.py` (MCP over stdio) ·
+`ghidra_annotate.py` + `ghidra_run.sh` / `ghidra_dump_annotations.py` (Ghidra; also lays out
+recover_types vtables and recover_idioms comments/bookmarks/renames, Ghidra-free planning in
+`_idiom_plan`, stub-tested) ·
 `redblue_loop.py` (RustCloak hide ↔ rust-deobf recover regression; exit 3 = no round was
 evaluable, e.g. every build failed or the plugin hid nothing) · `fuzz_recover.py` (fuzz our own
 analysis path on malformed binaries; findings grouped by root cause, seed always printed) · `recover_blobs.py` (triage pipeline: carve blobs via
@@ -202,6 +207,12 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   EOL ones) and no bookmark endpoint: EOL is the default and bookmarks become EOL lines.
   ida-pro-mcp reads comments/bookmark slots only through `py_eval` (exec with separate locals:
   send top-level statements only, data as one JSON string literal).
+- **`fmt::Arguments` changed shape between rustc 1.91 and 1.97** (measured: 1.91 pieces, 1.97
+  template): `{template: *const u8, args}` (a byte-coded template; `args` = `len << 1 | 1` for a
+  plain `&'static str`) instead of `{pieces, fmt, args}` slices. `recover_idioms` decodes both; don't key new fmt code on a `pieces` array alone.
+- **recover_libfuncs' short labels drop the last v0 segment** of non-generic symbols
+  (`panic_bounds_check` → `core::panicking`); relabel from the match's `sym` (recover_idioms does
+  via `_readable`). Its signature DB is rustc-1.97 x86-64 only — AArch64 / i386 / PE get no hits.
 - **VALIDATION.md** uses numbered round sections; append the next `§N` rather than editing old ones.
 
 ## Maintenance: a new rustc release does NOT mean a rewrite
