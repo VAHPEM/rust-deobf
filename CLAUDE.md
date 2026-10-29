@@ -233,6 +233,12 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `tests/emu_equiv.py` dump (525 functions' runs + explore, recover(), unpack on the pack fixtures)
   with `tests/fixtures/emu/equiv_golden.json.gz`; `python3 tests/emu_equiv.py compare A B` diffs
   two dumps. Regenerate the golden file only for an intended output change.
+- **Emulation hot paths are inlined on purpose** (recover_emulate `_on_write` = `_Writes.add`'s
+  one-page case, `_capture_args` = `_plausible`, `capture` = `written()`/byte reads; unpack_emulate
+  `_on_block` = `_written`): change both copies together. Kept as they are, after measuring: `count=`
+  (the deterministic instruction budget; ~15 ns/insn), the 64-run emulator refresh (~5%), and
+  unpack_emulate's per-BYTE write bitmaps (page-protection tracking would lose the byte-level
+  `self_patches`/region carving semantics).
 - **Unicorn 2.1 PC writes from a hook:** only a single `uc_reg_write` of the PC makes Unicorn leave the
   current block; `uc_reg_write_batch` including the PC does not (runs silently diverge). Batch the
   other registers, write the PC alone, last.

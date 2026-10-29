@@ -722,7 +722,9 @@ This is research code, not a finished product. The ones that matter most:
 
 - **Emulation is not execution.** Path exploration flips branches one at a time inside the function
   it starts from, within budgets (8 runs per function, instruction budgets per run and per callee).
-- **Large binaries**: emulation runs Unicorn with Python hooks (≈30k instructions/s per process).
+- **Large binaries**: emulation runs Unicorn with Python hooks: ≈1 M emulated instructions/s per
+  process on the benchmark binary (x86-64 Linux, Unicorn 2.1.4; ≈0.65 M before the Oct 2026 hook
+  optimisations). The time is the Python hooks, not the engine (`scripts/bench_emu.py`).
   A first pass runs every function once with a small budget, a second explores decoder-like
   functions, and binaries with 2,000+ functions are split over processes (`RUST_DEOBF_WORKERS`).
   `--max-ram` trades that speed back for memory on a small machine.
