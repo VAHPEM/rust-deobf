@@ -447,7 +447,8 @@ external review tested got **79/360**. Every cell is a test in `tests/test_scatt
 | obfuse_xor² | XOR through MBA expressions | 0/5 | n/m | — | **5/5** | n/m |
 | obfany² | XorShift keystream XOR, `read_volatile`; `obfstr!`/`obfwide!`/`obfnum!`/`obfstmt!` | 0/5 | n/m | — | **5/5** | n/m |
 
-Release builds, ELF and PE x86-64 and AArch64, stripped and not; `size-lto`/`speed-lto` builds
+Release builds, ELF and PE x86-64 and AArch64, stripped and not (32-bit PE: the emulation column
+holds, the static engines are x86-64/AArch64 only); `size-lto`/`speed-lto` builds
 of every crate are tested too. Static = reads the decoder's key and the call sites without
 running anything; emulation = Unicorn, never runs the sample natively; dynamic = Frida in an
 isolated VM.
@@ -458,8 +459,10 @@ detects the crate and says so.</sub>
 
 <sub>² The 2026 crates (obfuse 1.0.1, obfany 0.1.5): 5/5 exact (no extra string) measured on ELF
 x86-64 and ELF AArch64 (musl) release (stripped and not), size-lto and speed-lto (stripped), and on
-a stripped static i686 musl release build; PE is built and tested by CI's `pe` job but not measured yet,
-and FLOSS / dynamic recovery (`n/m`) not run on them. obfuse's default features name
+a stripped static i686 musl release build, PE x86-64 and 32-bit PE (i686-pc-windows-gnu) release
+(stripped and not), and i686 glibc (`tests/test_32bit.py`) -- **except obfuse_aes on 32-bit PE:
+3/5** (delta and echo missing; a known gap). size-lto/speed-lto were measured on ELF only; FLOSS /
+dynamic recovery (`n/m`) not run on them. obfuse's default features name
 `aes-256-gcm`, but with `polymorphic` on (the default) the macro never calls the AEAD -- the default
 binary holds no AES instruction; `obfuse_aes` is the crate's real AES-256-GCM path (AES-NI on
 x86-64; on AArch64 the `aes` crate's software AES, ~26k emulated instructions per string). obfuse
@@ -780,8 +783,11 @@ This is research code, not a finished product. The ones that matter most:
 - **Large binaries are covered partly** within the default 120 s budget (≈2,000 of gdb's 15,760
   functions on 2 CPUs). The output reports coverage; raise `--time-budget` or add CPUs.
 - **Precision is good, not perfect**: 29 false positives on a 21-binary C/C++, Go and Rust corpus.
-- **32-bit PE is still open**: emulation of the Windows std path is not yet reliable there, so PE32
-  is routed to literal recovery only (32-bit x86 ELF and Mach-O are verified 5/5).
+- **32-bit PE** is emulated since the 2026-10 round: stdcall imports pop their arguments, function
+  starts come from `.eh_frame`, and the canary benchmark (release, stripped and not) recovers every
+  string on i686-pc-windows-gnu builds (`build_all.sh FORMATS=pe32`) except obfuse_aes (3/5); the
+  scatter suites / LTO profiles are not measured there yet. Library-function identification on
+  32-bit PE is measured per-binary only (`gen_sigdb`), not with the bundled DB.
 - **Runtime-keyed configs** (custom-key cryptify, KrustyLoader's cfb-mode config) need dynamic
   recovery with that environment.
 - **Platforms**: Linux (x86-64, ARM64) and Windows x64 are tested. On Windows-on-ARM use x64
@@ -810,11 +816,10 @@ This is research code, not a finished product. The ones that matter most:
 - **Real malware**: on large real binaries a minority of emulation outputs are garbled std-internal
   fragments. **32-bit x86 ELF** and **Mach-O** (x86-64 and arm64) are fully emulated, verified at
   **5/5 on all six canary crates** for `i686-unknown-linux-gnu` (VALIDATION.md §14,
-  `tests/test_32bit.py`) and for `aarch64-apple-darwin` (§15, `tests/test_macho.py`). **32-bit PE**:
-  the loader handles it (PE32 `HIGHLOW` relocations, imagebase rebasing) but emulation of the
-  Windows std path gives 0–2/5 plus false positives, so emulation is skipped with a note until it is
-  verified 5/5 (VALIDATION.md §14). FickleStealer is also packed, so it needs unpacking regardless
-  of arch. The benchmark's obfuscation crates model one real pattern, not all of them.
+  `tests/test_32bit.py`) and for `aarch64-apple-darwin` (§15, `tests/test_macho.py`). **32-bit PE**
+  (i686-pc-windows-gnu) is emulated too: the Windows std path needed stdcall import cleanup,
+  `.eh_frame` function starts and write-protected import trampolines (it gave 0–2/5 before).
+  FickleStealer is also packed, so it needs unpacking regardless of arch. The benchmark's obfuscation crates model one real pattern, not all of them.
 - **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
   signature on ELF, PE and Mach-O (x86-64, AArch64, 32-bit x86); the bundled DBs are for one
   toolchain, rustc 1.97 (linked-build signatures for x86-64, plus prebuilt-std signatures for
@@ -843,6 +848,7 @@ generalisation work: `VALIDATION.md` (§10) · artifact tiers: `ARTIFACT_TIERS.m
 python3 bench_src/gen_projects.py                 # (re)generate bench_src from the canaries
 ARM64=1 bash scripts/build_all.sh                 # all crates x {ELF, PE, AArch64} x profiles
 FORMATS=pe bash scripts/build_all.sh              # one format (CI runs one job per format)
+FORMATS=pe32 bash scripts/build_all.sh            # 32-bit PE (i686-pc-windows-gnu, i686 mingw-w64)
 ARM64_GNU=1 bash scripts/build_all.sh             # + AArch64 glibc (dynamic); cross linker
                                                   # aarch64-linux-gnu-gcc unless on AArch64
 python3 -m pytest tests -q                        # recall and precision, canary + scatter
