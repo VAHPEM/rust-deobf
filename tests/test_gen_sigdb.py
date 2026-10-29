@@ -5,6 +5,7 @@ missing-toolchain report, and `--db auto` picking / falling back. The end-to-end
 toolchain) is in tests/test_libfuncs.py, which the fast CI subset skips."""
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -66,7 +67,7 @@ def test_cache_key_components():
 def test_binary_facts_non_rust_fixture():
     f = S.binary_facts(FIX / "emu" / "null64")
     assert f["triple"] == "x86_64-unknown-linux-gnu" and f["crates"] == []
-    assert f["key"].startswith("unknown-x86_64-unknown-linux-gnu-")
+    assert re.match(r"unknown-[0-9a-f]{16}-x86_64-unknown-linux-gnu-[0-9a-f]{16}$", f["key"]), f["key"]
 
 
 # --- object signing: a hand-built ELF64 relocatable (no compiler needed) -------------------------
@@ -227,3 +228,202 @@ def test_bundled_quality_from_group_keys():
     assert L._bundled_quality({"rustc-1.97.1": {}}, meta)[0] == "same-minor"
     assert L._bundled_quality({"rustc-1.85.0": {}, "__meta__": {}}, meta)[0] == "mismatch"
     assert L._bundled_quality({"rustc-1.85.0": {}, "rustc-1.97.0": {}}, meta)[0] == "exact"
+
+
+# --- unknown-toolchain binaries no longer share a cache key ---------------------------------------
+def test_unknown_rustc_key_includes_binary_fingerprint():
+    """Two different binaries with no recoverable rustc and the same (empty) crate set used to get
+    the same `unknown-<triple>-<crates>` key, i.e. one would silently use the other's DB."""
+    a, b = FIX / "emu" / "null64", FIX / "emu" / "ct64"
+    fa, fb = S.binary_facts(a), S.binary_facts(b)
+    assert fa["rust_version"] is None and fa["rustc_commit"] is None and fa["crates"] == fb["crates"]
+    assert fa["triple"] == fb["triple"]
+    assert fa["key"] != fb["key"]
+    assert fa["key"] == S.binary_facts(a)["key"]                      # stable for one file
+
+
+def test_rustc_from_comment_section(tmp_path):
+    """ELF `.comment` ("rustc version 1.85.0 (4d91de4e4 2025-02-17)") names the toolchain when no
+    /rustc/<hash>/ panic path survived (GNU strip keeps .comment)."""
+    p = tmp_path / "bin"
+    p.write_bytes((FIX / "emu" / "null64").read_bytes() + b"\0rustc version 1.85.0 (4d91de4e4 2025-02-17)\0")
+    f = S.binary_facts(p)
+    assert (f["rust_version"], f["rustc_commit"], f["rustc_source"]) == ("1.85.0", "4d91de4e4", ".comment")
+    assert f["key"].startswith("1.85.0-x86_64-unknown-linux-gnu-")
+
+
+# --- more crate evidence: cargo-auditable, symbol roots, name/version strings ----------------------
+class _Sec:
+    def __init__(self, name, content):
+        self.name, self.content = name, content
+
+
+class _Bin:
+    def __init__(self, sections):
+        self.sections = sections
+
+
+def test_auditable_section():
+    import zlib
+    doc = {"packages": [{"name": "app", "version": "0.1.0", "root": True},
+                        {"name": "serde", "version": "1.0.229", "dependencies": []},
+                        {"name": "cc", "version": "1.2.0", "kind": "build"},
+                        {"name": "bad\"name", "version": "1.0.0"}]}
+    b = _Bin([_Sec(".text", b""), _Sec(".dep-v0", zlib.compress(json.dumps(doc).encode()))])
+    assert S._auditable(b) == [("serde", "1.0.229")]
+    assert S._auditable(_Bin([_Sec(".dep-v0", b"not zlib")])) == []
+
+
+def test_crate_list_merges_evidence():
+    meta = {"crates": {"serde_json": ["1.0.140"], "regex": []}, "panic_sites": []}
+    ev = {"auditable": [("ryu", "1.0.23")],
+          "symbol_crates": ["serde_core", "regex", "itoa"],
+          "name_versions": {"regex": ["1.11.1"], "itoa": ["1.0.18"], "mozilla": ["5.0.0"]}}
+    got = dict(S.crate_list(meta, ev))
+    assert got == {"serde_json": "1.0.140", "ryu": "1.0.23", "regex": "1.11.1", "itoa": "1.0.18",
+                   "serde_core": None}, got           # a lone version string names no crate
+    assert S.crate_list(meta) == [("regex", None), ("serde_json", "1.0.140")]   # old behaviour
+
+
+def test_crate_evidence_name_version_strings(tmp_path):
+    p = tmp_path / "bin"
+    p.write_bytes((FIX / "emu" / "null64").read_bytes() + b"\0ua: serde_json/1.0.140 x\0ok-crate/0.2.3\0")
+    ev = S.crate_evidence(p)
+    assert ev["name_versions"]["serde_json"] == ["1.0.140"] and ev["name_versions"]["ok-crate"] == ["0.2.3"]
+
+
+# --- dependency resolution + feature variants (cargo metadata parsed, no cargo needed) -----------
+def _fake_metadata():
+    def pkg(i, name, ver, feats=(), proc=False):
+        return {"id": i, "name": name, "version": ver, "features": {f: [] for f in feats},
+                "targets": [{"kind": ["proc-macro" if proc else "lib"]}]}
+    pk = [pkg("root", "rd_sigdb_probe", "0.0.0"), pkg("a", "serde_json", "1.0.140", ["std", "raw_value", "unstable", "_priv"]),
+          pkg("b", "ryu", "1.0.23", ["small"]), pkg("c", "serde_derive", "1.0.229", proc=True),
+          pkg("d", "syn", "2.0.0"), pkg("e", "cc", "1.2.0")]
+    k = lambda kind=None: [{"kind": kind, "target": None}]
+    nodes = [{"id": "root", "deps": [{"pkg": "a", "dep_kinds": k()}]},
+             {"id": "a", "deps": [{"pkg": "b", "dep_kinds": k()}, {"pkg": "c", "dep_kinds": k()},
+                                  {"pkg": "e", "dep_kinds": k("build")}]},
+             {"id": "c", "deps": [{"pkg": "d", "dep_kinds": k()}]}]
+    return json.dumps({"packages": pk, "resolve": {"root": "root", "nodes": nodes}})
+
+
+def test_resolve_graph_and_variants(monkeypatch, tmp_path):
+    calls = []
+    def fake_run(cmd, *a, **k):
+        calls.append([str(c) for c in cmd])
+        return 0, _fake_metadata(), ""
+    monkeypatch.setattr(S, "run", fake_run)
+    g = S.resolve_graph(tmp_path, {"cargo": "cargo"}, "x86_64-unknown-linux-gnu", {}, ["--offline"], S.Budget(60))
+    assert calls[0][1:3] == ["metadata", "--format-version"] and "--offline" in calls[0]
+    # normal deps only: the proc-macro (and its deps) and the build-dependency are not linked
+    assert g["normal"] == [("ryu", "1.0.23"), ("serde_json", "1.0.140")]
+    assert g["features"][("serde_json", "1.0.140")] == ["raw_value", "std"]   # unstable/_priv skipped
+    crates = [("serde_json", "1.0.140")]
+    allv = S._variant(crates + [("ryu", "1.0.23")], "all", g["features"])
+    man = S.render_manifest(allv, "release", "1.85.0")
+    assert 'features = ["raw_value", "std"]' in man and 'package = "ryu"' in man
+    assert "default-features = false" in S.render_manifest(S._variant(crates, "none", {}), "release", None)
+    with pytest.raises(ValueError):
+        S.render_manifest([("x", "1.0.0", {"features": ['a"]']})], "release", None)
+
+
+def test_choose_profiles():
+    assert S.choose_profiles(None) == ["release"]
+    assert S.choose_profiles(S.AUTO_RELEASE_MIN) == ["release"]
+    assert S.choose_profiles(S.AUTO_LTO_MAX / 2) == ["size-lto", "speed-lto"]
+    mid = (S.AUTO_RELEASE_MIN + S.AUTO_LTO_MAX) / 2
+    assert S.choose_profiles(mid) == ["release", "size-lto", "speed-lto"]
+
+
+# --- safety: crates are compiled only on request; --db auto never builds ---------------------------
+def test_crates_not_built_without_build_crates(monkeypatch, tmp_path):
+    monkeypatch.setenv("RUST_DEOBF_CACHE", str(tmp_path / "cache"))
+    sysroot = tmp_path / "sysroot"
+    (sysroot / "lib" / "rustlib" / "x86_64-unknown-linux-gnu" / "lib").mkdir(parents=True)
+    tc = {"name": "fake", "rustc": "rustc", "cargo": "cargo", "sysroot": str(sysroot), "version": "1.85.0",
+          "commit": None, "host": "x86_64-unknown-linux-gnu", "llvm": None}
+    monkeypatch.setattr(S, "resolve_toolchain", lambda *a, **k: (tc, []))
+    calls = []
+    def fake_run(cmd, *a, **k):
+        calls.append([str(c) for c in cmd])
+        return (0, _fake_metadata(), "") if "metadata" in cmd else (1, "", "should not run")
+    monkeypatch.setattr(S, "run", fake_run)
+    rep = S.generate_for_binary(FIX / "emu" / "null64", crates_override=[("serde_json", "1.0.140")],
+                                exerciser=False, profiles=("release",))
+    assert rep["status"] == "ok"
+    assert not any(c[1] in ("build", "rustc") for c in calls), calls     # metadata only
+    assert any("NOT built" in n for n in rep["meta"]["notes"])
+    assert rep["meta"]["built"]["crates_resolved"] == ["ryu@1.0.23"]
+    # with --build-crates the build is attempted (and fails here: fake cargo)
+    calls.clear()
+    rep = S.generate_for_binary(FIX / "emu" / "null64", crates_override=[("serde_json", "1.0.140")],
+                                exerciser=False, profiles=("release",), build_crates=True, force=True,
+                                feature_sets=("default",))
+    assert any(c[1] == "build" for c in calls)
+
+
+def test_db_auto_only_reads_the_cache(monkeypatch, tmp_path):
+    """recover_libfuncs --db auto must never build, install or download: it only looks up the
+    cache. Every process-spawning path and the generator are booby-trapped."""
+    monkeypatch.setenv("RUST_DEOBF_CACHE", str(tmp_path))
+    def boom(*a, **k):
+        raise AssertionError("--db auto tried to run something: %r" % (a[:1],))
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(S, "run", boom)
+    monkeypatch.setattr(S, "generate_for_binary", boom)
+    monkeypatch.setattr(S, "resolve_toolchain", boom)
+    r = L.recover(FIX / "emu" / "null64", db="auto")
+    assert r["db"]["source"] == "bundled" and "no cached DB" in r["db"]["fallback_reason"]
+
+
+def test_resolution_retries_without_default_features(monkeypatch, tmp_path):
+    """Offline, a crate whose DEFAULT features need a package the cache lacks (clap_builder ->
+    anstream when the program used clap without defaults) is resolved without default features
+    instead of failing the whole resolution."""
+    seen = []
+    def fake_run(cmd, *a, **k):
+        man = (tmp_path / "Cargo.toml").read_text()
+        seen.append(man)
+        if "default-features = false" not in man:
+            return 101, "", ("error: no matching package named `anstream` found\nrequired by package "
+                             "`clap_builder v4.6.7`\n")
+        return 0, _fake_metadata(), ""
+    monkeypatch.setattr(S, "run", fake_run)
+    def wm(deps, profile):
+        (tmp_path / "Cargo.toml").write_text(S.render_manifest(deps, profile, "1.85.0"))
+    notes = []
+    g, crates = S._resolve_with_fallback(tmp_path, [("clap_builder", "4.6.7"), ("anyhow", "1.0.104")],
+                                         {"cargo": "cargo"}, "x86_64-unknown-linux-gnu", {}, ["--offline"],
+                                         S.Budget(60), wm, notes)
+    assert g is not None and len(seen) == 2
+    assert crates == [("clap_builder", "4.6.7", {"default_features": False}), ("anyhow", "1.0.104")]
+    assert "without default features" in notes[0]
+
+
+def test_build_fallback_ladder():
+    base = [("a", "1.0.0"), ("b", "2.0.0", {"default_features": False})]
+    assert S._fallbacks(("a", "1.0.0", {"features": ["x"]}), base) == [("a", "1.0.0")]
+    assert S._fallbacks(("a", "1.0.0"), base) == [("a", "1.0.0", {"default_features": False})]
+    assert S._fallbacks(("a", "1.0.0", {"default_features": False}), base) == []      # -> dropped
+    assert S._fallbacks(("b", "2.0.0", {"default_features": False, "features": ["y"]}), base) == \
+        [("b", "2.0.0", {"default_features": False})]
+
+
+def test_offline_all_features_skip_optional_dependencies():
+    """Offline, `all` features must not enable features that pull an optional dependency (another
+    crate that would have to be fetched): serde_json's preserve_order -> indexmap."""
+    fmap = {"default": ["std"], "std": ["serde/std"], "preserve_order": ["indexmap", "std"],
+            "raw_value": [], "arbitrary": ["dep:arbitrary"], "small": ["ryu?/small"],
+            "uses_po": ["preserve_order"], "logging": ["aho-corasick?/logging"]}
+    pkgs = {"serde_json": [(fmap, {"indexmap", "arbitrary", "ryu", "aho-corasick"},
+                            {"serde": "serde", "ryu": "ryu", "aho-corasick": "aho-corasick",
+                             "indexmap": "indexmap", "arbitrary": "arbitrary"})],
+            "serde": [({"std": []}, set(), {})],
+            "ryu": [({"small": []}, set(), {})],
+            # a weak `x?/f` still pulls x's optional dependency when f enables one (regex ->
+            # aho-corasick/logging -> log)
+            "aho-corasick": [({"logging": ["dep:log"]}, {"log"}, {"log": "log"})]}
+    pulls = {f for f in fmap if S._pulls_optional_dep("serde_json", f, pkgs)}
+    assert pulls == {"preserve_order", "arbitrary", "uses_po", "logging"}, pulls

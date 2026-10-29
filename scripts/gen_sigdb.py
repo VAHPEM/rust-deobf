@@ -6,18 +6,27 @@ but its bundled DB describes one toolchain (rustc 1.97, x86-64). A binary built 
 for another architecture or with other crates shares little code with it. This script builds the
 DB the binary actually needs (the idea behind rustbinsign / Oxidizer's per-version FLIRT):
 
-  1. read the binary's facts (never runs it): rustc commit/release and the crates WITH versions
-     (recover_rust_meta), and the target triple guessed from the file (ELF/PE/Mach-O, x86-64 /
-     AArch64 / i686, gnu/musl/msvc/darwin: `detect_target`);
+  1. read the binary's facts (never runs it): rustc commit/release (panic paths, else ELF
+     `.comment`) and the crates WITH versions (recover_rust_meta's panic paths + cargo-auditable
+     data + mangled-symbol crate roots + `name/x.y.z` strings: `crate_evidence`), and the target
+     triple guessed from the file (ELF/PE/Mach-O, x86-64 / AArch64 / i686,
+     gnu/musl/msvc/darwin: `detect_target`);
   2. find that exact toolchain + target std among the installed ones; with --allow-download,
      install it with rustup (profile minimal) -- otherwise say what is missing and stop;
-  3. in a temp dir, create a throwaway cargo project pinning those crates at `=<version>` (default
-     features; features are not recoverable from a stripped binary) and build its dependencies
-     for that target, in release (cargo defaults) -- or with --profile size-lto / speed-lto;
+  3. in a temp dir, create a throwaway cargo project pinning those crates at `=<version>`, resolve
+     it (`cargo metadata`: the transitive crates that get linked, e.g. serde under serde_json, and
+     every crate's feature list -- resolution runs no crate code), and -- ONLY with
+     --build-crates -- build the crates for that target as rlibs (default features; --features
+     all,none add every-feature / no-default-feature builds, merged) per profile (--profile auto
+     picks release and/or the fat-LTO profiles from how many always-linked std functions match
+     the toolchain's prebuilt std; an LTO profile's crates are built without LTO so their rlibs
+     hold machine code at that opt-level);
   4. sign, in recover_libfuncs' DB format and with its masking engine (gen_runtime_sigs.mask):
        * every function of the compiled crate rlibs and of the toolchain's PREBUILT std rlibs
          (std is shipped compiled per toolchain+target, so its object code is exactly what a
-         non-LTO binary links; relocated bytes are masked from the object's relocations), and
+         non-LTO binary links; relocated bytes are masked from the object's relocations), with
+         a whole-function pattern for functions up to FULL_MAX bytes so recover_libfuncs can
+         tell apart functions that share their first bytes (drop glue, per-CGU copies), and
        * when the target can be linked here, a tiny linked "std exerciser" program run through
          recover_libfuncs.generate() -- the same --gen path the bundled DB came from -- which adds
          the common std monomorphisations (Vec/String/fmt/HashMap instances) a program compiles;
@@ -25,17 +34,22 @@ DB the binary actually needs (the idea behind rustbinsign / Oxidizer's per-versi
      %LOCALAPPDATA% on Windows, or $RUST_DEOBF_CACHE), keyed by the BINARY's toolchain + target +
      crate set, so `recover_libfuncs.py --db auto` finds it for that binary and its siblings.
 
-    python3 scripts/gen_sigdb.py path/to/binary                    # installed toolchains only
-    python3 scripts/gen_sigdb.py path/to/binary --allow-download   # rustup install + crates.io
+    python3 scripts/gen_sigdb.py path/to/binary                    # std + exerciser; installed toolchains
     python3 scripts/gen_sigdb.py path/to/binary --dry-run          # print the plan, build nothing
+    python3 scripts/gen_sigdb.py path/to/binary --build-crates     # + the crates (IN THE ANALYSIS VM)
+    python3 scripts/gen_sigdb.py path/to/binary --allow-download   # rustup install + crates.io
     python3 scripts/gen_sigdb.py path/to/binary --json             # the report as JSON
     python3 scripts/gen_sigdb.py --selftest
 
-SECURITY: the crate list comes from the (untrusted) binary, and building a crate runs its build
-script and proc-macros on this host. Network is used only with --allow-download (cargo runs
---offline otherwise, so only crates already in the local cargo cache are built); review the plan
-with --dry-run, override it with --crates name@ver,... or --std-only, and build inside the
-analysis VM when the binary is hostile. The target binary itself is only read, never executed.
+SECURITY: the crate list comes from the (untrusted) binary, and COMPILING a crate runs its build
+script and proc-macros on this host -- a crafted binary can name any crate. So crates are only
+compiled with an explicit --build-crates; by default the DB holds the toolchain's prebuilt std and
+the exerciser (our own code), and the crates are only resolved (`cargo metadata`, no crate code
+runs). Run --build-crates inside the analysis VM (e.g. the Kali VM over SSH), never on a
+workstation; review the plan with --dry-run, override it with --crates name@ver,... Network is
+used only with --allow-download (cargo runs --offline otherwise, so only crates already in the
+local cargo cache are resolved/built). The target binary itself is only read, never executed;
+`recover_libfuncs --db auto` only reads the cache and never builds.
 Exit status: 0 DB written (or already cached), 1 error, 2 usage, 3 toolchain/target missing.
 """
 from __future__ import annotations
@@ -70,6 +84,9 @@ _STD_SKIP = re.compile(r"^lib(proc_macro|test|getopts|profiler_builtins|rustc_st
                        r"sysroot)-")
 _CRATE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+_FEATURE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_+.-]{0,63}$")   # a plain feature (no dep:/x/y forms)
+# features that do not build on stable or pull in test/bench/doc-only code
+_FEATURE_SKIP = re.compile(r"nightly|unstable|^bench|^test|^doc|^_|internal|^std-fs$")
 _TRIPLE = re.compile(r"^[a-z0-9_]+(?:-[a-z0-9_.]+){1,3}$")
 
 
@@ -180,29 +197,146 @@ def _crate_weights(meta: dict) -> dict:
     return w
 
 
-def crate_list(meta: dict) -> list[tuple[str, str | None]]:
-    """[(name, version|None)] from recover_rust_meta's crates, validated (names and versions come
-    from untrusted rodata and end up in a Cargo.toml), most-referenced first, stable order."""
-    weights = _crate_weights(meta)
-    out = []
-    for name, vers in (meta.get("crates") or {}).items():
-        if not _CRATE_NAME.match(name or ""):
+_RE_COMMENT = re.compile(rb"rustc version (\d+\.\d+\.\d+)(?:-[0-9A-Za-z.]+)? \(([0-9a-f]{7,12}) "
+                         rb"(\d{4}-\d\d-\d\d)\)")
+# `name/1.2.3` as a crate puts it into user-agent / version banners ("serde_json/1.0.140")
+_RE_NAMEVER = re.compile(rb"(?<![A-Za-z0-9_./-])([a-z][a-z0-9_-]{1,40})/(\d+\.\d+\.\d+)(?![0-9.A-Za-z])")
+_STD_CRATES = {"core", "std", "alloc", "proc_macro", "panic_unwind", "panic_abort", "compiler_builtins",
+               "test", "unwind", "std_detect", "rustc_demangle", "addr2line", "gimli", "object",
+               "miniz_oxide", "adler", "adler2", "hashbrown", "cfg_if", "libc", "memchr"}
+# (hashbrown, cfg_if, libc, memchr are ALSO common crates; std links its own copies, so a symbol
+#  root with those names proves nothing -- they still come from panic paths or the resolution)
+MAX_SCAN = 512 << 20                 # bytes of the binary scanned for evidence strings
+MAX_AUDIT = 8 << 20                  # decompressed cargo-auditable JSON cap
+
+
+def _norm(name: str) -> str:
+    return name.replace("-", "_").lower()
+
+
+def _auditable(b) -> list[tuple[str, str]]:
+    """cargo-auditable's `.dep-v0` section (zlib JSON {"packages": [...]}) -> runtime crates
+    (name, version), the root package and build-only dependencies excluded."""
+    import zlib
+    for s in getattr(b, "sections", []):
+        nm = s.name if isinstance(s.name, str) else ""
+        if nm not in (".dep-v0", "dep-v0"):
             continue
-        good = [v for v in vers if _VERSION.match(v or "")]
-        if not good:
+        try:
+            d = zlib.decompressobj()
+            raw = d.decompress(bytes(s.content), MAX_AUDIT)
+            pk = json.loads(raw.decode("utf-8", "replace")).get("packages", [])
+        except Exception:
+            return []
+        out = []
+        for p in pk if isinstance(pk, list) else []:
+            if not isinstance(p, dict) or p.get("root") or p.get("kind") == "build":
+                continue
+            n, v = str(p.get("name", "")), str(p.get("version", ""))
+            if _CRATE_NAME.match(n) and _VERSION.match(v):
+                out.append((n, v))
+        return out
+    return []
+
+
+def crate_evidence(path: Path) -> dict:
+    """Crate/toolchain evidence beyond panic paths (all static): cargo-auditable data, crate roots
+    of mangled symbols (unstripped builds), `name/x.y.z` version strings, and the rustc version
+    rustc writes into ELF `.comment` (GNU strip keeps it; llvm-strip does not)."""
+    ev = {"auditable": [], "symbol_crates": [], "name_versions": {}, "comment": None}
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_SCAN)
+    except OSError:
+        return ev
+    m = _RE_COMMENT.search(raw)
+    if m:
+        ev["comment"] = {"version": m.group(1).decode(), "commit": m.group(2).decode(),
+                         "date": m.group(3).decode()}
+    nv: dict[str, set] = {}
+    for m in _RE_NAMEVER.finditer(raw):
+        n, v = m.group(1).decode(), m.group(2).decode()
+        if _CRATE_NAME.match(n) and _VERSION.match(v):
+            nv.setdefault(n, set()).add(v)
+    ev["name_versions"] = {k: sorted(v) for k, v in nv.items()}
+    try:
+        import lief
+        import recover_libfuncs as L
+        import recover_rust_meta as M
+        b = lief.parse(str(path))
+        if b is None:
+            return ev
+        ev["auditable"] = _auditable(b)
+        roots: dict[str, int] = {}
+        own = set()                                   # the program's crate: the one with `::main`
+        for sym in b.symbols:
+            nm = L._macho_sym(M._str(sym.name))
+            root, path = None, None
+            if nm.startswith("_R"):
+                path = L._v0_path(nm)
+                root = path.split("::", 1)[0] if path else None
+            elif nm.startswith("_ZN") and M.RE_RUST_HASH.search(nm):
+                mm = re.match(r"_ZN(\d+)", nm)
+                if mm:
+                    k = int(mm.group(1))
+                    root = nm[len(mm.group(0)):len(mm.group(0)) + k]
+                    path = M.demangle(nm)
+            if root and re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$", root):
+                roots[root] = roots.get(root, 0) + 1
+                if path == root + "::main":
+                    own.add(root)
+        ev["symbol_crates"] = sorted(r for r in roots if r not in own and r not in _STD_CRATES)
+    except Exception:
+        pass
+    return ev
+
+
+def crate_list(meta: dict, evidence: dict | None = None) -> list[tuple[str, str | None]]:
+    """[(name, version|None)] from recover_rust_meta's crates plus `crate_evidence` (auditable
+    data; symbol crate roots and `name/x.y.z` strings, a version string only counting for a crate
+    some other source named), validated (names and versions come from untrusted data and end up
+    in a Cargo.toml), most-referenced first, stable order."""
+    weights = _crate_weights(meta)
+    found: dict[str, set] = {}
+    for name, vers in (meta.get("crates") or {}).items():
+        if _CRATE_NAME.match(name or ""):
+            found.setdefault(name, set()).update(v for v in vers if _VERSION.match(v or ""))
+    ev = evidence or {}
+    for n, v in ev.get("auditable", []):
+        found.setdefault(n, set()).add(v)
+    byn = {_norm(n): n for n in found}
+    for r in ev.get("symbol_crates", []):
+        if _norm(r) not in byn and _CRATE_NAME.match(r):
+            found[r] = set()
+            byn[_norm(r)] = r
+    for n, vs in (ev.get("name_versions") or {}).items():
+        k = _norm(n)
+        if k in byn and not found[byn[k]]:
+            real = n if "-" in n or byn[k] == n else byn[k]      # strings keep cargo's spelling
+            vers = {v for v in vs if _VERSION.match(v)}
+            if real != byn[k]:
+                found[real] = found.pop(byn[k])
+                byn[k] = real
+            found[real].update(vers)
+    out = []
+    for name, vers in found.items():
+        if not vers:
             out.append((name, None))
-        for v in sorted(set(good)):
+        for v in sorted(vers):
             out.append((name, v))
     out.sort(key=lambda nv: (-weights.get(nv[0], 0), nv[0], nv[1] or ""))
     return out
 
 
-def rustc_id(version: str | None, commit: str | None) -> str:
+def rustc_id(version: str | None, commit: str | None, fingerprint: str | None = None) -> str:
+    """Toolchain part of the cache key. With neither a release nor a commit, two unrelated
+    binaries would share `unknown-<triple>-<crates>`: the binary's own fingerprint (sha256 prefix)
+    keeps their DBs apart."""
     if version:
         return version
     if commit:
         return "commit-" + commit[:12]
-    return "unknown"
+    return "unknown-" + fingerprint[:16] if fingerprint else "unknown"
 
 
 def crate_hash(crates) -> str:
@@ -216,7 +350,8 @@ def cache_key(facts: dict) -> str:
     if not _TRIPLE.match(triple):
         triple = "unknown-target"
     rid = re.sub(r"[^A-Za-z0-9._-]", "_", rustc_id(facts.get("rust_version"),
-                                                     facts.get("rustc_commit")))
+                                                     facts.get("rustc_commit"),
+                                                     facts.get("fingerprint")))
     return "%s-%s-%s" % (rid, triple, crate_hash(facts.get("crates", [])))
 
 
@@ -246,15 +381,34 @@ def binary_facts(path: Path, meta: dict | None = None) -> dict:
     import recover_rust_meta as M
     if meta is None:
         meta = M.recover(Path(path))
-    rel = meta.get("rust_release") or {}
+    rel = meta.get("rust_release") if isinstance(meta.get("rust_release"), dict) else {}
     tgt = detect_target(Path(path))
-    facts = {"rustc_commit": meta.get("rustc_commit"),
-             "rust_version": rel.get("version") if isinstance(rel, dict) else None,
-             "rust_date": rel.get("date") if isinstance(rel, dict) else None,
+    ev = crate_evidence(Path(path))
+    commit, version, date = meta.get("rustc_commit"), rel.get("version"), rel.get("date")
+    com = ev.get("comment")
+    if com and not version and not commit:          # no /rustc/<hash>/ path survived
+        version, commit, date = com["version"], com["commit"], com["date"]
+    facts = {"rustc_commit": commit, "rust_version": version, "rust_date": date,
+             "rustc_source": ("panic paths" if meta.get("rustc_commit") else
+                              ".comment" if com and commit else None),
              "is_rust": meta.get("is_rust"), "target": tgt, "triple": tgt.get("triple"),
-             "crates": crate_list(meta)}
+             "crates": crate_list(meta, ev), "evidence": {
+                 "auditable": len(ev["auditable"]), "symbol_crates": ev["symbol_crates"][:50]}}
+    if not version and not commit:
+        facts["fingerprint"] = _sha256_file(Path(path))
     facts["key"] = cache_key(facts)
     return facts
+
+
+def _sha256_file(path: Path) -> str | None:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
 
 
 def _version_of_commit(commit: str | None) -> str | None:
@@ -489,6 +643,35 @@ def _object_functions(raw: bytes, arch: str):
     return out
 
 
+FULL_MAX = 1024          # bytes: functions up to this size also get a whole-function pattern
+
+
+def _masked_hex(code: bytes, masked: set, arch: str) -> str:
+    import gen_runtime_sigs as G
+    pat = G.mask(code, 0, arch)
+    if masked:
+        toks = [pat[i:i + 2] for i in range(0, len(pat), 2)]
+        for k in masked:
+            if 0 <= k < len(toks):
+                toks[k] = ".."
+        pat = "".join(toks)
+    return pat
+
+
+def sign_full(code: bytes, masked: set, arch: str) -> str | None:
+    """Whole-function masked pattern (functions longer than SIG_LEN, up to FULL_MAX bytes):
+    recover_libfuncs uses it to tell apart functions sharing their first SIG_LEN bytes (drop glue
+    of different types, per-codegen-unit copies) -- a hit is kept only when the WHOLE function
+    matches and ends there."""
+    import recover_libfuncs as L
+    if not (L.SIG_LEN < len(code) <= FULL_MAX):
+        return None
+    full = _masked_hex(code, masked, arch)
+    if full.count("..") > len(full) * L.MAX_WILDCARD:
+        return None
+    return full
+
+
 def sign_function(code: bytes, masked: set, arch: str) -> str | None:
     """recover_libfuncs' signature for one function (first SIG_LEN bytes, position-dependent
     bytes masked by gen_runtime_sigs.mask, PLUS every relocated byte), or None when it is too
@@ -498,13 +681,7 @@ def sign_function(code: bytes, masked: set, arch: str) -> str | None:
     if len(code) < L.MIN_SIZE:
         return None
     n = min(L.SIG_LEN, len(code))
-    pat = G.mask(code[:n], 0, arch)
-    if masked:
-        toks = [pat[i:i + 2] for i in range(0, len(pat), 2)]
-        for k in masked:
-            if 0 <= k < len(toks):
-                toks[k] = ".."
-        pat = "".join(toks)
+    pat = _masked_hex(code[:n], masked, arch)
     if pat.count("..") > len(pat) * L.MAX_WILDCARD:
         return None
     return pat
@@ -540,7 +717,11 @@ def sign_rlibs(paths, arch: str, deadline: float | None = None) -> tuple[list, d
                 if pat is None:
                     continue
                 stats["signed"] += 1
-                entries.append({"name": L.readable(_rust_sym(sym)), "sym": sym, "pattern": pat})
+                e = {"name": L.readable(_rust_sym(sym)), "sym": sym, "pattern": pat}
+                full = sign_full(code, masked, arch)
+                if full:
+                    e["full"] = full
+                entries.append(e)
     return entries, stats
 
 
@@ -549,14 +730,20 @@ def prune(entries: list) -> list:
     ambiguity rule recover_libfuncs.generate applies."""
     seen, uniq = set(), []
     for e in entries:
-        k = (e["name"], e["pattern"])
+        k = (e["name"], e["pattern"], e.get("full"))
         if k not in seen:
             seen.add(k)
             uniq.append(e)
     names: dict[str, set] = {}
+    fulls: dict[str, set] = {}
     for e in uniq:
         names.setdefault(e["pattern"], set()).add(e["name"])
-    return [e for e in uniq if len(names[e["pattern"]]) == 1]
+        if e.get("full"):
+            fulls.setdefault(e["full"], set()).add(e["name"])
+    # a prefix shared by several names survives only on entries whose whole-function pattern
+    # names exactly one function (recover_libfuncs then requires that full match)
+    return [e for e in uniq if len(names[e["pattern"]]) == 1
+            or (e.get("full") and len(fulls[e["full"]]) == 1)]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -788,15 +975,30 @@ def render_manifest(crates, profile: str, version: str | None) -> str:
             pass
     lines += ["", "[lib]", 'path = "src/lib.rs"', "", "[[bin]]", 'name = "rd_sigdb_exerciser"',
               'path = "src/main.rs"', "", "[dependencies]"]
-    for i, (name, ver) in enumerate(crates):
+    for i, c in enumerate(crates):
+        name, ver = c[0], c[1]
+        opts = c[2] if len(c) > 2 and isinstance(c[2], dict) else {}
         if not _CRATE_NAME.match(name) or not ver or not _VERSION.match(ver):
             raise ValueError("refusing crate %r @ %r" % (name, ver))
         alias = "d%d_%s" % (i, name.replace("-", "_"))
-        lines.append("%s = { package = %s, version = %s }"
-                     % (alias, _toml_str(name), _toml_str("=" + ver)))
+        extra = ""
+        if opts.get("default_features") is False:
+            extra += ", default-features = false"
+        feats = opts.get("features") or []
+        if any(not _FEATURE.match(f) for f in feats):
+            raise ValueError("refusing feature list %r" % (feats,))
+        if feats:
+            extra += ", features = [%s]" % ", ".join(_toml_str(f) for f in feats)
+        lines.append("%s = { package = %s, version = %s%s }"
+                     % (alias, _toml_str(name), _toml_str("=" + ver), extra))
     lines += ["", "[profile.release]", "debug = false", "incremental = false"]
-    if profile != "release":
-        lines += ["", "[profile.%s]" % profile] + PROFILES[profile].strip().splitlines()
+    base = profile[:-len("-objs")] if profile.endswith("-objs") else profile
+    if base != "release":
+        lines += ["", "[profile.%s]" % base] + PROFILES[base].strip().splitlines()
+    if base != profile:
+        # an LTO profile's rlibs hold only LLVM bitcode; the same profile without LTO gives the
+        # crates' machine code at that opt-level / codegen-units / panic strategy
+        lines += ["", "[profile.%s]" % profile, "inherits = %s" % _toml_str(base), "lto = false"]
     lines += ["", "[workspace]", ""]
     return "\n".join(lines)
 
@@ -909,6 +1111,10 @@ _ERR_CRATE = [
     re.compile(r"failed to download `?([A-Za-z0-9_-]+) v"),
     re.compile(r"package `([A-Za-z0-9_-]+) v[^`]*` cannot be built because it requires rustc"),
     re.compile(r"rustc [0-9.]+ is not supported by the following packages?:\s*\n?\s*([A-Za-z0-9_-]+)@"),
+    # a missing transitive package: blame the pinned crate that requires it
+    re.compile(r"required by package `([A-Za-z0-9_-]+) v"),
+    # ...and the probe's own dependency entry at the end of that chain (alias d<N>_<crate>)
+    re.compile(r"satisfies dependency `d\d+_([A-Za-z0-9_]+) = "),
 ]
 
 
@@ -930,21 +1136,162 @@ def _deps_rlibs(target_dir: Path, triple: str, profile: str) -> list[Path]:
     return sorted(p for p in d.glob("*.rlib") if not p.name.startswith("librd_sigdb_probe-"))
 
 
+def resolve_graph(proj: Path, tc: dict, triple: str, benv: dict, offline: list, budget: Budget,
+                  errors: list | None = None):
+    """`cargo metadata` of the throwaway project -- dependency RESOLUTION only (no build, no build
+    script or proc-macro runs). Returns {"normal": [(name, version)] linked into a target binary
+    (normal deps reachable from the root, proc-macros and build-only deps excluded),
+    "features": {(name, version): [feature names]}} or None."""
+    cmd = [tc["cargo"], "metadata", "--format-version", "1", "--filter-platform", triple] + offline
+    rc, out, err = run(cmd, min(600, budget.left()), benv, cwd=proj)
+    if rc != 0:
+        if errors is not None:
+            errors.append(err or "")
+        return None
+    try:
+        d = json.loads(out)
+        pk = {p["id"]: p for p in d.get("packages", [])}
+        nodes = {n["id"]: n for n in (d.get("resolve") or {}).get("nodes", [])}
+        root = (d.get("resolve") or {}).get("root")
+    except (ValueError, KeyError, TypeError):
+        return None
+    if root not in nodes:
+        return None
+
+    def proc_macro(pid):
+        return any("proc-macro" in t.get("kind", []) for t in pk.get(pid, {}).get("targets", []))
+    seen, todo, normal = {root}, [root], []
+    while todo:
+        cur = todo.pop()
+        for dep in nodes.get(cur, {}).get("deps", []):
+            kinds = [k.get("kind") for k in dep.get("dep_kinds", [])] or [None]
+            pid = dep.get("pkg")
+            if None not in kinds or pid in seen or pid not in pk or proc_macro(pid):
+                continue
+            seen.add(pid)
+            todo.append(pid)
+            p = pk[pid]
+            if _CRATE_NAME.match(p.get("name", "")) and _VERSION.match(p.get("version", "")):
+                normal.append((p["name"], p["version"]))
+    feats, local = {}, {}
+    pkgs = {}                                     # package name -> [(fmap, optional, dep->package)]
+    for p in pk.values():
+        deps = {(d.get("rename") or d.get("name")): d.get("name") for d in p.get("dependencies", [])}
+        optional = {d.get("rename") or d.get("name") for d in p.get("dependencies", [])
+                    if d.get("optional")}
+        pkgs.setdefault(p.get("name"), []).append((p.get("features") or {}, optional, deps))
+    for p in pk.values():
+        fmap = p.get("features") or {}
+        fs = sorted(f for f in fmap if _FEATURE.match(f) and not _FEATURE_SKIP.search(f))
+        key = (p.get("name"), p.get("version"))
+        feats[key] = fs
+        local[key] = [f for f in fs if not _pulls_optional_dep(p.get("name"), f, pkgs)]
+    return {"normal": sorted(set(normal)), "features": feats, "features_local": local}
+
+
+def _pulls_optional_dep(pkg: str, feat: str, pkgs: dict) -> bool:
+    """Does enabling `feat` of `pkg` activate an optional dependency anywhere (a crate that would
+    have to be fetched and built)? Follows feature references inside the package and into its
+    dependencies' features (`x/f`, `x?/f`), across every resolved version of a package name."""
+    seen, todo = set(), [(pkg, feat)]
+    while todo:
+        cur = todo.pop()
+        if cur in seen or len(seen) > 5000:
+            continue
+        seen.add(cur)
+        for fmap, optional, deps in pkgs.get(cur[0], []):
+            for item in fmap.get(cur[1], []):
+                if item.startswith("dep:") or item in optional:
+                    return True
+                if "/" in item:
+                    d, f = item.split("/", 1)
+                    weak = d.endswith("?")
+                    d = d.rstrip("?")
+                    if d in optional and not weak:
+                        return True
+                    if d in deps:
+                        todo.append((deps[d], f))
+                elif item in fmap:
+                    todo.append((cur[0], item))
+    return False
+
+
+def _resolve_with_fallback(proj, crates, tc, triple, benv, offline, budget, write_manifest, notes):
+    """resolve_graph, retrying a crate whose resolution fails (typically: one of its default
+    features needs a package the offline cache lacks) without default features, then without it.
+    Returns (graph | None, crates as resolved -- with their default-features choice)."""
+    todo = [tuple(c) for c in crates]
+    for _attempt in range(6):
+        write_manifest(todo, "release")
+        cmd_err = []
+        graph = resolve_graph(proj, tc, triple, benv, offline, budget, errors=cmd_err)
+        if graph is not None or not cmd_err:
+            return graph, todo
+        names = {_norm(n) for n in failing_crates(cmd_err[0])}
+        blamed = sorted({c[0] for c in todo if _norm(c[0]) in names})
+        if not blamed:
+            return None, todo
+        nxt = []
+        for c in todo:
+            if c[0] not in blamed:
+                nxt.append(c)
+            elif len(c) == 2:
+                nxt.append((c[0], c[1], {"default_features": False}))
+                notes.append("%s@%s resolved without default features" % (c[0], c[1]))
+            else:
+                notes.append("%s@%s dropped: does not resolve" % (c[0], c[1]))
+        todo = nxt
+    return None, todo
+
+
+FEATURE_SETS = ("default", "all", "none")
+
+
+def _fallbacks(c, base) -> list:
+    """The next, more conservative entries to try for crate `c` after a failed build: its
+    detected/resolved entry (drop the feature list), then without default features."""
+    opts = dict(c[2]) if len(c) > 2 and isinstance(c[2], dict) else {}
+    out = []
+    if opts.get("features"):
+        b = next((x for x in base if x[0] == c[0] and x[1] == c[1]), (c[0], c[1]))
+        out.append(b)
+        opts.pop("features")
+    if opts.get("default_features") is not False:
+        out.append((c[0], c[1], dict(opts, default_features=False)))
+    return out[:1] if out else []
+
+
+def _variant(crates, kind: str, feats: dict):
+    """The dependency list of one feature variant: 'default' = the crates as detected (cargo
+    resolves the rest, as in an ordinary build); 'all' = every linked crate (detected + resolved
+    transitive, pinned at the resolved versions) with all of its features; 'none' = the detected
+    crates without default features."""
+    out = []
+    for c in crates:
+        n, v = c[0], c[1]
+        opts = dict(c[2]) if len(c) > 2 and isinstance(c[2], dict) else {}
+        if kind == "none":
+            opts["default_features"] = False
+        elif kind == "all":
+            opts["features"] = feats.get((n, v), [])
+        out.append((n, v, opts) if opts else (n, v))
+    return out
+
+
 def build_and_sign(facts: dict, tc: dict, crates: list, profiles: list, env: dict, budget: Budget,
-                   exerciser: bool, log) -> dict:
-    """Build the throwaway project for each profile in a temp dir and sign it. Returns
-    {entries, crates_built, crates_skipped, sources, notes}."""
+                   exerciser: bool, log, std=None, build_crates: bool = True,
+                   feature_sets=("default",)) -> dict:
+    """Build the throwaway project for each profile x feature set in a temp dir and sign it.
+    Returns {entries, std_entries, crates_built, crates_resolved, crates_skipped, sources, notes}."""
     import recover_libfuncs as L
     triple, arch = facts["triple"], facts["target"]["arch"]
     entries, notes, sources = [], [], {}
     skipped: dict[str, str] = {}
     built_crates: list = []
+    resolved: list = []
     # 1) the toolchain's prebuilt std for the target: no build needed
-    libdir = Path(tc["sysroot"]) / "lib" / "rustlib" / triple / "lib"
-    std_rlibs = sorted(p for p in libdir.glob("*.rlib") if not _STD_SKIP.match(p.name))
-    e, st = sign_rlibs(std_rlibs, arch, budget.deadline)
-    entries += e
-    std_entries = list(e)
+    std_entries, st = std if std is not None else sign_std(tc, triple, arch, budget)
+    entries += std_entries
     sources["std_rlibs"] = st
     log("std rlibs: %d archives, %d functions, %d signed" % (st["archives"], st["functions"], st["signed"]))
     # ignore_cleanup_errors: on Windows a just-killed rustc can still hold a file for a moment
@@ -963,60 +1310,104 @@ def build_and_sign(facts: dict, tc: dict, crates: list, profiles: list, env: dic
             benv["RUSTUP_TOOLCHAIN"] = tc["name"]
         benv["RUSTC"] = tc["rustc"]
         offline = [] if env.get("CARGO_NET_OFFLINE") != "true" else ["--offline"]
+
+        def write_manifest(deps, profile):
+            (proj / "Cargo.toml").write_text(render_manifest(deps, profile, tc.get("version")))
+            if (proj / "Cargo.lock").exists():
+                (proj / "Cargo.lock").unlink()
+
+        # 2a) resolve the dependency graph (no code runs): transitive crates + feature lists
+        graph = None
+        if crates:
+            graph, crates = _resolve_with_fallback(proj, crates, tc, triple, benv, offline, budget,
+                                                   write_manifest, notes)
+            if graph is None:
+                notes.append("dependency resolution (cargo metadata) failed: transitive crates "
+                             "unknown")
+            else:
+                det = {(_norm(c[0]), c[1]) for c in crates}
+                resolved = [c for c in graph["normal"] if (_norm(c[0]), c[1]) not in det]
+                log("resolved %d transitive crate(s): %s" % (
+                    len(resolved), ", ".join("%s@%s" % c for c in resolved[:12])))
+        if crates and not build_crates:
+            notes.append("third-party crates NOT built (their build scripts / proc-macros would run "
+                         "on this host): rerun with --build-crates, ideally inside the analysis VM")
+        signed_rlibs: set = set()
         for profile in profiles:
             pdir = "release" if profile == "release" else profile
-            todo = list(crates)
-            built_ok = not todo
-            # 2) the crates, as rlibs (no linking -> works for any installed target)
-            for attempt in range(8):
-                (proj / "Cargo.toml").write_text(render_manifest(todo, profile, tc.get("version")))
-                lock = proj / "Cargo.lock"
-                if lock.exists():
-                    lock.unlink()
-                if not todo:
-                    break
-                cmd = [tc["cargo"], "build", "--lib", "--target", triple, "--profile", profile] + offline
-                if profile == "release":
-                    cmd[cmd.index("--profile"):cmd.index("--profile") + 2] = ["--release"]
-                log("[%s] cargo build of %d crate(s), attempt %d" % (profile, len(todo), attempt + 1))
-                rc, _out, err = run(cmd, budget.left(), benv, cwd=proj)
-                if rc == 0:
-                    built_ok = True
-                    break
-                if rc is None:
-                    notes.append("[%s] crate build timed out; signing what was built" % profile)
-                    break
-                blamed = [n for n in failing_crates(err) if any(n == c for c, _v in todo)]
-                if not blamed:
-                    tail = " | ".join(err.strip().splitlines()[-3:])[-400:]
-                    notes.append("[%s] crate build failed (unattributed): %s" % (profile, tail))
-                    for c, v in todo:
-                        skipped.setdefault("%s@%s" % (c, v), "build failed (unattributed)")
-                    todo = []
-                    break
-                for n in blamed:
-                    why = ("not in the local cargo cache (--allow-download fetches it)"
-                           if offline and "no matching package" in err else "build failed")
-                    for c, v in todo:
-                        if c == n:
-                            skipped.setdefault("%s@%s" % (c, v), why)
-                todo = [(c, v) for c, v in todo if c not in blamed]
-            # sign whatever compiled, but only claim the crates of a build that succeeded
-            rlibs = _deps_rlibs(tdir, triple, pdir) if crates else []
-            if not built_ok:
-                for c, v in todo:
-                    skipped.setdefault("%s@%s" % (c, v), "[%s] build did not finish" % profile)
-                todo = []
-            for c, v in todo:
-                if (c, v) not in built_crates:
-                    built_crates.append((c, v))
-            e, st = sign_rlibs(rlibs, arch, budget.deadline)
-            entries += e
-            sources["crate_rlibs_" + profile] = st
-            if rlibs and not st["signed"] and "lto" in PROFILES[profile]:
-                notes.append("[%s] the crate rlibs of an LTO profile are LLVM bitcode (no machine "
-                             "code to sign): only the linked exerciser contributes for it" % profile)
-            log("[%s] crate rlibs: %d archives, %d signed" % (profile, st["archives"], st["signed"]))
+            cprof = profile + "-objs" if "lto" in PROFILES[profile] else profile
+            for fs in (feature_sets if (crates and build_crates) else ()):
+                base = crates if fs != "all" else (list(crates) + resolved)
+                # offline, "all" means every feature that needs no further crate (an optional
+                # dependency would have to be fetched); with --allow-download, really all
+                fkey = "features_local" if offline else "features"
+                todo = _variant(base, fs, (graph or {}).get(fkey, {}))
+                built_ok = False
+                attempts = 2 * len(todo) + 4
+                # 2b) the crates, as rlibs (no linking -> works for any installed target)
+                for attempt in range(attempts):
+                    write_manifest(todo, cprof)
+                    if not todo:
+                        break
+                    cmd = [tc["cargo"], "build", "--lib", "--target", triple] + offline
+                    cmd += ["--release"] if cprof == "release" else ["--profile", cprof]
+                    log("[%s/%s] cargo build of %d crate(s), attempt %d"
+                        % (profile, fs, len(todo), attempt + 1))
+                    rc, _out, err = run(cmd, budget.left(), benv, cwd=proj)
+                    if rc == 0:
+                        built_ok = True
+                        break
+                    if rc is None:
+                        notes.append("[%s/%s] crate build timed out; signing what was built"
+                                     % (profile, fs))
+                        break
+                    names = {_norm(n) for n in failing_crates(err)}
+                    blamed = sorted({c[0] for c in todo if _norm(c[0]) in names})
+                    if not blamed:
+                        tail = " | ".join(err.strip().splitlines()[:2])[:400]
+                        notes.append("[%s/%s] crate build failed (unattributed): %s" % (profile, fs, tail))
+                        break
+                    # a blamed crate falls back along its ladder (all features -> its default
+                    # entry -> no default features: a default feature may need a package the
+                    # offline cache lacks, and binaries often use a crate with fewer features)
+                    nxt, dropped = [], []
+                    for c in todo:
+                        if c[0] not in blamed:
+                            nxt.append(c)
+                            continue
+                        ladder = _fallbacks(c, base)
+                        if ladder:
+                            nxt.append(ladder[0])
+                        else:
+                            dropped.append(c[0])
+                    if not dropped:
+                        todo = nxt
+                        continue
+                    for n in dropped:
+                        why = ("not in the local cargo cache (--allow-download fetches it)"
+                               if offline and "no matching package" in err else "build failed")
+                        for c in todo:
+                            if c[0] == n and fs == "default":
+                                skipped.setdefault("%s@%s" % (c[0], c[1]), why)
+                    todo = [c for c in nxt if c[0] not in dropped]
+                else:
+                    if todo and not built_ok:
+                        notes.append("[%s/%s] crate build still failing after %d attempts"
+                                     % (profile, fs, attempts))
+                # sign whatever compiled and is new; claim only crates of a build that finished
+                rlibs = [r for r in _deps_rlibs(tdir, triple, cprof) if r not in signed_rlibs]
+                signed_rlibs.update(rlibs)
+                if built_ok and fs == "default":
+                    for c in todo:
+                        if (c[0], c[1]) not in built_crates:
+                            built_crates.append((c[0], c[1]))
+                elif not built_ok and fs == "default":
+                    for c in todo:
+                        skipped.setdefault("%s@%s" % (c[0], c[1]), "[%s] build did not finish" % profile)
+                e, st = sign_rlibs(rlibs, arch, budget.deadline)
+                entries += e
+                sources["crate_rlibs_%s_%s" % (profile, fs)] = dict(st, ok=built_ok)
+                log("[%s/%s] crate rlibs: %d new archives, %d signed" % (profile, fs, st["archives"], st["signed"]))
             # 3) the linked std exerciser through recover_libfuncs.generate (the --gen path)
             if not exerciser:
                 continue
@@ -1024,9 +1415,7 @@ def build_and_sign(facts: dict, tc: dict, crates: list, profiles: list, env: dic
             if flags is None:
                 notes.append("[%s] std exerciser not linked: %s (rlib signatures only)" % (profile, how))
                 continue
-            (proj / "Cargo.toml").write_text(render_manifest([], profile, tc.get("version")))
-            if (proj / "Cargo.lock").exists():
-                (proj / "Cargo.lock").unlink()
+            write_manifest([], profile)
             cmd = [tc["cargo"], "rustc", "--bin", "rd_sigdb_exerciser", "--target", triple] + offline
             cmd += ["--release"] if profile == "release" else ["--profile", profile]
             cmd += ["--"] + flags
@@ -1046,32 +1435,50 @@ def build_and_sign(facts: dict, tc: dict, crates: list, profiles: list, env: dic
             sources["exerciser_" + profile] = {"signed": n, "linker": how}
             log("[%s] linked std exerciser: %d signatures" % (profile, n))
     return {"entries": entries, "std_entries": std_entries, "crates_built": built_crates,
-            "crates_skipped": skipped, "sources": sources, "notes": notes}
+            "crates_resolved": resolved, "crates_skipped": skipped, "sources": sources,
+            "notes": notes}
 
 
-LTO_HINT_RATE = 0.08    # measured (VALIDATION): exact-toolchain std rlib signatures name 15% of the
-#                         function starts of a release build, 5% of the same program built fat-LTO
+def sign_std(tc: dict, triple: str, arch: str, budget: Budget):
+    """Signatures of the toolchain's prebuilt std rlibs for `triple` (no build)."""
+    libdir = Path(tc["sysroot"]) / "lib" / "rustlib" / triple / "lib"
+    std_rlibs = sorted(p for p in libdir.glob("*.rlib") if not _STD_SKIP.match(p.name))
+    return sign_rlibs(std_rlibs, arch, budget.deadline)
 
 
-def std_hit_rate(path: Path, std_entries: list, arch: str) -> float | None:
-    """Fraction of the binary's function starts the toolchain's own std rlib signatures name.
-    Low with an exact toolchain = std was re-optimised (fat LTO / another opt-level)."""
-    import lief
-    import gen_runtime_sigs as G
+# std functions every std-linking program carries (runtime start, panic/fmt machinery, backtrace
+# printing), as identifiers that appear verbatim in both legacy and v0 mangled names. Linked from
+# the prebuilt std (release, no LTO) they match its signatures byte for byte; re-optimised by fat
+# LTO they mostly do not. The fraction found is a per-program-size-independent LTO signal (the
+# share of ALL functions std explains is not: it depends on how big the program's own code is).
+STD_ANCHORS = ("lang_start_internal", "rust_panic_with_hook", "pad_integral", "rust_begin_unwind",
+               "begin_panic_handler", "is_printable", "try_demangle", "default_hook",
+               "output_filename", "payload_as_str", "panic_count", "9Formatter3pad",
+               "slice_error_fail", "panic_bounds_check", "unwrap_failed", "finish_grow", "_print",
+               "write_fmt", "print_to")
+# calibrated (VALIDATION): 4 programs x {release, size-lto, speed-lto} with rustc 1.85 and 3 with
+# rustc 1.97, x86-64: release builds 0.84-1.00 of the anchors present (n=7), fat-LTO builds
+# 0.26-0.41 (n=14). The band between the thresholds builds all three profiles.
+AUTO_RELEASE_MIN = 0.70  # --profile auto: anchor rate >= this -> release only
+AUTO_LTO_MAX = 0.50      #                 rate <= this -> size-lto + speed-lto; between -> all three
+LTO_HINT_RATE = AUTO_LTO_MAX
+
+
+def std_anchor_rate(path: Path, std_entries: list, arch: str, matches=None) -> float | None:
+    """Fraction of the STD_ANCHORS (those the toolchain's std signs) whose prebuilt code the binary
+    carries byte for byte. None when fewer than 5 anchors are signed (unknown std layout)."""
     import recover_libfuncs as L
+    pr = prune(std_entries)
+    have = [t for t in STD_ANCHORS if any(t in e["sym"] for e in pr)]
+    if len(have) < 5:
+        return None
     try:
-        b = lief.parse(str(path))
-        text = next((s for s in b.sections if s.name in (".text", "__text")), None)
-        if text is None:
-            return None
-        lo, hi = text.virtual_address, text.virtual_address + len(bytes(text.content))
-        n = sum(1 for a in G.function_starts(b) if lo <= a < hi)
-        if not n:
-            return None
-        hits = L.match_binary(Path(path), {"t": {arch: prune(std_entries)}}, tool="t")
-        return round(len(hits) / n, 4)
+        if matches is None:
+            matches = L.match_binary(Path(path), {"t": {arch: pr}}, tool="t")
     except Exception:
         return None
+    syms = [m["sym"] for m in matches]
+    return round(sum(1 for t in have if any(t in x for x in syms)) / len(have), 3)
 
 
 def _tool_key(tc: dict) -> str:
@@ -1100,17 +1507,33 @@ def write_db(path: Path, db: dict):
     os.replace(tmp, path)                     # atomic: a reader never sees a half-written DB
 
 
-def generate_for_binary(path: Path, *, allow_download=False, toolchain=None, profiles=("release",),
+def choose_profiles(rate: float | None) -> list[str]:
+    """Profiles to build from the std anchor rate (exact toolchain only): release when std is
+    clearly linked as prebuilt, the two fat-LTO profiles when clearly not, all three when
+    ambiguous. Unknown (no exact toolchain) -> release."""
+    if rate is None:
+        return ["release"]
+    if rate >= AUTO_RELEASE_MIN:
+        return ["release"]
+    if rate <= AUTO_LTO_MAX:
+        return ["size-lto", "speed-lto"]
+    return ["release", "size-lto", "speed-lto"]
+
+
+def generate_for_binary(path: Path, *, allow_download=False, toolchain=None, profiles=("auto",),
                         max_crates=DEFAULT_MAX_CRATES, timeout=DEFAULT_TIMEOUT, crates_override=None,
                         std_only=False, exerciser=True, dry_run=False, force=False, out=None,
+                        build_crates=False, feature_sets=("default",),
                         log=lambda m: None) -> dict:
     """The whole pipeline for one binary. Returns a report dict (status: ok / cached / dry-run /
-    missing / error)."""
+    missing / error). Third-party crates are compiled only with build_crates=True (their build
+    scripts and proc-macros run on this host); otherwise std + the exerciser only."""
     budget = Budget(timeout)
+    profiles = list(profiles)
     facts = binary_facts(Path(path))
     key, dest = facts["key"], Path(out) if out else cache_path(facts["key"])
     report = {"file": str(path), "key": key, "db": str(dest), "facts": {
-        k: facts[k] for k in ("rustc_commit", "rust_version", "triple", "is_rust")},
+        k: facts.get(k) for k in ("rustc_commit", "rust_version", "rustc_source", "triple", "is_rust")},
         "target": facts["target"], "crates_detected": ["%s@%s" % (n, v or "?") for n, v in facts["crates"]]}
     if not facts["triple"]:
         report.update(status="error", error="unsupported target (format/arch) for a Rust triple")
@@ -1125,15 +1548,18 @@ def generate_for_binary(path: Path, *, allow_download=False, toolchain=None, pro
         skipped.update({"%s@%s" % (n, v): "over --max-crates %d" % max_crates for n, v in crates[max_crates:]})
         crates = crates[:max_crates]
     report["plan"] = {"crates": ["%s@%s" % c for c in crates], "skipped": skipped,
-                      "profiles": list(profiles), "allow_download": allow_download}
+                      "profiles": profiles, "feature_sets": list(feature_sets),
+                      "build_crates": build_crates, "allow_download": allow_download}
     existing = load_cached(dest)
     if existing and not force:
-        have = set((existing.get("__meta__") or {}).get("built", {}).get("profiles", []))
-        if set(profiles) <= have:
+        ob = (existing.get("__meta__") or {}).get("built", {})
+        have = set(ob.get("profiles", [])) | set(ob.get("requested", []))
+        if set(profiles) <= have and (ob.get("build_crates") or not build_crates or not crates):
             report.update(status="cached", meta=existing.get("__meta__"))
             return report
     if dry_run:
-        report["plan"]["manifest"] = render_manifest(crates, list(profiles)[0], facts.get("rust_version"))
+        report["plan"]["manifest"] = render_manifest(crates, profiles[0] if profiles[0] in PROFILES
+                                                     else "release", facts.get("rust_version"))
         report["status"] = "dry-run"
         return report
     env = _base_env(allow_download)
@@ -1144,8 +1570,18 @@ def generate_for_binary(path: Path, *, allow_download=False, toolchain=None, pro
     quality = match_quality(facts.get("rustc_commit"), facts.get("rust_version"), tc["commit"], tc["version"])
     log("toolchain %s (rustc %s, %s) -> match: %s" % (tc.get("name") or "PATH", tc["version"],
                                                        (tc["commit"] or "?")[:12], quality))
-    res = build_and_sign(facts, tc, crates, list(profiles), env, budget, exerciser, log)
     arch = facts["target"]["arch"]
+    std = sign_std(tc, facts["triple"], arch, budget)
+    rate = std_anchor_rate(Path(path), std[0], arch) if quality == "exact" else None
+    requested = list(profiles)
+    if "auto" in profiles:
+        profiles = choose_profiles(rate)
+        log("std anchor rate %s -> profiles %s" % (rate, ",".join(profiles)))
+    if build_crates and crates:
+        log("WARNING: building %d third-party crate(s) runs their build scripts and proc-macros on "
+            "this host" % len(crates))
+    res = build_and_sign(facts, tc, crates, profiles, env, budget, exerciser, log, std=std,
+                         build_crates=build_crates, feature_sets=feature_sets)
     tool = _tool_key(tc)
     meta = {"format": SIGDB_FORMAT, "key": key,
             "binary": {"rustc_commit": facts.get("rustc_commit"),
@@ -1153,25 +1589,27 @@ def generate_for_binary(path: Path, *, allow_download=False, toolchain=None, pro
                        "crates": report["crates_detected"]},
             "built": {"toolchain": tc.get("name"), "rustc_commit": tc["commit"],
                       "rust_version": tc["version"], "llvm": tc.get("llvm"), "triple": facts["triple"],
-                      "arch": arch, "tool_key": tool, "profiles": list(profiles),
+                      "arch": arch, "tool_key": tool, "profiles": profiles, "requested": requested,
+                      "feature_sets": list(feature_sets) if build_crates else [],
+                      "build_crates": bool(build_crates and crates),
                       "crates": ["%s@%s" % c for c in res["crates_built"]],
+                      "crates_resolved": ["%s@%s" % c for c in res["crates_resolved"]],
                       "crates_skipped": dict(skipped, **res["crates_skipped"]),
                       "sources": res["sources"]},
-            "toolchain_match": quality, "notes": res["notes"],
+            "toolchain_match": quality, "notes": res["notes"], "std_anchor_rate": rate,
             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    rate = std_hit_rate(Path(path), res["std_entries"], arch) if quality == "exact" else None
-    meta["std_hit_rate"] = rate
-    if rate is not None and rate < LTO_HINT_RATE and not any("lto" in PROFILES[p] for p in profiles):
-        meta["notes"].append("only %.1f%% of the binary's functions match its own toolchain's std: it "
-                             "looks LTO-built or built at another opt-level -- rerun with --profile "
-                             "size-lto / speed-lto (merged into the same cached DB)" % (100 * rate))
+    if rate is not None and rate <= LTO_HINT_RATE and not any("lto" in PROFILES[p] for p in profiles):
+        meta["notes"].append("only %.0f%% of the always-linked std functions match the toolchain's "
+                             "prebuilt std: the binary looks fat-LTO-built -- rerun with --profile "
+                             "auto / size-lto / speed-lto (merged into the same cached DB)" % (100 * rate))
     entries = res["entries"]
     if existing and not force and (existing.get("__meta__") or {}).get("built", {}).get("tool_key") == tool:
         old = (existing.get(tool) or {}).get(arch, [])
         entries = old + entries
         oldb = existing["__meta__"]["built"]
-        meta["built"]["profiles"] = sorted(set(oldb.get("profiles", [])) | set(profiles))
-        meta["built"]["crates"] = sorted(set(oldb.get("crates", [])) | set(meta["built"]["crates"]))
+        for k in ("profiles", "requested", "crates", "crates_resolved", "feature_sets"):
+            meta["built"][k] = sorted(set(oldb.get(k, [])) | set(meta["built"][k]))
+        meta["built"]["build_crates"] = bool(oldb.get("build_crates")) or meta["built"]["build_crates"]
         meta["built"]["sources"] = dict(oldb.get("sources", {}), **res["sources"])
     entries = prune(entries)
     meta["signatures"] = len(entries)
@@ -1212,6 +1650,8 @@ def _selftest():
     cl = crate_list(meta)
     assert cl[0] == ("regex", "1.11.1"), cl
     assert ("tokio", None) in cl and ("bad", None) in cl and not any("evil" in n for n, _ in cl), cl
+    objs = render_manifest([], "speed-lto-objs", None)
+    assert '[profile.speed-lto]' in objs and '[profile.speed-lto-objs]\ninherits = "speed-lto"\nlto = false' in objs
     man = render_manifest([("serde_json", "1.0.140"), ("serde_json", "1.0.100")], "size-lto", "1.85.0")
     assert 'd0_serde_json = { package = "serde_json", version = "=1.0.140" }' in man, man
     assert "d1_serde_json" in man and "[profile.size-lto]" in man and 'rust-version = "1.85.0"' in man
@@ -1260,6 +1700,13 @@ def _selftest():
     es = [{"name": "a", "sym": "A", "pattern": "11"}, {"name": "a", "sym": "A2", "pattern": "11"},
           {"name": "b", "sym": "B", "pattern": "22"}, {"name": "c", "sym": "C", "pattern": "22"}]
     assert prune(es) == [es[0]], prune(es)
+    # ...unless whole-function patterns tell the two names apart
+    fe = [{"name": "b", "sym": "B", "pattern": "22", "full": "22aa"},
+          {"name": "c", "sym": "C", "pattern": "22", "full": "22bb"},
+          {"name": "d", "sym": "D", "pattern": "22", "full": "22bb"}]
+    assert prune(fe) == [fe[0]], prune(fe)
+    long_code = bytes(range(0x40, 0x40 + 60))
+    assert sign_full(long_code, {50}, "x86_64")[100:102] == ".." and sign_full(long_code[:40], set(), "x86_64") is None
     # build-error attribution
     err = ("error: no matching package named `foo-bar` found\n"
            "error: failed to run custom build command for `ring v0.17.8`\n"
@@ -1294,7 +1741,16 @@ def main(argv=None):
     ap.add_argument("--allow-download", action="store_true",
                     help="allow rustup to install the toolchain/target and cargo to use the network")
     ap.add_argument("--toolchain", help="build with this rustup toolchain instead of the binary's own")
-    ap.add_argument("--profile", default="release", choices=sorted(PROFILES) + ["all"])
+    ap.add_argument("--profile", default="auto", choices=["auto"] + sorted(PROFILES) + ["all"],
+                    help="auto (default): pick from how much of the binary its toolchain's prebuilt "
+                         "std names (release / fat-LTO / both)")
+    ap.add_argument("--build-crates", action="store_true",
+                    help="compile the detected third-party crates (RUNS their build scripts and "
+                         "proc-macros on this host -- do it inside the analysis VM). Without it: "
+                         "std rlibs + the std exerciser only")
+    ap.add_argument("--features", default="default",
+                    help="feature sets built per crate and merged: default,all,none (default: "
+                         "default; all/none added under 0.2 points of recall in VALIDATION)")
     ap.add_argument("--max-crates", type=int, default=DEFAULT_MAX_CRATES)
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="total seconds")
     ap.add_argument("--crates", help="override the crate list: name@ver,name@ver")
@@ -1333,13 +1789,18 @@ def main(argv=None):
                 return 2
             crates_override.append((name, ver or None))
     profiles = sorted(PROFILES) if a.profile == "all" else [a.profile]
+    feature_sets = [f.strip() for f in a.features.split(",") if f.strip()]
+    if not feature_sets or any(f not in FEATURE_SETS for f in feature_sets):
+        print("--features: choose from %s" % ",".join(FEATURE_SETS), file=sys.stderr)
+        return 2
     log = (lambda m: print("  " + m, file=sys.stderr)) if not a.json else (lambda m: None)
     try:
         rep = generate_for_binary(path, allow_download=a.allow_download, toolchain=a.toolchain,
                                   profiles=profiles, max_crates=a.max_crates, timeout=a.timeout,
                                   crates_override=crates_override, std_only=a.std_only,
                                   exerciser=not a.no_exerciser, dry_run=a.dry_run, force=a.force,
-                                  out=a.out, log=log)
+                                  out=a.out, build_crates=a.build_crates,
+                                  feature_sets=feature_sets, log=log)
     except Exception as e:                       # report, don't traceback, on a hostile file
         rep = {"file": str(path), "status": "error", "error": "%s: %s" % (type(e).__name__, e)}
     if a.json:
@@ -1368,6 +1829,8 @@ def main(argv=None):
                      b.get("triple"), ",".join(b.get("profiles", [])), m.get("toolchain_match")))
             print("  %d signatures; crates built: %s" % (m.get("signatures", 0),
                                                          ", ".join(b.get("crates", [])) or "none"))
+            if b.get("crates_resolved"):
+                print("  transitive (resolved): %s" % ", ".join(b["crates_resolved"]))
             for c, why in (b.get("crates_skipped") or {}).items():
                 print("  skipped %s: %s" % (c, why))
             for n in m.get("notes", []):

@@ -114,12 +114,14 @@ def test_per_binary_db_end_to_end(tmp_path, monkeypatch):
     shutil.copy(exe, stripped)
     subprocess.run([strip, str(stripped)], check=True, timeout=120)
     monkeypatch.setenv("RUST_DEOBF_CACHE", str(tmp_path / "cache"))
-    rep = S.generate_for_binary(stripped, timeout=1200)     # installed toolchains only, offline
+    # installed toolchains only, offline; crates compiled (opt-in) -- only crates from the local cache
+    rep = S.generate_for_binary(stripped, timeout=1200, profiles=("release",), build_crates=True,
+                                feature_sets=("default",))
     if rep["status"] == "missing":
         pytest.skip("toolchain/target for the host build not resolvable: %s" % rep["missing"])
     assert rep["status"] == "ok", rep
     assert rep["meta"]["toolchain_match"] == "exact"
-    assert S.generate_for_binary(stripped)["status"] == "cached"
+    assert S.generate_for_binary(stripped, profiles=("release",), build_crates=True)["status"] == "cached"
     r = L.recover(stripped, db="auto")
     assert r["db"]["source"] == "auto" and r["db"]["toolchain_match"] == "exact", r["db"]
     truth = _truth(nostrip)

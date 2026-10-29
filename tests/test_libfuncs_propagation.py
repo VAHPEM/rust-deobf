@@ -76,3 +76,21 @@ def test_arm64_plt_call_and_guarded_branch_not_propagated():
     assert prop[0x10a0]["name"] == "thunk.std::foo"
     assert prop[0x1090]["via"] == "drop-glue"
     assert not ({0x1060, 0x1070, 0x1080} & set(prop)), {hex(k): v for k, v in prop.items()}
+
+
+def test_v0_label_keeps_the_function_name():
+    """v0 appends the instantiating crate only to generic instances; the label used to drop the
+    last path segment of EVERY v0 symbol (79% of the v0 labels of a rustc 1.97 build), naming
+    `core::option::unwrap_failed` as `core::option`."""
+    assert LF._v0_path("_RNvNtCsk_4core6option13unwrap_failed") == "core::option::unwrap_failed"
+    assert LF._v0_path("_RNvNtNtCsk_3std2rt19lang_start_internal") == "std::rt::lang_start_internal"
+    # short non-generic symbols (reported by the idioms work): the final segment survives
+    assert LF._v0_path("_RNvNtCs1a2b3c_4core9panicking18panic_bounds_check") == \
+        "core::panicking::panic_bounds_check"
+    assert LF._v0_path("_RNvCs1a2b3c_4core9panic_fmt") == "core::panic_fmt"
+    # a generic instance: its trailing instantiating crate IS dropped
+    assert LF._v0_path("_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner11finish_grow"
+                       "Cs8FMd1QCh2cR_12goldberg_cff") == "alloc::raw_vec::RawVecInner::finish_grow"
+    # labels of DB entries are re-derived from their symbol (old DBs carry truncated names)
+    assert LF._label({"name": "core::option", "sym": "_RNvNtCsk_4core6option13unwrap_failed"}) == \
+        "core::option::unwrap_failed"

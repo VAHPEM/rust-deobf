@@ -73,6 +73,8 @@ def _v0_path(sym: str):
         return None
     s = sym[2:]
     i, n, toks, guard = 0, len(s), [], 0
+    crate_next = False                                 # the next identifier is a crate root (C)
+    crates = []                                        # per token: was it a crate root?
     while i < n and guard < 8000:
         guard += 1
         c = s[i]
@@ -81,6 +83,7 @@ def _v0_path(sym: str):
             while i < n and s[i] != "_":
                 i += 1
             i += 1
+            crate_next = False
             continue
         if c == "s":                                   # disambiguator s<base62>_ : skip
             j = i + 1
@@ -89,6 +92,10 @@ def _v0_path(sym: str):
             if j < n and s[j] == "_":
                 i = j + 1
                 continue
+        if c == "C":                                   # crate root -- unless `NC` (closure namespace)
+            crate_next = not (i > 0 and s[i - 1] == "N")
+            i += 1
+            continue
         if c == "u" and i + 1 < n and s[i + 1].isdigit():
             i += 1                                     # unicode-ident prefix
             c = s[i]
@@ -104,10 +111,16 @@ def _v0_path(sym: str):
             i += ln
             if name and _IDENT.match(name):
                 toks.append(name)
+                crates.append(crate_next)
+            crate_next = False
             continue
+        crate_next = False
         i += 1
-    if len(toks) >= 2:
-        toks = toks[:-1]                               # drop the instantiating crate v0 appends
+    # v0 appends the instantiating crate (a crate root) to generic instances only: drop the last
+    # token when it is a crate root -- not unconditionally, which cut the function name off every
+    # non-generic symbol ("core::option::unwrap_failed" -> "core::option")
+    if len(toks) >= 2 and crates[-1]:
+        toks = toks[:-1]
     return "::".join(toks) if toks else None
 
 
@@ -314,6 +327,15 @@ def _index(sigs):
     return idx
 
 
+def _label(e: dict) -> str:
+    """The entry's label, re-derived from its mangled symbol when it has one: DBs written before
+    the v0 fix carry names with the final path segment cut off."""
+    sym = e.get("sym")
+    if isinstance(sym, str) and sym.lstrip("_")[:1] in ("R", "Z"):
+        return readable(_macho_sym(sym))
+    return e["name"]
+
+
 _X86_PAD = {0x00, 0x90, 0xCC}
 _A64_PAD = {0x00000000, 0xD503201F}               # zero fill, nop
 
@@ -368,6 +390,7 @@ def match_binary(path: Path, db=None, tool: str | None = None):
                 groups.append(byarch[arch])
     sigs = [e for g in groups for e in g]
     idx = _index(sigs)
+    labels: dict[int, str] = {}
     # 1) which function start(s) each signature matches
     hits_by_sig = {}                              # pattern -> list[(start, name, sym)]
     matched_at = {}                               # start -> list[(pattern, name, sym)]
@@ -386,8 +409,11 @@ def match_binary(path: Path, db=None, tool: str | None = None):
                 if x is None:
                     x = ints[n] = int.from_bytes(chunk[:n], "little")
                 if x & m == v:
-                    hits_by_sig.setdefault(e["pattern"], []).append((a, e["name"], e["sym"]))
-                    matched_at.setdefault(a, []).append((e["pattern"], e["name"], e["sym"]))
+                    lbl = labels.get(id(e))
+                    if lbl is None:
+                        lbl = labels[id(e)] = _label(e)
+                    hits_by_sig.setdefault(e["pattern"], []).append((a, lbl, e["sym"]))
+                    matched_at.setdefault(a, []).append((e["pattern"], lbl, e["sym"], e))
     # 2) a signature that matches more than one start is too loose to tell those functions
     #    apart (e.g. LowerHex vs UpperHex sharing a masked prologue) -> discard that pattern.
     loose = {pat for pat, hs in hits_by_sig.items() if len({a for a, _n, _s in hs}) > 1}
@@ -408,13 +434,45 @@ def match_binary(path: Path, db=None, tool: str | None = None):
                 copies.add((pat, a))
     # 3) assign a start from its tight signatures when they agree on one name
     out = []
+    fullc: dict[str, tuple] = {}
     for a in sorted(matched_at):
-        tight = [(n, s) for pat, n, s in matched_at[a] if pat not in loose or (pat, a) in copies]
+        tight = [(n, s) for pat, n, s, _e in matched_at[a] if pat not in loose or (pat, a) in copies]
         names = {n: s for n, s in tight}
+        if len(names) != 1:
+            # 4) the prefix alone is ambiguous (several starts, or several names): a candidate
+            #    whose WHOLE-function pattern (gen_sigdb DBs) matches and ends here still names it
+            names = {}
+            for _pat, n, s, e in matched_at[a]:
+                full = e.get("full")
+                if isinstance(full, str) and _full_match(code, base, a, full, nxt.get(a, a), arch, fullc):
+                    names[n] = s
         if len(names) == 1:
             (name, sym), = names.items()
             out.append({"va": a, "name": name, "sym": sym})
     return out
+
+
+def _full_match(code: bytes, base: int, a: int, full: str, next_start: int, arch: str,
+                cache: dict) -> bool:
+    """The whole masked function `full` matches at `a` and the function ends there (only
+    alignment padding up to the next start)."""
+    mv = cache.get(full)
+    if mv is None:
+        n = len(full) // 2
+        mb, vb = bytearray(n), bytearray(n)
+        try:
+            for i in range(n):
+                p = full[2 * i:2 * i + 2]
+                if p != "..":
+                    mb[i], vb[i] = 0xFF, int(p, 16)
+        except ValueError:
+            n = 0
+        mv = cache[full] = (n, int.from_bytes(mb, "little"), int.from_bytes(vb, "little"))
+    n, m, v = mv
+    chunk = code[a - base:a - base + n]
+    if not n or len(chunk) != n or int.from_bytes(chunk, "little") & m != v:
+        return False
+    return _ends_with_padding(code, base, a + n, next_start, arch)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -698,6 +756,13 @@ def _selftest():
         "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs8FMd1QCh2cR_12goldberg_cff"
     ) == "alloc::raw_vec::RawVecInner::finish_grow", _v0_path(
         "_RNvMs4_NtCs40k4W9msRzi_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs8FMd1QCh2cR_12goldberg_cff")
+    # a non-generic v0 symbol has NO instantiating crate: keep its last segment
+    assert _v0_path("_RNvNtCsk_4core6option13unwrap_failed") == "core::option::unwrap_failed"
+    assert _v0_path("_RNCINvNtCsgczF5crJ4sT_3std2rt10lang_startuE0Cs8FMd1QCh2cR_12goldberg_cff") \
+        == "std::rt::lang_start"                       # closure (NC) of a generic: crate dropped
+    assert _label({"name": "core::option", "sym": "_RNvNtCsk_4core6option13unwrap_failed"}) \
+        == "core::option::unwrap_failed"
+    assert _label({"name": "memcpy", "sym": "memcpy"}) == "memcpy"
     # library classification
     assert _is_library_symbol(
         "_RNvNtCs40k4W9msRzi_5alloc5alloc8box_free", "goldberg_cff", set())
@@ -778,6 +843,12 @@ def _selftest():
     assert not _ends_with_padding(b"\xc3\x48\x89\xc7" + b"\x90" * 12, 0x1000, 0x1001, 0x1010, "x86_64")
     assert not _ends_with_padding(b"\x00" * 64, 0x1000, 0x1001, 0x1030, "x86_64")    # gap >= 16
     assert _ends_with_padding(b"\x1f\x20\x03\xd5" * 2, 0x1000, 0x1000, 0x1008, "aarch64")
+    fc = {}
+    body = bytes(range(1, 61))                       # a 60-byte function, then int3 padding
+    region = body + b"\xcc" * 4
+    assert _full_match(region, 0x1000, 0x1000, body.hex(), 0x1000 + 64, "x86_64", fc)
+    assert not _full_match(region, 0x1000, 0x1000, body.hex(), 0x1000 + 80, "x86_64", fc)  # longer fn
+    assert not _full_match(region, 0x1000, 0x1000, (body[:59] + b"\x00").hex(), 0x1040, "x86_64", fc)
     print("selftest OK: v0 paths, base62, library classification, call-graph propagation "
           "(2 thunks + 2 drop-glue to a fixed point; PLT calls / guarded jumps not propagated), "
           "indexed matcher == byte matcher, DB metadata, padding-terminated copies")
