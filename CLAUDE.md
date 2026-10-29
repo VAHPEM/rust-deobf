@@ -239,6 +239,11 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   (the deterministic instruction budget; ~15 ns/insn), the 64-run emulator refresh (~5%), and
   unpack_emulate's per-BYTE write bitmaps (page-protection tracking would lose the byte-level
   `self_patches`/region carving semantics).
+- **Cache LIEF reads in per-event paths** (`img.binary.sections` / `bytes(s.content)` cost
+  10-30 us each): devirt_emulate `_rodata` and lift_vm `_read_va` now read sections once per image.
+- **Bound every table walk by what the data can be**: lift_vm took a non-VM `cmp idx, 0xc000008b`
+  as a 3.2-billion-entry opcode table (recover_all on rustcloak_vm_pe.exe never finished); an
+  explicit range check is now capped at the byte range (the 160-entry walk is unchanged).
 - **Unicorn 2.1 PC writes from a hook:** only a single `uc_reg_write` of the PC makes Unicorn leave the
   current block; `uc_reg_write_batch` including the PC does not (runs silently diverge). Batch the
   other registers, write the PC alone, last.

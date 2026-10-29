@@ -284,3 +284,18 @@ def test_pe_detection_and_emulation_devirt():
     assert "0x100000001b3" in pc                          # FNV prime (h *= prime)
     assert "0x80000000d9800000" in pc                     # (prime << 23): the rotate's high half
     assert "255" in pc or "0xff" in pc                    # the + (v & 0xff) tail
+
+
+def test_recover_all_finishes_on_a_pe_with_a_non_vm_range_check():
+    # rustcloak_vm_pe.exe has a function (0x2fd0) with `cmp idx, 0xc000008b` -- an NTSTATUS constant,
+    # not a switch bound -- before a jump-table-shaped load. lift_vm took it as a 3.2-billion-entry
+    # opcode table and recover_all never finished. Opcodes are bytes: the table is now bounded.
+    import subprocess
+    if not PEFIX.is_file():
+        pytest.skip("PE fixture missing")
+    code = ("import sys; sys.path[:0] = [%r, %r]; import devirt_emulate as D; "
+            "r = D.recover_all(%r); print(r['count'])") % (
+        str(ROOT / "scripts"), str(ROOT / "premium"), str(PEFIX))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert int(out.stdout.strip().splitlines()[-1]) >= 1

@@ -359,9 +359,15 @@ def _recover_map(img, fva, size, text_lo, text_hi):
         extent = 0                                           # until an entry points outside .text
         while extent < 160 and resolve(minv + extent) is not None:
             extent += 1
-
+    else:
+        # Opcodes are bytes: a switch over them never checks past byte 255. A range check misread
+        # from a function that is no VM interpreter (`cmp idx, <large immediate>`) made the loops
+        # below probe and classify billions of "entries" (devirt_emulate.recover_all on
+        # rustcloak_vm_pe.exe never finished); bound the table by the byte range.
+        extent = max(0, min(extent, 256 - minv))
     import collections
-    cnt = collections.Counter(resolve(b) for b in range(minv, minv + extent) if resolve(b))
+    hs = {b: resolve(b) for b in range(minv, minv + extent)}           # each entry resolved once
+    cnt = collections.Counter(h for h in hs.values() if h)
     if not cnt:
         return None
     default = cnt.most_common(1)[0][0]
@@ -371,7 +377,7 @@ def _recover_map(img, fva, size, text_lo, text_hi):
 
     bytemap, pool_va, default_base = {}, None, None
     for byte in range(minv, minv + extent):
-        h = resolve(byte)
+        h = hs[byte]
         if h is None or h == default:
             continue
         base = classify(h)
@@ -445,10 +451,21 @@ def _decode_map(blob, bytemap, key=(0, 0, 0), default_base=None):
 
 def _read_va(img, va, n):
     """n bytes of the binary's image at virtual address va (from section contents)."""
-    for s in img.binary.sections:
-        lo = s.virtual_address
-        if lo and lo <= va < lo + s.size:
-            data = bytes(s.content)
+    # Section ranges and contents are taken from LIEF once per image: copying a section's content
+    # (bytes(s.content)) on every call -- once per jump-table entry probed -- made a PE with large
+    # sections take many minutes in _recover_map.
+    secs = img.__dict__.get("_lift_sections")
+    if secs is None:
+        secs = img.__dict__["_lift_sections"] = [
+            (s.virtual_address, s.virtual_address + s.size, s)
+            for s in img.binary.sections if s.virtual_address]
+        img.__dict__["_lift_content"] = {}
+    for i, (lo, hi, s) in enumerate(secs):
+        if lo <= va < hi:
+            cache = img.__dict__["_lift_content"]
+            data = cache.get(i)
+            if data is None:
+                data = cache[i] = bytes(s.content)
             off = va - lo
             return data[off:off + n]
     return b""

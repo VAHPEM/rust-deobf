@@ -4,8 +4,10 @@ tests/fixtures/emu/equiv_golden.json.gz was dumped by tests/emu_equiv.py from th
 hook-body optimisations (Oct 2026): for all 525 functions of benign_rust_std.x64 the QUICK- and
 full-budget runs (instruction count, strings, exact/used, branches, covered pairs) and every
 decoder-scored function's explore(), recover()'s records, and unpack_emulate on the pack fixtures
-(with/without --follow) plus the benign binary. A fresh dump must equal it. (Set
-RUST_DEOBF_EQUIV_DEVIRT=1 to also compare devirt_emulate's recover_all on the VM fixtures.)
+(with/without --follow) plus the benign binary, and devirt_emulate.recover_all
+on every VM fixture (rustcloak_vm_pe.exe's entry comes from the fixed lift_vm: before the jump-table
+bound, recover_all on it never finished). A fresh dump must equal it; RUST_DEOBF_EQUIV_DEVIRT=0
+skips the devirt part.
 
 Regenerate the golden file only for an INTENDED output change, and say so in the commit:
     python3 tests/emu_equiv.py dump tests/fixtures/emu/equiv_golden.json.gz --devirt
@@ -29,7 +31,7 @@ def test_outputs_identical_to_golden():
     gold = E.load(GOLDEN)
     if gold.get("unicorn") != unicorn.__version__:
         pytest.skip(f"golden made with unicorn {gold.get('unicorn')}, this is {unicorn.__version__}")
-    devirt = os.environ.get("RUST_DEOBF_EQUIV_DEVIRT") == "1"
+    devirt = os.environ.get("RUST_DEOBF_EQUIV_DEVIRT", "1") != "0"
     now = E.dump(devirt=devirt)
     if not devirt:
         gold.pop("devirt_emulate", None)

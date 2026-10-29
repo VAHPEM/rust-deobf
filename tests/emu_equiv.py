@@ -29,7 +29,9 @@ BENIGN = ROOT / "tests" / "fixtures" / "vm" / "benign_rust_std.x64"
 PACK = [ROOT / "tests" / "fixtures" / "pack" / n
         for n in ("upx_hello_pe64.exe", "upx_hello_pe32.exe", "packed_xor.elf64")]
 DEVIRT = [ROOT / "tests" / "fixtures" / "vm" / n
-          for n in ("rustcloak_vm_call.x64", "rustcloak_vm_nested.x64", "rustcloak_vm_obf.x64")]
+          for n in ("rustcloak_vm.x64", "rustcloak_vm_call.x64", "rustcloak_vm_nested.x64",
+                    "rustcloak_vm_obf.x64", "rustcloak_vm_rnd.x64", "rustcloak_vm_pe.exe",
+                    "rustcloak_vm_arm64.so", "plain.x64")]
 
 
 def _h(x) -> str:
