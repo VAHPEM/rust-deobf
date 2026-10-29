@@ -1,0 +1,40 @@
+# rust-deobf-premium: the Tier-4 deobfuscation modules (AGPL-3.0-or-later OR commercial).
+# A separate distribution from the Apache-2.0 core (../pyproject.toml), version-locked to it:
+#   pip install "rust-deobf[premium]"      (the core's `premium` extra pulls this in)
+# The import package `rust_deobf_premium` IS this directory (package-dir mapping), so the clone
+# workflow (`python3 premium/deobf_opaque.py`) runs the same files. Version and the core pin come
+# from ../scripts/_version.py via setup.py (or from PKG-INFO when building from this sdist).
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rust-deobf-premium"
+dynamic = ["version", "dependencies"]
+description = "Tier-4 deobfuscation for rust-deobf: control-flow de-flattening, MBA/opaque-predicate simplification, VM devirtualization, optimization reversal"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-or-later OR LicenseRef-Commercial"
+license-files = ["LICENSE", "LICENSE-COMMERCIAL.md"]
+authors = [{ name = "Ve (VAHPEM)", email = "ve0912084386@gmail.com" }]
+keywords = ["reverse-engineering", "deobfuscation", "control-flow-flattening", "devirtualization",
+            "mba", "opaque-predicates", "rust"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+]
+
+[project.urls]
+Homepage = "https://github.com/VAHPEM/rust-deobf"
+Source = "https://github.com/VAHPEM/rust-deobf/tree/master/premium"
+Licensing = "https://github.com/VAHPEM/rust-deobf/blob/master/LICENSING.md"
+
+[tool.setuptools]
+package-dir = { "rust_deobf_premium" = "." }
+packages = ["rust_deobf_premium"]
+include-package-data = false

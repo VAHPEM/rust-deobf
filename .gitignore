@@ -23,3 +23,11 @@ build/fuzz_crashes/
 
 # redblue_loop.py run artifacts (report + miss fixtures)
 build/redblue/
+
+# packaging (python -m build / pip install -e .)
+*.egg-info/
+dist/
+premium/build/
+premium/dist/
+build/lib/
+build/bdist.*/

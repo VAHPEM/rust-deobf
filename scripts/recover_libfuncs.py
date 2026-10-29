@@ -46,8 +46,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-OUT = ROOT / "scripts" / "data" / "libfunc_sigs.json"
+# this file's own directory (== ROOT/scripts in a clone; the rust_deobf package dir when installed)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+OUT = Path(__file__).resolve().parent / "data" / "libfunc_sigs.json"
 SIG_LEN = 48          # bytes signed per function start
 MIN_SIZE = 20         # ignore tiny thunks/aliases
 MAX_WILDCARD = 0.4    # drop a signature that is mostly masked (no discriminating bytes)

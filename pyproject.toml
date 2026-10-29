@@ -1,0 +1,68 @@
+# rust-deobf (core, Apache-2.0). The premium modules are a separate distribution:
+# premium/pyproject.toml (rust-deobf-premium, AGPL-3.0-or-later OR commercial).
+#
+# Layout: the import package `rust_deobf` IS the scripts/ directory (package-dir mapping), so the
+# clone workflow (`python3 scripts/recover.py`) and the installed one (`rust-deobf recover`) run the
+# same files. Version, the premium extra's pin and the wheel's module list are computed in setup.py
+# from scripts/_version.py (single source of truth).
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rust-deobf"
+dynamic = ["version", "optional-dependencies"]
+description = "Deobfuscation and triage for compiled (mostly Rust) binaries: string recovery by static analysis + emulation, metadata, unpacking - ELF/PE/Mach-O, x86-64/ARM64/x86"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Ve (VAHPEM)", email = "ve0912084386@gmail.com" }]
+keywords = ["reverse-engineering", "deobfuscation", "malware-analysis", "rust", "emulation",
+            "unicorn", "string-recovery", "unpacking", "triage", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+]
+# Keep in step with requirements.txt (tests/test_packaging.py checks it).
+# unicorn / capstone<6 publish no win_arm64 wheels and cannot be built there: on Windows ARM64
+# *native* Python they are left out so `pip install` finishes instead of failing deep inside a C
+# build, and `rust-deobf` / `rust-deobf doctor` then say exactly what to do (use x64 Python).
+dependencies = [
+    "lief>=0.16",
+    'capstone>=5.0,<6; sys_platform != "win32" or platform_machine != "ARM64"',
+    'unicorn>=2.1,<3; sys_platform != "win32" or platform_machine != "ARM64"',
+    "z3-solver>=4.12",
+    "pyelftools>=0.31",
+    "pyyaml>=5.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/VAHPEM/rust-deobf"
+Source = "https://github.com/VAHPEM/rust-deobf"
+Changelog = "https://github.com/VAHPEM/rust-deobf/blob/master/CHANGELOG.md"
+Issues = "https://github.com/VAHPEM/rust-deobf/issues"
+
+[project.scripts]
+rust-deobf = "rust_deobf.cli:main"
+
+[tool.setuptools]
+package-dir = { "rust_deobf" = "scripts" }
+packages = ["rust_deobf"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+rust_deobf = ["data/*.json"]

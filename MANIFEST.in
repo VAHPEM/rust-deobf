@@ -1,0 +1,7 @@
+# sdist of the core (rust-deobf). The package modules, scripts/data/*.json, pyproject.toml,
+# setup.py, README.md and LICENSE are added by setuptools; premium/, tests/, bench_src/, build/,
+# gallery/ and assets/ are deliberately NOT in the core sdist (premium/ is its own distribution).
+include CHANGELOG.md LICENSING.md CLA.md
+prune premium
+prune tests
+prune build
