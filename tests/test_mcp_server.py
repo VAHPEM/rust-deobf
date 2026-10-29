@@ -258,3 +258,9 @@ def test_push_annotations_enums_are_strict(synthetic_doc, key, value):
     res, text = _call("push_annotations", {"path": str(SAMPLE), "backend": "ida-mcp",
                                            "url": "http://127.0.0.1:9/mcp", key: value})
     assert res["isError"] and key in text and not synthetic_doc
+
+
+def test_server_info_reports_package_version():
+    """serverInfo.version is the package version (scripts/_version.py), not a hard-coded string."""
+    import _version
+    assert M.SERVER_INFO["version"] == _version.__version__

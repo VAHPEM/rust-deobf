@@ -39,8 +39,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+try:
+    from _version import __version__ as _RD_VERSION
+except Exception:                                   # pragma: no cover - a partial checkout
+    _RD_VERSION = "0+unknown"
+
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "rust-deobf", "version": "1.0.0"}
+SERVER_INFO = {"name": "rust-deobf", "version": _RD_VERSION}
 
 # JSON-RPC error codes
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS, INTERNAL_ERROR = \
