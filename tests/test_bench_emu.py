@@ -55,7 +55,10 @@ def test_funcs_equal_work():
         # both engines must end every function in the same register + memory state
         assert f["equal_end_state"] == "10/10", f.get("mismatched")
     s = f["split"]
-    assert s["engine_ns_per_insn"] > 0 and s["recover_total_ns_per_insn"] > s["engine_ns_per_insn"]
+    # Both timings must be measured. Their ORDER is not asserted: one pass of 10 short functions
+    # is timing noise on a loaded or emulated host (x64 Python on Windows-on-ARM measured the
+    # engine-only pass slower than the hooked one), and a unit test must not depend on it.
+    assert s["engine_ns_per_insn"] > 0 and s["recover_total_ns_per_insn"] > 0
 
 
 @pytest.mark.skipif(not PACKED.is_file(), reason="packed fixture missing")
