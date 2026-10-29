@@ -443,8 +443,13 @@ def test_stripped_formatter_traits_debug_builder_and_hex():
     c.at(sink, b"\xc3")
     c.at(dbg, b"\xe8" + _rel(dbg, 5, builder) + b"\xc3")                # Debug impl: call builder
     c.at(builder, b"\x48\x8d\x05" + _rel(builder, 7, 0x2000) + b"\xc3")
-    c.at(hexf, b"\x83\xe0\x0f" + b"\x48\x8d\x05" + _rel(hexf + 3, 7, 0x2100) + b"\xc3")
-    res = R.run(c.prog(m, [0x10000, sink, dbg, builder, hexf]))
+    pad = 0x10600
+    # hexf: and eax,0xf; lea rdx,["0x"]; mov ecx,2; call pad_integral; ret
+    seq = b"\x83\xe0\x0f" + b"\x48\x8d\x15" + _rel(hexf + 3, 7, 0x2100) + b"\xb9\x02\x00\x00\x00"
+    seq += b"\xe8" + _rel(hexf + len(seq), 5, pad) + b"\xc3"
+    c.at(hexf, seq)
+    c.at(pad, b"\xc3")
+    res = R.run(c.prog(m, [0x10000, sink, dbg, builder, hexf, pad]))
     (f,) = [x for x in res["fmt_sites"] if x["function"] == 0x10000]
     assert f["format"] == "v={:?} {:x}" and f["traits"] == {0: "Debug", 1: "LowerHex"}, f
 
@@ -599,3 +604,192 @@ def test_empty_vec_len_field_is_not_a_tag():
     c.at(v, seq)
     res = R.run(c.prog(Mem(), [v]))
     assert v not in {e["va"] for e in res["enum_returns"]}
+
+
+def test_i386_loop_head_after_ret_keeps_pic_base_and_frame():
+    """i386 (rustc 1.99 `parse_pair`): a rotated loop head placed right after the epilogue's `ret`
+    is reached only by a back edge; its fall-through joins the fmt block. Starting it from an
+    empty state (no PIC base, stack pointer of the popped frame) poisoned the join, so the
+    template `lea ecx,[ebx+K]` in the block after it was lost (the per-predecessor replay of the
+    fmt block's own join sees only the poisoned state). It now starts from the body frame."""
+    m = Mem(4)
+    m.put(0x9000, b"\x02v=\xc0\x00")
+    c = Code(0x8000)
+    a = 0x8000
+    seq = b"\x55\x89\xe5\x53\x56\x83\xec\x14"                         # push ebp; mov ebp,esp; push ebx; push esi; sub esp,0x14
+    seq += b"\xe8\x00\x00\x00\x00"                                      # call next
+    nxt = a + len(seq)
+    seq += b"\x5b\x81\xc3" + struct.pack("<i", 0x1000)                  # pop ebx; add ebx,0x1000
+    seq += b"\x8d\x83" + struct.pack("<i", 0x8300 - nxt - 0x1000)      # lea eax,[ebx+fmtfn]
+    seq += b"\x89\x45\xf0"                                              # mov [ebp-0x10],eax
+    seq += b"\xbe\x03\x00\x00\x00"                                      # mov esi,3
+    jb = len(seq)
+    seq += b"\xeb\x00"                                                  # jmp B (patched)
+    ep = len(seq)
+    seq += b"\x83\xc4\x14\x5e\x5b\x5d\xc3"                              # epilogue; ret
+    seq += b"\x47"                                                      # L: inc edi (back-edge only)
+    lp = ep + 7
+    b_ = len(seq)
+    seq += b"\x85\xff\x74\x01\x47"                                      # B (join): test edi,edi; je C; inc edi
+    seq += b"\x8d\x45\xec"                                              # C: lea eax,[ebp-0x14]
+    seq += b"\x8d\x8b" + struct.pack("<i", 0x9000 - nxt - 0x1000)      # lea ecx,[ebx+tmpl]
+    seq += b"\x50\x51"                                                  # push eax; push ecx
+    seq += b"\xe8" + _rel(a + len(seq), 5, 0x8200)                      # call sink
+    seq += b"\x83\xc4\x08\x4e"                                          # add esp,8; dec esi
+    seq += b"\x75" + bytes([(lp - (len(seq) + 2)) & 0xff])               # jne L
+    seq += b"\xeb" + bytes([(ep - (len(seq) + 2)) & 0xff])               # jmp epilogue
+    seq = bytearray(seq)
+    seq[jb + 1] = b_ - (jb + 2)
+    c.at(a, bytes(seq))
+    c.at(0x8200, b"\xc3")
+    c.at(0x8300, b"\xc3")
+    res = R.run(c.prog(m, [a, 0x8200, 0x8300], arch="x86", abi="i386", psize=4))
+    assert [f for f in res["fmt_sites"] if f["function"] == a and f["format"] == "v={}"], res["fmt_sites"]
+
+
+def test_x86_recursive_descent_survives_a_desynchronising_linear_sweep():
+    """Bytes jumped over (data / a mis-decoded opcode prefix) can make a linear sweep swallow the
+    real instructions after them (`48 b8` + 8 immediate bytes eat `lea rdi,[tmpl]`); the code a
+    branch reaches is now decoded from the branch target, so the fmt site behind it is found."""
+    m = Mem()
+    m.put(0x1000, b"\x02v=\xc0\x00")
+    c = Code(0x10000, size=0x400)
+    f, sink, fn = 0x10000, 0x10200, 0x10300
+    seq = b"\xeb\x02\x48\xb8"                                           # jmp +2; (movabs rax, ... junk)
+    seq += b"\x48\x8d\x3d" + _rel(f + len(seq), 7, 0x1000)               # lea rdi,[tmpl]
+    seq += b"\x48\x83\xec\x28"                                          # sub rsp,0x28
+    seq += b"\x48\x8d\x44\x24\x08\x48\x89\x44\x24\x10"                  # lea rax,[rsp+8]; mov [rsp+0x10],rax
+    seq += b"\x48\x8d\x05" + _rel(f + len(seq), 7, fn)                   # lea rax,[fn]
+    seq += b"\x48\x89\x44\x24\x18"                                      # mov [rsp+0x18],rax
+    seq += b"\x48\x8d\x74\x24\x10"                                      # lea rsi,[rsp+0x10]
+    seq += b"\xe8" + _rel(f + len(seq), 5, sink)                         # call sink
+    seq += b"\x48\x83\xc4\x28\xc3"
+    c.at(f, seq)
+    c.at(sink, b"\xc3")
+    c.at(fn, b"\xc3")
+    res = R.run(c.prog(m, [f, sink, fn]))
+    assert [x for x in res["fmt_sites"] if x["function"] == f and x["format"] == "v={}"], res["fmt_sites"]
+
+
+def test_radix_prefix_must_be_passed_as_a_two_byte_str():
+    """A Display impl that merely references a "0x..." literal and masks with 0xf (io::Error's
+    Display on PE32) is not LowerHex: the prefix must be handed on as a (ptr, 2) &str."""
+    m = Mem()
+    m.put(0x1000, b"\x02v=\xc0\x00")
+    m.put(0x2100, b"0x is not a prefix here")
+    c = Code(0x10000, size=0x800)
+    sink, fmtf, callee = 0x10400, 0x10580, 0x10600
+    _fmt_caller(c, 0x10000, 0x1000, [fmtf], sink)
+    c.at(sink, b"\xc3")
+    # fmtf: and eax,0xf; lea rdx,["0x ..."]; mov ecx,23; call callee; ret
+    seq = b"\x83\xe0\x0f" + b"\x48\x8d\x15" + _rel(fmtf + 3, 7, 0x2100) + b"\xb9\x17\x00\x00\x00"
+    seq += b"\xe8" + _rel(fmtf + len(seq), 5, callee) + b"\xc3"
+    c.at(fmtf, seq)
+    c.at(callee, b"\xc3")
+    res = R.run(c.prog(m, [0x10000, sink, fmtf, callee]))
+    (f,) = [x for x in res["fmt_sites"] if x["function"] == 0x10000]
+    assert f["format"] == "v={}" and not f.get("traits"), f
+
+
+def test_composite_debug_needs_two_debug_parts():
+    """`{}: {:?}`-style Display impl (one Debug part, one Display part) stays Display; a composite
+    whose two parts are both Debug impls is Debug."""
+    m = Mem()
+    m.put(0x1000, b"\x02v=\xc0\x01 \xc0\x00")
+    m.put(0x2000, b", {\n}")                                            # debug punctuation
+    c = Code(0x10000, size=0x800)
+    sink, dbg, builder, plain, disp, comp = 0x10400, 0x10480, 0x10500, 0x10540, 0x10580, 0x10600
+    _fmt_caller(c, 0x10000, 0x1000, [disp, comp], sink)
+    c.at(sink, b"\xc3")
+    c.at(dbg, b"\xe8" + _rel(dbg, 5, builder) + b"\xc3")                # Debug impl: call builder
+    c.at(builder, b"\x48\x8d\x05" + _rel(builder, 7, 0x2000) + b"\xc3")
+    c.at(plain, b"\x31\xc0\xc3")                                        # Display part
+    c.at(disp, b"\xe8" + _rel(disp, 5, plain) + b"\xe8" + _rel(disp + 5, 5, dbg) + b"\xc3")
+    c.at(comp, b"\xe8" + _rel(comp, 5, dbg) + b"\xe8" + _rel(comp + 5, 5, dbg + 0) + b"\xc3")
+    res = R.run(c.prog(m, [0x10000, sink, dbg, builder, plain, disp, comp]))
+    (f,) = [x for x in res["fmt_sites"] if x["function"] == 0x10000]
+    assert f["format"] == "v={} {:?}" and f["traits"] == {1: "Debug"}, f
+
+
+def test_landing_pad_callee_before_resume_is_drop_glue():
+    """rustc 1.99 drops io::Error's custom payload through a type-erased fn pointer (`mov rdi,
+    [rdi]; jmp [rdi+0x18]`): no dealloc call to anchor on. A function a cleanup landing pad calls
+    on its way to the unwinder's resume is drop glue -- but not a call-free memcpy-like body an
+    inlined Drop runs, and not a call in cold code laid out before the pad (a `ud2` between)."""
+    c = Code(0x10000, size=0x1000)
+    g, drop, resume, mc, cold = 0x10e00, 0x10e40, 0x10e80, 0x10ec0, 0x10f00
+    c.at(g, b"\xc3")
+    c.at(drop, b"\x48\x8b\x3f\xff\x67\x18")                             # mov rdi,[rdi]; jmp [rdi+0x18]
+    c.at(resume, b"\xc3")
+    c.at(mc, b"\xf3\xa4\xc3")                                            # memcpy-like: rep movsb; ret
+    c.at(cold, b"\xe8" + _rel(cold, 5, g) + b"\xc3")                     # some function that calls on
+    funcs = []
+    a = 0x10000
+    for k in range(11):                                                 # packed back to back
+        seq = b"\x53" + b"\xe8" + _rel(a + 1, 5, g) + b"\x5b\xc3"       # push rbx; call g; pop rbx; ret
+        seq += b"\xe8" + _rel(a + len(seq), 5, cold) + b"\x0f\x0b"       # cold: call cold; ud2
+        seq += b"\xe8" + _rel(a + len(seq), 5, mc)                       # pad: call mc
+        seq += b"\x48\x89\xdf" + b"\xe8" + _rel(a + len(seq) + 3, 5, drop)   # mov rdi,rbx; call drop
+        seq += b"\x48\x89\xc7" + b"\xe8" + _rel(a + len(seq) + 3, 5, resume)  # mov rdi,rax; call resume
+        c.at(a, seq)
+        funcs.append(a)
+        a += len(seq)
+    res = R.run(c.prog(Mem(), funcs + [g, drop, resume, mc, cold]))
+    roles = {h["va"]: h["role"] for h in res["helpers"]}
+    assert roles.get(drop) == "drop_glue", roles
+    assert roles.get(mc) != "drop_glue" and roles.get(cold) != "drop_glue", roles
+    assert sum(1 for d in res["drop_sites"] if d["function"] in funcs) == 11, res["drop_sites"]
+
+
+def test_windows_resume_is_followed_by_ud2():
+    """Windows targets put `ud2` after a trailing noreturn call (PE32 after the `add esp, N`):
+    the unwinder's resume is still each pad's last act, so it is found and pads are drop sites."""
+    c = Code(0x8000, size=0x1000)
+    g, drop, resume = 0x8e00, 0x8e40, 0x8e80
+    c.at(g, b"\xc3")
+    c.at(drop, b"\x8b\x44\x24\x04\x8b\x00\xff\x60\x0c")                 # mov eax,[esp+4]; mov eax,[eax]; jmp [eax+0xc]
+    c.at(resume, b"\xc3")
+    funcs = []
+    a = 0x8000
+    for k in range(11):
+        seq = b"\x56\xe8" + _rel(a + 1, 5, g) + b"\x5e\xc3"           # push esi; call g; pop esi; ret
+        seq += b"\x56\xe8" + _rel(a + len(seq) + 1, 5, drop) + b"\x83\xc4\x04"   # pad: push esi; call drop; add esp,4
+        seq += b"\x50\xe8" + _rel(a + len(seq) + 1, 5, resume) + b"\x83\xc4\x04\x0f\x0b"  # push eax; call resume; add esp,4; ud2
+        c.at(a, seq)
+        funcs.append(a)
+        a += len(seq)
+    res = R.run(c.prog(Mem(4), funcs + [g, drop, resume], arch="x86", abi="i386", psize=4))
+    roles = {h["va"]: h["role"] for h in res["helpers"]}
+    assert roles.get(drop) == "drop_glue", roles
+
+
+def test_char_debug_quotes_pushed_and_escape_args_immediate():
+    """rustc 1.99 i386 `<char as Debug>`: the quote is pushed (`push 0x27`, an immediate with no
+    `, ` before it) and escaping is left to escape_debug_ext (its packed args 0x101), no '\\'."""
+    m = Mem()
+    m.put(0x1000, b"\x02c=\xc0\x00")
+    c = Code(0x10000, size=0x800)
+    sink, dbgc = 0x10400, 0x10480
+    _fmt_caller(c, 0x10000, 0x1000, [dbgc], sink)
+    c.at(sink, b"\xc3")
+    c.at(dbgc, b"\x6a\x27" + b"\x68\x01\x01\x00\x00" + b"\x6a\x27" + b"\x48\x83\xc4\x18\xc3")
+    res = R.run(c.prog(m, [0x10000, sink, dbgc]))
+    (f,) = [x for x in res["fmt_sites"] if x["function"] == 0x10000]
+    assert f["format"] == "c={:?}", f
+
+
+def test_debug_builder_literal_pool_with_ellipsis():
+    """PE: the pooled builder punctuation runs into DebugStruct's "..}" (`((\n,\n..}`); the
+    function referencing it is still a debug builder, so its caller is a Debug impl."""
+    m = Mem()
+    m.put(0x1000, b"\x02v=\xc0\x00")
+    m.put(0x2000, b"((\n,\n..}, .")
+    c = Code(0x10000, size=0x800)
+    sink, dbg, builder = 0x10400, 0x10480, 0x10500
+    _fmt_caller(c, 0x10000, 0x1000, [dbg], sink)
+    c.at(sink, b"\xc3")
+    c.at(dbg, b"\xe8" + _rel(dbg, 5, builder) + b"\xc3")
+    c.at(builder, b"\x48\x8d\x05" + _rel(builder, 7, 0x2000) + b"\xc3")
+    res = R.run(c.prog(m, [0x10000, sink, dbg, builder]))
+    (f,) = [x for x in res["fmt_sites"] if x["function"] == 0x10000]
+    assert f["format"] == "v={:?}", f

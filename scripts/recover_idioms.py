@@ -646,7 +646,8 @@ class _State:
                 sp = max(votes.items(), key=lambda kv: kv[1])[0]
                 if "rsp" in a.regs or "sp" in a.regs:
                     regs["rsp" if "rsp" in a.regs else "sp"] = sp
-        return _State(regs, slots, sp, spec=all(s_.spec for s_ in states))
+        return _State(regs, slots, sp, spec=all(s_.spec for s_ in states) and
+                      (True if any(s_.spec is True for s_ in states) else "loop"))
 
 
 class FuncFacts:
@@ -724,6 +725,8 @@ def analyze_function(prog, start, end, md):
     mask = (1 << (8 * prog.psize)) - 1
     code = prog.code[start - prog.text_va:end - prog.text_va]
     insns = list(md.disasm(code, start))
+    if not arm and insns:
+        insns = _resync(md, code, start, end, insns)
     if not insns:
         return F
     # block starts = branch targets inside the function
@@ -750,6 +753,7 @@ def analyze_function(prog, start, end, md):
     dead = None
     idx_of = {ins.address: i for i, ins in enumerate(insns)}
     replays = []              # (block start, predecessor state): see _replay below
+    frame = None              # state at the last non-speculative block start (_frame_state)
     padded = False
     for idx, ins in enumerate(insns):
         a = ins.address
@@ -762,13 +766,22 @@ def analyze_function(prog, start, end, md):
             if len(incoming) >= 2:
                 replays.extend((a, s_.copy()) for s_ in incoming)
             # a block reached only by back edges (a rotated loop's head) inherits the state at the
-            # jump that skipped over it: loop-invariant values hoisted before the loop survive
-            st = _State.meet(incoming) or (dead.copy() if dead is not None else _State(sp=last_sp))
+            # jump that skipped over it: loop-invariant values hoisted before the loop survive.
+            # After a `ret` the epilogue has popped that state, so fall back to the frame of the
+            # last body block (stack pointer, frame pointer, i386 PIC base), marked speculative:
+            # an empty, real state would poison the next join (its stack pointer and PIC base
+            # disagree with every real predecessor; rustc 1.99 i386 `lea ecx,[ebx-K]` templates
+            # were lost behind such a loop head). Back edges are never met into a join anyway.
+            st = _State.meet(incoming)
+            if st is None:
+                st = dead.copy() if dead is not None else _frame_state(frame, last_sp, prog.arch)
             dead = None
             if arm:
                 st.regs.setdefault("sp", st.sp)
             else:
                 st.regs.setdefault("rsp", st.sp)
+            if not st.spec and st.sp is not None:
+                frame = st.copy()                 # st itself is mutated in place below
             live = True
             F.pushed = 0
             if post is not None:
@@ -784,8 +797,8 @@ def analyze_function(prog, start, end, md):
                 # a stripped PE32), not ours -- run() analyzes it as a function of its own
                 F.split_at = a
                 break
-            st = dead.copy() if dead is not None else _State(sp=last_sp)
-            st.spec = True
+            st = dead.copy() if dead is not None else _frame_state(frame, last_sp, prog.arch)
+            st.spec = True                        # (True: a landing pad; "loop": see _frame_state)
             dead = None
             if arm:
                 st.regs.setdefault("sp", last_sp)
@@ -830,6 +843,69 @@ def analyze_function(prog, start, end, md):
             seen.setdefault(rec["site"], []).append(rec["args"])
             F.merged_calls.append(rec)      # extra argument views of an existing call site
     return F
+
+
+_FRAME_REGS = {"x86": ("rbx", "rbp"), "x86_64": ("rbp",), "aarch64": ("x29",)}
+
+
+def _frame_state(frame, last_sp, arch):
+    """A fresh, speculative state for code no forward edge reaches after a `ret` (a rotated loop
+    head; the caller re-marks a landing pad): the stack / frame pointer and (i386) the PIC base
+    register of the last body block, nothing that varies per path. spec="loop" (truthy: kept out
+    of joins with real predecessors) so calls there are not taken for landing-pad calls."""
+    if frame is None:
+        return _State(sp=last_sp, spec="loop")
+    st = _State(sp=frame.sp, spec="loop")
+    for r in _FRAME_REGS.get(arch, ()):
+        if r in frame.regs:
+            st.regs[r] = frame.regs[r]
+    st.regs["sp" if arch == "aarch64" else "rsp"] = frame.sp
+    return st
+
+
+def _resync(md, code, start, end, insns):
+    """x86: decode a function by recursive descent from its entry (fall-through + in-function
+    branch targets), so a linear sweep that desynchronises on data / mis-decoded bytes cannot hide
+    reachable code; then fill the gaps no branch reaches (landing pads, jump-table targets) by a
+    linear sweep that stops at the first already-decoded boundary and drops instructions that
+    would overlap decoded ones. `insns` (the plain linear sweep) is the fallback."""
+    decoded = {}
+    work = [start]
+    budget = 200000
+    while work and budget > 0:
+        a = work.pop()
+        while start <= a < end and a not in decoded and budget > 0:
+            budget -= 1
+            got = next(iter(md.disasm(code[a - start:a - start + 16], a, 1)), None)
+            if got is None:
+                break
+            decoded[a] = got
+            t = _branch_target(got, False)
+            if t is not None and start <= t < end and t not in decoded:
+                work.append(t)
+            if got.mnemonic in ("ret", "retf", "jmp", "ud2", "int3", "hlt"):
+                break
+            a += got.size
+    if not decoded:
+        return insns
+    # covered byte ranges
+    covered = sorted((x.address, x.address + x.size) for x in decoded.values())
+    import bisect
+    cstarts = [c[0] for c in covered]
+
+    def clash(addr, size):
+        k = bisect.bisect_right(cstarts, addr + size - 1) - 1
+        while k >= 0 and covered[k][1] > addr:
+            if covered[k][0] < addr + size:
+                return True
+            k -= 1
+        return False
+    # gaps: keep linear-sweep instructions that do not overlap reachable code
+    for x in insns:
+        if x.address in decoded or clash(x.address, x.size):
+            continue
+        decoded[x.address] = x
+    return [decoded[k] for k in sorted(decoded)]
 
 
 _MAX_REPLAYS = 256
@@ -929,7 +1005,7 @@ def _record_call(prog, F, st, ins, abi, target_val, tail=False):
         args += [st.regs.get(r) for r in abi["fast"]]
     vslot = target_val[1] if isinstance(target_val, tuple) and target_val[0] == "slot" else None
     rec = {"site": ins.address, "size": ins.size, "target": tgt, "imp": imp, "args": args,
-           "vslot": vslot,
+           "vslot": vslot, "spec": st.spec,
            "slots": dict(st.slots), "tail": tail, "sret": st.regs.get(abi["sret"]) if abi["sret"] else None,
            "post": None}
     F.calls.append(rec)
@@ -1655,7 +1731,8 @@ _RADIX_TRAIT = re.compile(r"::(LowerHex|UpperHex|Octal|Binary|LowerExp|UpperExp)
 
 # a literal made only of Rust Debug punctuation ({ } ( ) [ ] , space : newline), referenced by the
 # Formatter debug-builder functions (debug_struct/tuple/list + the *_field*_finish shortcuts)
-_DEBUG_PUNCT = re.compile(rb"^[{}()\[\], :\n]{4,}$")
+# (`.`: the pooled builder literals run into DebugStruct's "..}" on PE; a bracket or comma required)
+_DEBUG_PUNCT = re.compile(rb"^(?=.*[{}()\[\],])[{}()\[\], :\n.]{4,}$", re.S)
 _RADIX_PREFIX = {b"0x": "LowerHex", b"0o": "Octal", b"0b": "Binary"}
 _HEX_LOWER = b"0123456789abcdef"
 _HEX_UPPER = b"0123456789ABCDEF"
@@ -1676,12 +1753,14 @@ def _debug_builders(prog, facts):
     return out
 
 
-_IMM_RX = re.compile(r"(?:#|, |\$)(0x[0-9a-f]+|\d+)\b")
+_IMM_RX = re.compile(r"(?:^|#|, |\$)(0x[0-9a-f]+|\d+)\b")     # (^: i386 `push 0x27`)
 
 
 def _quotes_debug(prog, start, end):
     """True when [start, end) uses the quote char '"' (or '\'') at least twice and '\\' as
-    immediates: the quoted, escaped rendering of `{:?}` on a str / char."""
+    immediates: the quoted, escaped rendering of `{:?}` on a str / char. Where the escaping is
+    left to `char::escape_debug_ext` (rustc 1.99 i386 `<char as Debug>`), its packed
+    EscapeDebugExtArgs immediate (0x101 for a char, 0x10001 for a str) stands in for the '\\'."""
     if end - start > 0x1000 or end <= start:
         return False
     try:
@@ -1697,11 +1776,12 @@ def _quotes_debug(prog, start, end):
             if mn.startswith(("mov", "cmp", "orr", "push")):
                 for m in _IMM_RX.finditer(ops):
                     v = int(m.group(1), 0)
-                    if v in (0x22, 0x27, 0x5C):
+                    if v in (0x22, 0x27, 0x5C, 0x101, 0x10001):
                         imms[v] = imms.get(v, 0) + 1
     except Exception:
         return False
-    return imms.get(0x5C, 0) >= 1 and (imms.get(0x22, 0) >= 2 or imms.get(0x27, 0) >= 2)
+    escapes = imms.get(0x5C, 0) + imms.get(0x101, 0) + imms.get(0x10001, 0)
+    return escapes >= 1 and (imms.get(0x22, 0) >= 2 or imms.get(0x27, 0) >= 2)
 
 
 def _debug_hex_flags(prog, start, end):
@@ -1781,8 +1861,17 @@ def classify_formatter(prog, facts, va, names, builders=None, depth=0):
     # so it is just the first two bytes at the referenced address) plus the digit extraction mask
     # (`and r, 0xf` / 7 / 1) when the alphabet is reached through a PIC base we cannot see
     masks = _digit_masks(prog, va, F.eff_end)
+    # ... and the prefix must actually be handed on as a 2-byte &str (pad_integral's `prefix`)
+    passed = set()
+    for c in F.calls:
+        a = c["args"]
+        for k in range(len(a) - 1):
+            if isinstance(a[k], int) and a[k + 1] == 2:
+                passed.add(prog.read(a[k], 2))
     for b in lits:
         pre = b[:2]
+        if pre not in passed:
+            continue
         if pre == b"0x" and 0xF in masks:
             return "UpperHex" if 0x37 in masks and 0x57 not in masks else "LowerHex"
         if pre == b"0o" and 7 in masks:
@@ -1795,10 +1884,77 @@ def classify_formatter(prog, facts, va, names, builders=None, depth=0):
         return classify_formatter(prog, facts, fcalls[0]["target"], names, builders, depth + 1)
     # a composite Debug impl (Range, tuples, wrappers) formats its parts with their Debug impls
     if depth < 2 and len(fcalls) <= 6 and (F.eff_end - va) <= 0x200:
-        for c in fcalls:
-            if classify_formatter(prog, facts, c["target"], names, builders, depth + 2) == "Debug":
-                return "Debug"
+        # (at least two of its part formatters must be Debug: one Debug-ish callee alone is too
+        # weak -- a Display impl may debug-format one field, `{}: {:?}`)
+        kinds = [classify_formatter(prog, facts, c["target"], names, builders, depth + 2) for c in fcalls]
+        if kinds.count("Debug") >= 2:
+            return "Debug"
     return None
+
+
+_DEAD_END = {"ret", "retf", "jmp", "ud2", "int3", "hlt", "b", "br", "brk", "udf"}
+
+
+def _reaches_resume(prog, a, resumes, end, budget=40):
+    """Does the code right after a call at `a` run into one of the `resumes` call sites without a
+    dead end (ret / trap / another call's noreturn trap)? Conditional branches fall through,
+    unconditional direct jumps are followed (pads share one `call _Unwind_Resume` block):
+    separates a landing pad's own calls from cold code laid out before it."""
+    md = _x86_cs(prog.arch) if prog.arch != "aarch64" else _a64_cs()
+    arm = prog.arch == "aarch64"
+    seen = set()
+    while budget > 0 and a not in seen and prog.text_va <= a < end:
+        seen.add(a)
+        x = next(iter(md.disasm(prog.code[a - prog.text_va:a - prog.text_va + 16], a, 1)), None)
+        if x is None:
+            return False
+        if x.address in resumes:
+            return True
+        budget -= 1
+        if x.mnemonic in ("jmp", "b"):
+            t = _branch_target(x, arm)
+            if t is None:
+                return False
+            a = t
+            continue
+        if x.mnemonic in _DEAD_END:
+            return False
+        a += x.size
+    return False
+
+
+def _ends_function(prog, a, end):
+    """Is the code from `a` (just after a call) to the function's end nothing but a trap -- the
+    call is the function's last act? Windows targets put `ud2` after a trailing noreturn call
+    (PE32 after the `add esp, N` that pops its stack arguments)."""
+    if a == end:
+        return True
+    if not 0 < end - a <= 8:
+        return False
+    md = _x86_cs(prog.arch) if prog.arch != "aarch64" else _a64_cs()
+    ins = list(md.disasm(prog.code[a - prog.text_va:end - prog.text_va], a))
+    if not ins or ins[-1].address + ins[-1].size != end:
+        return False
+    for k, x in enumerate(ins):
+        if x.mnemonic in ("ud2", "int3", "brk", "udf"):
+            continue
+        if k == 0 and x.mnemonic == "add" and x.op_str.startswith(("esp,", "rsp,")):
+            continue
+        return False
+    return True
+
+
+def _has_syscall(prog, start, end):
+    """Does [start, end) itself enter the kernel (x86-64 `syscall`, i386 `int 0x80` / `sysenter` /
+    musl's `call gs:[0x10]` vsyscall, AArch64 `svc`)?"""
+    md = _a64_cs() if prog.arch == "aarch64" else _x86_cs(prog.arch)
+    code = prog.code[start - prog.text_va:min(end, start + 0x400) - prog.text_va]
+    for ins in md.disasm(code, start):
+        m = ins.mnemonic
+        if m in ("syscall", "sysenter", "svc") or (m == "int" and ins.op_str == "0x80") \
+                or (m == "call" and "gs:[0x10]" in ins.op_str):
+            return True
+    return False
 
 
 def _digit_masks(prog, start, end):
@@ -2379,7 +2535,7 @@ def _classify(prog, facts, names):
     last_calls = {}
     for f, F in facts.items():
         for c in F.calls:
-            if not c["tail"] and c["site"] + c["size"] == F.eff_end:
+            if not c["tail"] and _ends_function(prog, c["site"] + c["size"], F.eff_end):
                 k = _callee_key(c)
                 if k is not None and k not in panic_kind:
                     last_calls[k] = last_calls.get(k, 0) + 1
@@ -2388,6 +2544,35 @@ def _classify(prog, facts, names):
     # tiny call-free leaves (AArch64 outlined atomics `__aarch64_ldadd8_rel` that Arc's refcount
     # drop uses, small accessors) are neutral for the drop-glue rule below
     leaves = {f for f, F in facts.items() if not F.calls and F.has_ret and fsize[f] <= 0x40}
+    # cleanup landing pads: code reached only through the unwind tables (a speculative state in our
+    # sweep) that ends in the unwinder's resume calls drop glue -- whatever the drop looks like
+    # inside (1.99 drops io::Error's custom payload through a type-erased fn pointer). Cleanup also
+    # runs inlined Drop bodies (CopyOnDrop's memcpy, a refcount's atomic, a raw syscall, a
+    # stderr write_fmt), so the callee must look like glue: it calls on (dealloc / a field's drop
+    # / a vtable drop; memcpy and outlined atomics call nothing), neither consumes nor builds
+    # fmt::Arguments, and does not enter the kernel itself. (A caller-count ratio does not
+    # separate them: Result<io::Error> glue has 17 ordinary calls per pad call, syscall() 18.)
+    pad_calls, fmt_consumers = {}, set()
+    for f, F in facts.items():
+        resumes = [c["site"] for c in F.calls if _callee_key(c) in resume and c.get("spec") is True]
+        for c in F.calls:
+            k = _callee_key(c)
+            if not isinstance(k, int):
+                continue
+            if c.get("fmt") and c["fmt"][3] == "strong":
+                fmt_consumers.add(k)
+            if resumes and c.get("spec") is True and not c["tail"] \
+                    and _reaches_resume(prog, c["site"] + c["size"], set(resumes), F.end):
+                pad_calls[k] = pad_calls.get(k, 0) + 1     # in front of a resume (same pad)
+    for k in pad_calls:
+        if k not in facts or k in leaves or not facts[k].calls:
+            continue                              # drop glue always calls on (dealloc / a field)
+        if k in fmt_consumers or any(c.get("fmt") and c["fmt"][3] == "strong" for c in facts[k].calls) \
+                or _has_syscall(prog, k, facts[k].eff_end):
+            continue                              # a write_fmt / a libc wrapper, not glue
+        if k in panic_kind or k in noret or k in resume or k in dealloc or k in sink_kind or k in drop:
+            continue
+        drop[k] = "landing-pad"
     # drop glue: functions whose every call goes to dealloc / known drop glue (fixed point)
     changed = True
     while changed:

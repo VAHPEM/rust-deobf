@@ -117,6 +117,8 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `decompress.py` | strict pure-Python LZ4 (frame/legacy/block), aPLib (raw/AP32), BriefLZ (raw/blzpack), LZNT1 decoders: output-capped, linear, never raise; headerless decodes need an encoder signature (no literal runs/zero literals a compressor never emits), full consumption, expansion (waived for magic / >= 64 B text) and "interesting" output (validated magic / text / literal-entropy drop / repetitive). Test encoders in `tests/_compress.py`; reference vectors (jibsen BriefLZ, apultra, lz4_flex) in `tests/fixtures/compress/` |
 | `recover_idioms.py` | Rust idioms in stripped binaries: fmt macro sites → `println!("…")` text (newer rustc template encoding (1.97 and 1.99.1 measured) + older pieces array) with each placeholder's trait (`{:?}` `{:x}` …) from its formatter fn (symbol, else debug-builder / radix / quote / debug-hex-flag anchors), `write!(f, "lit")` lowered to a `dyn fmt::Write` vtable `write_str`, panic / safety-check call sites (kind, `Location` file:line:col, guarding branch), drop / `__rust_dealloc` calls, enum-like (Option/Result?) returns; helpers named by symbols / libfuncs / message anchors; per-function register+stack dataflow (x86-64 SysV/Win64, i386 incl. stdcall callee-pops and PE32 start seeding, AArch64); `--eval <unstripped> <stripped>` measures P/R; → `ghidra_annotate.py` (`idioms`) |
 | `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64 + i386, ELF + PE + Mach-O; rustc 1.70 (inline `panic("...")`) to 1.99 (panic_const; 1.99 inlines a bare top-level future into the executor) |
+| `recover_idioms.py` | Rust idioms in stripped binaries: fmt macro sites → `println!("…")` text (newer rustc template encoding (1.97 and 1.99.1 measured) + older pieces array) with each placeholder's trait (`{:?}` `{:x}` …) from its formatter fn (symbol, else debug-builder / radix / quote / debug-hex-flag anchors), `write!(f, "lit")` lowered to a `dyn fmt::Write` vtable `write_str`, panic / safety-check call sites (kind, `Location` file:line:col, guarding branch), drop / `__rust_dealloc` calls, enum-like (Option/Result?) returns; helpers named by symbols / libfuncs / message anchors; per-function register+stack dataflow (x86-64 SysV/Win64, i386 incl. stdcall callee-pops and PE32 start seeding, AArch64); `--eval <unstripped> <stripped>` measures P/R; → `ghidra_annotate.py` (`idioms`) |
+| `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
 ### scripts/ — front ends, export, orchestration
@@ -266,6 +268,20 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
 - **Unicorn 2.1 PC writes from a hook:** only a single `uc_reg_write` of the PC makes Unicorn leave the
   current block; `uc_reg_write_batch` including the PC does not (runs silently diverge). Batch the
   other registers, write the PC alone, last.
+  rustc 1.99.1 keeps the 1.97 template encoding (measured on x86-64 / AArch64 / i386 / PE / PE32).
+- **rustc 1.99 codegen that broke recover_idioms (fixed; keep the fixes):** io::Error's custom
+  payload is dropped through a type-erased fn pointer (`mov rdi,[rdi]; jmp [rdi+0x18]`, no
+  dealloc call) — drop glue is also inferred from landing pads (a callee the pad calls on its way
+  to the unwinder's resume, no dead end between; it must itself call on and not be a fmt sink or
+  a syscall wrapper — memcpy / atomics / syscall() run in pads too); Windows puts `ud2` after a
+  trailing noreturn call, so "last call of the function" allows a trap after it; i386 places
+  rotated loop heads right after the epilogue's `ret` — code reached only by back edges after a
+  `ret` starts from the body frame (sp / ebp / PIC ebx) as a *speculative* state, never an empty
+  real one (it poisoned the next join); x86 linear sweep can desynchronise inside a function, so
+  `analyze_function` decodes by recursive descent first (`_resync`).
+- **recover_libfuncs' short labels drop the last v0 segment** of non-generic symbols
+  (`panic_bounds_check` → `core::panicking`); relabel from the match's `sym` (recover_idioms does
+  via `_readable`). Its signature DB is rustc-1.97 x86-64 only — AArch64 / i386 / PE get no hits.
 - **VALIDATION.md** uses numbered round sections; append the next `§N` rather than editing old ones.
 - **Benchmark crates** (`bench_src/gen_projects.py` → `manifest.json`; `build_all.sh` builds every
   `bench_src/*/`): hand-rolled xor/add/sub/tight_xor, obfstr, litcrypt, litcrypt2, cryptify

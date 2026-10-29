@@ -135,7 +135,8 @@ crypto-clipper config, staging paths. [More below](#-real-malware).
   `println!` / `format!` / `panic!` site (both `fmt::Arguments` encodings: newer rustc's compact
   template and the older pieces array), marks bounds / overflow / unwrap panic paths as cold
   safety checks with their `file:line:col`, flags drop / dealloc calls and enum-like
-  (Option/Result?) returns, and annotates all of it in Ghidra — no symbols needed.
+  (Option/Result?) returns, and annotates all of it in Ghidra — no symbols needed (measured on
+  rustc 1.97 and 1.99.1 builds for x86-64 / AArch64 / i386 ELF and x86-64 / i386 PE).
 - **Code virtualization** — `detect_vm.py` flags VMProtect/Themida/Tigress-style bytecode VMs; the
   premium devirtualizer lifts them back. From a VM with **randomized opcodes and encrypted
   operands**, it reconstructs:
