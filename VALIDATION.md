@@ -2458,3 +2458,326 @@ yara or capa on the Windows VM) and the two benchmark builds CI makes. 28 tests 
 skipped on every non-x86 host by a `platform.machine()` gate -- their x86-64 fixtures are analysed
 statically / by emulation -- now run on ARM64 and on Windows-on-ARM (where x64 Python reports
 `ARM64`) and pass.
+
+## 62. Keyless decompression: LZ4 / aPLib / BriefLZ / LZNT1 (Oct 2026)
+
+`scripts/decompress.py` adds strict pure-Python decoders for LZ4 (frame, legacy, block with and
+without a size prefix), aPLib (headerless and AP32), BriefLZ (headerless, both end conventions,
+and blzpack) and LZNT1, capped at MAX_OUT = 16 MiB, linear time, never raising. `recover_blobs`
+uses them as keyless recoveries next to zlib/gzip/bz2/lzma and single-byte XOR.
+
+**Ground truth.** python-lz4 (9 frame variants, the block modes, both directions); the aPLib
+vectors in malduck's documentation (read only, GPLv3, no code taken); the LZNT1 example of
+[MS-XCA] (142 bytes, exact); the BriefLZ test-suite error vectors; independent reference vectors
+generated on the ARM64 Kali VM (jibsen/brieflz @ad89acf levels 1/10 + `blzpack -9`; apultra
+1.4.8, provenance in `tests/fixtures/compress/README.md`); and real lz4_flex 0.11.6 vectors (the
+cargo generator is committed). Every vector decodes byte-exact under the strict rules, including
+LZ4's end-of-block conditions.
+
+**False positives.** A headerless stream is accepted only past a read-to-end rule, an expansion
+rule (≥1.1×, waived for text ≥64 bytes), an encoder-signature gate (BriefLZ ≥5 / LZNT1 ≥6 / aPLib
+≥4 equal consecutive literals, aPLib ≥2 0x00 literals; the maxima measured on the real encoders
+are 4/3/0) and a rejection of stored-only streams. Before the gates, 14,328 windows of 75 benign
+fixtures decoded as 1,320 BriefLZ / 289 aPLib / 38 LZNT1 streams (zero-heavy data reads as
+all-literal streams); after them, **0**. Final counts: 0 on 4×5,000 random blobs (64, 130, 512,
+4,096 bytes), 0/40,000 random blobs of 512 B and 4 KiB (seed 20261029), 0 on 95,115 fixture
+windows (15 before the encoder-signature gate), 0 on 74,160 text windows, 0 in the second-pass
+search over all 79 fixture files; 0/2,000 random blobs misread as XOR-wrapped.
+
+**Recall.** Magic-less x86-64 code chunks: 16 KB 36/36 for every headerless format, 1 KB 26–30/36.
+A second candidate pass (the last 4 KiB, the end of a zero run, ±256 around an entropy ≥6.0 region;
+≤8,192 start offsets per file, 1.6 s per 450 KB file) raised recall on 44 embedded-stream cases
+from 0/44 to 42/44; the two misses are ~4.3 KB streams that follow random data and end at EOF.
+Chains: up to 3 compression layers under one shared MAX_OUT budget, XOR revealing a gzip/zlib/bz2/
+LZ4/AP32/blzpack header, and containers nested in the output. An ELF dropper's overlay is
+recovered for all 9 formats. Decode speed on 1 MB inputs: LZ4 3.1–6.5 MB/s, aPLib 1.6–2.9,
+BriefLZ 1.7–3.7, LZNT1 2.0–3.5; pure-Python xxHash32 2.1–2.6 → 5.2–5.8 MB/s.
+
+## 63. Decompiler bridge: rust-deobf facts into GhidraMCP / ida-pro-mcp (Oct 2026)
+
+`scripts/decompiler_bridge.py` turns the tier results into a neutral annotation list {address, kind
+comment|rename|bookmark, scope, text, source_tier, function} in rust-deobf's address space (PE RVA;
+ELF/Mach-O file VA, `address_base` = lowest PT_LOAD page / `__TEXT` vmaddr). It pushes the list
+through the plugins' real HTTP APIs, read from their source: GhidraMCP 2.0 (`BackendHttpServer.java`:
+`/health`, `/program_info`, `/function`, `/disassemble_function`, form POST
+`/set_decompiler_comment`, `/set_disassembly_comment`, `/rename_function_by_address`), GhidraMCP 1.4
+(same write endpoints, plain text) and ida-pro-mcp (MCP over streamable HTTP: `server_health`,
+`lookup_funcs`, `append_comments`/`set_comments`, `rename`, `add_bookmark`, `ida://idb/metadata`).
+The decompiler's image base is never trusted blindly: the mapping is verified on the entry point
+and known function starts before any write, and the sha256 of the open program must match.
+Re-runs add no duplicate comments, dry-run issues no writes, analyst names and comments are kept,
+and non-loopback URLs and redirects are refused.
+
+**Round 2: read before write.** GhidraMCP 2.0 has no read path for PRE comments (only
+`/disassemble_function` returns comments, EOL), so EOL is the bridge's default there: the comment
+is read back, only `[rust-deobf]` lines are rewritten, the analyst's text is kept; PRE is opt-in
+and replaces. With no bookmark endpoint, a bookmark becomes a `[rust-deobf] bookmark:` comment
+line. For ida-pro-mcp the only exact reader of comments and bookmark slots is its `py_eval` tool
+(marked unsafe); the default merge mode reads and rewrites through it (top-level statements only,
+data as one JSON literal), and without it a deduped append is reported as such. Bookmarks go only
+into free or own slots. `recover_rust_meta` now reports `panic_locations [{va, file, line, col}]`
+(PE: RVA), replacing the bridge's own rodata rescan. `scripts/decompiler_selfcheck.py` checks a
+real setup: identity, the mapping on N function starts, and a comment write / exact read-back /
+restore; against the stand-ins it found a GhidraMCP 1.x parsing bug (a trailing newline on the last
+instruction's comment), fixed with a regression test.
+
+Measured against in-process stand-ins built from the plugin source (`tests/decompiler_mocks.py`)
+on real fixtures (`vt32`, `pe64.exe`, `shortkey`, `rustcloak_lazy.x64`, `litcrypt.arm64`,
+`benign_rust_std.x64`): bridge 50, selfcheck 6, MCP 36 tests; panic Location comments from the
+engine on `benign_rust_std.x64` and `litcrypt.arm64` (200 each, the default cap, of 206 and 221
+records). **Not verified: a real Ghidra or IDA session** (address text formats, Ghidra's PIE base,
+IDA's `py_eval`, Hex-Rays display of function comments). `decompiler_selfcheck.py` (read-only, then
+`--write-test`) is the tool for that.
+
+## 64. Async state-machine recovery (`recover_async.py`) (Oct 2026)
+
+A core tier recovering `async fn` / async-block coroutine state machines from stripped binaries,
+anchored on the "`async fn` resumed after completion/panicking" panics. The state dispatch is
+recovered by a concrete interpreter (x86-64 / i386 jump tables, AArch64 compare chains), the
+state field and pending write-backs by a pointer/constant dataflow that carries bounded value sets
+through pointer phis, setcc/cmov/csel-family selects and small arithmetic. Every binary was
+stripped and scored against its `-g` twin (ground truth: the `addr2line -i` coroutine chain at
+every Returned-arm panic site; suspend counts from the source's `.await`s; for rustc 1.70 and
+Mach-O, where addr2line cannot be used, per-async-fn checks through the recovered `&Location`).
+
+| program | x86-64 ELF | AArch64 ELF | x86-64 PE | i386 ELF | i386 PE | Mach-O arm64 | Mach-O x86-64 |
+|---|---|---|---|---|---|---|---|
+| hand-written executor (nested, loop, dyn) | 9/9 | 9/9 | 9/9 | 11/11 | 11/11 | 9/9 | 9/9 |
+| tokio current_thread | 15/15 | 11/11 | 6/6 | 10/10 | 17/17 | 11/11 | 15/15 |
+| tokio + sync (mpsc, Mutex, select!, join!) | 18/18 | 18/18 | 22/22 | 18/18 | 21/22 | 18/18 | 18/18 |
+
+(rustc 1.97 `-O`; instances found / ground truth; i386 and Mach-O count arms.) 0 false positives
+everywhere and on ~40 non-async fixtures; suspend counts exact on every coroutine with a known
+count; all program coroutines found on every target. The one miss is dead tokio code without a
+function start in a stripped PE32. rustc 1.85: hand 9/9, tokio 15/15, tokio + sync 25/25. rustc
+1.70 lowers the panic to an inline `panic("...")`: before 2/9 arms, after all program coroutines
+with exact counts. On Mach-O x86-64 Apple places jump tables inside the code section (0/9 before
+reading them there). Write-backs confirmed on tokio + sync: x86-64 5/18 → 18/18, AArch64 10/18 →
+18/18, PE 9/22 → 22/22; across all 21 binaries every program and library coroutine is confirmed,
+except two armless register-promoted machines on a stripped PE32 (back edges through PIC arithmetic)
+and three tokio-1.47 library coroutines under rustc 1.70 (a dead state store LLVM deleted). `dyn`
+awaits of two boxed future types in one coroutine: 0/3 → 3/3 resolved per call site. Two inlined
+copies of one coroutine at the same state offset are separate machines. `recover()` on PE: 2.6–3.2 s
+→ 0.27–0.75 s (no recover_types / recover_rust_meta pass).
+
+**rustc 1.99.1** (found on the ARM64 lab VM, whose toolchain is newer than the 1.97 first measured).
+Four async tests failed there. The cause is not a missed pattern: 1.99 inlines a *bare* top-level
+future into the hand-written `block_on` executor and linearizes it, so `looper`, `top` and the
+async block no longer exist as state machines. Counting the resume-panic call sites (through the
+GOT) and mapping them to source with `addr2line`: 18 sites on 1.97, including lines 24/34/38 of
+those three coroutines; 8 on 1.99, none of them. recover_async was left unchanged; the test
+programs box their outer future so `top` survives on every rustc. On 1.99.1 the boxed hand
+executor gives 9 state machines, all 6 source coroutines, 3 poll functions, exact suspend counts,
+all write-backs confirmed and 0 false positives on x86-64 ELF, AArch64 ELF, i686 ELF, x86-64 PE
+and i686 PE; rustc 1.70, 1.85 and 1.97 are unchanged.
+
+## 65. Per-binary library-signature DBs (`gen_sigdb.py` + `recover_libfuncs`) (Oct 2026)
+
+`scripts/gen_sigdb.py` builds a signature DB matched to a target: it reads the rustc release or
+commit (from `/rustc/<hash>/` paths or ELF `.comment`), the target triple and the crates
+(panic paths, cargo-auditable `.dep-v0`, mangled crate names, `name/x.y.z` strings, and dependency
+resolution through `cargo metadata`, which runs no crate code), then builds std, an exerciser and
+(only with `--build-crates`, because build scripts and proc-macros run on the host) the crates
+with that exact toolchain. `recover_libfuncs --db auto` only reads the cache and starts no process
+(a test traps every way it could). Stripped targets; truth = the unstripped copy's symbols; recall
+over non-own Rust functions ≥20 B; strict precision.
+
+- **Whole-function patterns** (functions ≤1 KiB) resolve 48-byte-prefix ambiguity: rustc 1.85
+  x86-64, serde_json+regex 1159 → 1592 correct (recall 50.9% → 70.0%, n=2266, precision 99.9%);
+  rand/sha2/base64/flate2/hex 436 → 470 (68.3% → 73.7%, n=630). A generic-instantiation exerciser
+  added nothing (1594 → 1592) and was removed; all/none feature sets added at most +0.2 points.
+- **Fat-LTO detection** = the fraction of 19 always-linked std functions matching the prebuilt
+  std byte for byte: release 0.84–1.00 (n=7), fat LTO 0.26–0.41 (n=14; rustc 1.85 × 4 programs and
+  1.97 × 3), 21/21 classified (the old 8% std-share rule flagged 2/8 rustc 1.85 LTO builds).
+  `--profile auto` on LTO targets (crates rebuilt without LTO so their rlibs hold machine code;
+  LTO `.<n>` suffixes stripped from labels): serde_json+regex size-lto recall 6.9% → 27.3% at
+  98.0% precision, rand/sha2 speed-lto 24.6% → 50.1% at 98.3%. The remaining wrong labels are
+  byte-identical functions with different names (Debug for u64 vs usize).
+- **Cross targets**, rustc 1.97, per-binary DB, two programs: x86_64-pc-windows-gnu 58.7% / 99.4%
+  and 63.0% / 99.8%; i686-pc-windows-gnu 46.5% / 98.6% and 71.5% / 99.8% (0 function starts before
+  parsing raw `.eh_frame` FDEs; 0.04% precision before handling the extra leading `_` of i386 COFF
+  symbols); i686-unknown-linux-musl 71.3% / 99.4% and 70.5% / 99.0%; aarch64-unknown-linux-musl
+  52.8% / 99.4% and 68.4% / 99.6% (an AArch64-only rule for repeated whole-function matches).
+- **Bundled prebuilt-std layer** (`scripts/data/libfunc_sigs_std.json.gz`, 597 KB, rustc 1.97
+  x86-64 ELF / AArch64 ELF / x86-64 PE, used only on an exact rustc + arch + format match;
+  regenerated byte-identically by `gen_sigdb.py --bundle-std`): x86-64 Linux 14.8% → 27.4% and
+  49.6% → 69.8%; windows-gnu 0 → 28.1% / 57.2% (100%); AArch64 0 → 25.4% / 62.3% (98.4% / 99.6%).
+  Signatures of a *different known* rustc are no longer pooled (they gave 0.4–24% precision).
+- **Crate detection** with resolution: 10/10, 19/22, 7/8 (a glued source path such as
+  `…/lib.rsErrorcontext` was missed by `recover_rust_meta`). The 4 crates still missed (rand,
+  clap, getrandom, libc) have no functions of their own in the binaries, not even unstripped.
+- **v0 labels:** 79% of a rustc 1.97 build's short v0 labels had lost their last path segment
+  (`panic_bounds_check` → `core::panicking`); fixed (bundled DB on the 1.97 binary: 277/280).
+
+i686-unknown-linux-gnu was not linkable on the measuring host.
+
+## 66. Rust idiom recovery (`recover_idioms.py`) (Oct 2026)
+
+An Oxidizer-style tier that reads Rust's compiled idioms back out of stripped binaries: format-
+macro sites with their format string and formatting traits (`println!`, `format!`, `panic!`,
+`write!`), panic / safety-check sites with their kind, guarding branch and `Location`, drop /
+`__rust_dealloc` calls and drop glue, and enum-like returns (heuristic, with a confidence).
+Helpers are found without symbols from structure that survives stripping (core's fixed panic
+messages, `_print` referencing "stdout", the `__rust_dealloc` call shape, calls passing a Location
+to a never-returning function), under a per-function register/stack dataflow for x86-64 SysV and
+Win64, i386 (PIC base, stack arguments, stdcall pops) and AArch64. `fmt::Arguments` changed shape
+between rustc 1.91 (pieces array) and 1.97 (byte-coded template); both are decoded.
+`ghidra_annotate.py` exports the results as comments, bookmarks and `rd_*` renames.
+
+3 benign rustc 1.97 `-O` programs per target, stripped; ground truth = callee and formatter symbols
+of the unstripped build (`--eval`) plus DWARF return types; no libfuncs signatures unless noted.
+
+| | x86-64 ELF | AArch64 ELF | i386 ELF | x86-64 PE | i386 PE |
+|---|---|---|---|---|---|
+| panic sites P / R | 1.000 / 0.944 | 1.000 / 0.911 | 1.000 / 0.933 | 0.999 / 0.940 | 1.000 / 0.933 |
+| fmt sites P / R (all format-consumer calls) | 1.000 / 0.795 | 1.000 / 0.736 | 1.000 / 0.696 | 0.983 / 0.872 | 0.982 / 0.854 |
+| own-code format strings: text · exact trait | 38/38 · 38/38 | 38/38 · 38/38 | 38/38 · 36/38 | 38/38 · 36/38 | 38/38 · 35/38 |
+| non-Display traits P / R | 1.000 / 0.560 (libfuncs 0.979 / 0.700) | 1.000 / 0.737 | 0.824 / 0.500 | 0.900 / 0.839 | 0.885 / 0.827 |
+| drop/dealloc P / R | 0.981 / 0.872 (libfuncs 0.980 / 0.968) | 0.980 / 0.867 | 0.979 / 0.887 | 0.982 / 0.886 | 0.988 / 0.737 |
+| enum-like returns vs DWARF: P · R | 37/37 · 37/48 | 33/33 · 33/48 | 23/23 · 23/48 | – | – |
+| panic sites with a Location | 734 | 732 | 605 | 1989 | 1850 |
+
+**rustc 1.99.1** (the ARM64 lab VM's toolchain), same programs, with the 1.97 builds re-run as a
+regression on the final code (P / R; enum P · R vs DWARF):
+
+| | x86-64 ELF | AArch64 ELF | i386 ELF | x86-64 PE | i386 PE |
+|---|---|---|---|---|---|
+| panic sites, 1.97 → 1.99 | 1.000 / 0.944 → 1.000 / 0.938 | 1.000 / 0.911 → 1.000 / 0.899 | 1.000 / 0.933 → 1.000 / 0.924 | 0.999 / 0.940 → 0.999 / 0.948 | 1.000 / 0.933 → 1.000 / 0.943 |
+| fmt sites, 1.97 → 1.99 | 1.000 / 0.795 → 1.000 / 0.758 | 1.000 / 0.736 → 1.000 / 0.682 | 1.000 / 0.704 → 1.000 / 0.710 | 0.983 / 0.872 → 0.983 / 0.855 | 0.982 / 0.863 → 0.983 / 0.869 |
+| drop/dealloc, 1.97 → 1.99 | 0.975 / 0.992 → 0.972 / 0.891 | 0.964 / 0.992 → 0.959 / 0.886 | 0.966 / 0.995 → 0.962 / 0.991 | 0.982 / 0.995 → 0.983 / 0.987 | 0.987 / 0.990 → 0.985 / 0.984 |
+| enum-like returns, 1.97 → 1.99 | 37/37 · 37/48 → 35/35 · 35/46 | 33/33 · 33/48 → 30/30 · 30/46 | 23/23 · 23/48 → 21/21 · 21/46 | – | – |
+
+rustc 1.99 keeps the 1.97 template encoding. What it changed and what had to be fixed: io::Error's
+custom payload is dropped through a type-erased fn pointer (no dealloc call), so drop glue is also
+inferred from the callee a landing pad calls on its way to the unwinder's resume (this raised the
+1.97 drop recall to 0.99 too, at 0.96–0.99 precision); Windows places `ud2` after a trailing
+noreturn call; i386 places rotated loop heads after the epilogue's `ret` (they now start from the
+body frame as a speculative state, instead of an empty real one that poisoned the next join); and
+an x86 linear sweep can desynchronise inside a function, so functions are decoded by recursive
+descent first.
+
+Panic-kind accuracy 0.986–0.998. The fmt-site recall gap is mostly calls that forward an
+`Arguments` they received. `write!(f, "literal")` compiles to `write_str` through the `dyn
+fmt::Write` vtable and is reported as a `write!` site. Of 32 one-register `fmt::Result` functions
+with DWARF types (x86-64), 26 are separated from `bool`; a `Result<(), TryReserveError>` is
+ABI-identical to `bool` and not separable by static shape. On i386 the register-shape enum
+heuristics stay off (edx:eax also carries every u64). Mach-O: the committed rustc 1.91 fixture only.
+
+## 67. Emulation hook-body optimisation and devirtualisation fixes (Oct 2026)
+
+icicle-emu was evaluated as an alternative backend and **not adopted**: 96–98% of emulation time
+is spent in rust-deobf's own Python hooks, not in the engine (`scripts/bench_emu.py` keeps the
+comparison reproducible). The work went into the hook bodies instead, with outputs held identical
+(`tests/emu_equiv.py` dumps every result; `tests/test_emu_equivalence.py` compares against a golden
+made from the pre-change code: all 525 `benign_rust_std.x64` functions' quick and full runs plus
+`explore()` and `recover()`, unpack on the pack fixtures, devirt `recover_all` on all 8 VM fixtures).
+
+Two real bugs first. `recover_emulate.run` counted callee faults in a dict keyed by `id(frame)`;
+Python reuses a freed frame's address, so a new callee could inherit an old one's count and
+16 of 525 functions changed with memory allocation. The count now lives on the frame
+(`tests/test_emulate_determinism.py`). `lift_vm._recover_map` took a non-VM `cmp idx, 0xc000008b`
+(a Windows status constant) in `rustcloak_vm_pe.exe` as a 3,221,225,612-entry opcode table, so
+`devirt_emulate.recover_all` never finished (>20 min of CPU); explicit table bounds are now capped at
+the byte range and the fixture finishes in 3.5 s.
+
+CPU time, x86-64 Linux, Unicorn 2.1.4, interleaved runs (±5%):
+`recover_emulate.recover(benign_rust_std.x64)` 8.77–9.26 → 6.34–6.41 s (1.38–1.44×); `recover.py
+--json` 10.75 → 8.18 s; the 525-function sweep 5.03–5.29 → 3.18–3.34 s (641–674 → 1,016–1,066 k
+emulated instructions/s); AArch64 obfstr build 23.43 → 16.10 s; unpack_emulate UPX x64 PE 1.078 →
+0.853 s, x86 PE 0.531 → 0.479 s; devirt `recover_all` on rustcloak_vm_call / _nested / _obf / _vm /
+_rnd 6.64–6.99 / 13.81–13.99 / 4.19–4.23 / 5.15 / 5.08 → 2.31–2.48 / 3.71–3.90 / 1.68–1.73 / 2.04 /
+1.82 s. Unicorn 2.1's `uc_reg_write_batch` does not leave the block on a PC write; the PC must be
+written alone. Measured and not adopted: raw ctypes hooks (no gain), batched write stamping
+(slower), dropping `count=` (~15 ns/insn), a longer emulator-refresh period (~5%), page-protection
+write tracking in unpack_emulate (would lose its per-byte semantics). `recover()` is ~92% inside the
+hooked emulator run, so it stays at ~1.4×.
+
+## 68. 2026 crates obfuse 1.0.1 and obfany 0.1.5; AEAD, software ciphers, i386 and 32-bit PE (Oct 2026)
+
+Four canary crates join the benchmark: **obfuse** with default features (its `polymorphic` default
+never calls AES-256-GCM: each literal gets 2–4 inline XOR/ADD/SUB/rotate layers with runtime-derived
+keys in a flattened state machine, fresh random keys every build, and the binary holds 0 AES
+instructions), **obfuse_aes** (`default-features = false`, the crate's real AES-256-GCM path),
+**obfuse_xor** (XOR through MBA expressions) and **obfany** (an obfstr fork: `obfstr!`, `obfwide!`,
+`obfnum!` in `obfstmt!`). `strings` and the static engines find 0/5 in all of them; the pipeline
+(emulation) is what recovers them.
+
+Engine changes and what they fixed (pipeline recall, before → after):
+- **GCM tag glued on:** an in-place decrypt leaves the 16-byte tag after the plaintext with the
+  same write age, so a printable first tag byte attached to the string (`...20261018)`). A (ptr,
+  len) the code passed marks the string complete when the next 16 bytes are non-text and found
+  verbatim in the file. obfuse_aes ELF x86-64 release 4/5 → 5/5; junk on random-key rebuilds → 0.
+- **Software AES ran out of instruction budget:** the `aes` crate on AArch64 has no AES
+  instructions (fixsliced AES + GHASH, ~26k emulated instructions per string). Callees running
+  dense straight-line code (≥16 instructions per block on average; callees that overran on the old
+  benchmark averaged ≤11) get bounded budget extensions, and a run is extended while dense or still
+  producing strings at a steady pace. obfuse_aes AArch64 release 0/5 and size-lto 2/5 → 5/5.
+  Under emulation, obfuse_aes on x86-64 executes 322 AES-NI and 54 PCLMULQDQ instructions and the
+  GCM tag check passes.
+- **i386 Linux:** libc system calls go through `call *%gs:0x10`, which was 0 (every syscall
+  returned 0 and malloc got no memory); it now points at the binary's own `int $0x80; ret`. Stripped
+  static builds also needed i386 C-runtime signatures (a new `x86` table, 12 functions). On stripped
+  static i686 musl: xor_custom, add_custom, litcrypt, litcrypt2, cryptify, obfuse, obfuse_aes and
+  obfuse_xor 0/5 → 5/5; obfstr 4/5 + 6 junk → 5/5; muddy +1 and obfany +2 junk → 0.
+- **32-bit PE (i686-pc-windows-gnu)** is now emulated (it used to give 0–2/5 and was routed to
+  literal recovery only): Win32 imports are stdcall, so the trampoline pops their arguments;
+  function starts come from `.eh_frame` (no `.pdata` on i386); `mov/push imm32` ciphertext
+  references are scored; import trampolines are read+execute and restored on every reset (a store
+  through msvcrt's `__initenv` had corrupted the `ret` stubs). A host-side `uc.mem_write` does not
+  invalidate Unicorn's translated blocks, so code pages restored between runs now drop their
+  translation cache (obfuse_aes PE32 `main` had gone 5/5 → 0/5 after exploring the decrypt routine).
+- Six junk filters: a short repeated unit, a cipher block holding a string's end plus keystream, a
+  forced-path junk head plus an inner piece, a string followed by its own start (it had cost obfstr
+  its charlie canary on i686), two decodes side by side, two 4-byte pieces out of order.
+
+Measured on the merged tree (x86-64 Linux host; `tests/test_benchmark.py` + `tests/test_32bit.py`,
+187 tests): every crate, old and new, recovers 5/5 exactly on ELF x86-64, ELF AArch64, PE x86-64
+and 32-bit PE, stripped and not, and on i686 musl / glibc -- **except obfuse_aes on 32-bit PE: 3/5**
+(alpha, bravo, charlie; delta and echo missing, stripped and not, also on the round's own tree;
+an explicit xfail). size-lto / speed-lto were measured on ELF x86-64 and AArch64 (`test_scatter`,
+121 and 103 tests), not on PE. False positives on tar, xz, curl and bash: 0 → 0. FLOSS and dynamic
+recovery were not run on the new crates.
+
+## 69. Packaging: `pip install rust-deobf` / `pip install -U rust-deobf` (Oct 2026)
+
+rust-deobf is installable and upgradable as two distributions: `rust-deobf` (Apache-2.0; the import
+package `rust_deobf` is `scripts/` itself, so nothing moved and a clone runs exactly as before) and
+`rust-deobf-premium` (AGPL-3.0-or-later OR LicenseRef-Commercial), pinned to the same version, which
+`scripts/_version.py` defines once. The `rust-deobf` command maps 41 subcommands to the scripts'
+own `main()` (help and exit codes pass through) and adds `list`, `doctor` (dependency check, cache
+path, premium version match, Windows-ARM64-native Python warning) and `ghidra` (a Python port of
+`ghidra_run.sh` that also runs on Windows); premium tools run as a separate process, so the core
+never imports premium code (a test enforces the license boundary). Clone-only tools (`SOURCE_ONLY`)
+stay out of the wheel. Releases are tag-driven (`release.yml`: build, per-OS installed-wheel tests,
+PyPI Trusted Publishing, GitHub Release; the tag must equal the version). Measured on x86-64 Linux
+(Python 3.10 and 3.13): both wheels built and installed into a fresh venv with real dependency
+downloads, run from outside the repo (`--version`, `list --json`, `doctor --json`, `recover` on
+a fixture, `python -m rust_deobf`, a premium selftest, library-mode module shadowing), editable
+installs, `twine check --strict` on all 4 dists; 15 installed-mode tests. One analysis bug found on
+the way: `recover_libfuncs` located its DB through the repo root, so an installed `--libfuncs`
+silently matched nothing. The release workflow's Windows / macOS / ARM64 Linux jobs have not run
+yet; `rust-deobf ghidra` was tested with `--dry-run` only.
+
+## 70. Cross-platform matrix for rounds 62–69 (Oct 2026)
+
+The merged tree of §62–§69 (one branch per feature, rebased onto §61's tree) was run on the three
+lab targets with the fast CI subset (`./scripts/check.sh full`).
+
+| target | result |
+|---|---|
+| x86-64 Linux (cloud) | 728 passed, 19 skipped |
+| ARM64 Kali (native aarch64, rustc 1.99.1) | 691 passed, 54 skipped; 2 dyn-await tests then fixed and re-run there (test_async 6 passed, 5 skipped for toolchains not installed) |
+| Windows x64 (x64 Python on Windows 11 ARM64) | 654 passed, 93 skipped |
+
+Plus, on x86-64 Linux: `tests/test_benchmark.py` + `tests/test_32bit.py` against a full build
+(ELF x86-64 / AArch64, PE x86-64, 32-bit PE, i686): 185 passed, the 2 obfuse_aes 32-bit PE cases
+recover 3/5 (§68, now xfail).
+
+What only the real targets exposed, all fixed:
+- `tests/fixtures/emu/equiv_golden.json.gz` stored devirt results with the recording checkout's
+  absolute path, so the equivalence test failed on every other machine. Apart from that path,
+  emulation outputs on ARM64 Kali and Windows x64 matched the x86-64 golden value for value.
+- A timing-order assertion in `test_bench_emu` failed under x64 emulation on Windows-on-ARM.
+- rustc 1.99.1 on the ARM64 VM inlines a bare top-level future into the executor (§64) and, on
+  native AArch64, a boxed future into its caller's poll; recover_async still recovers every state
+  machine that exists, and the tests now accept the compiler's choice.

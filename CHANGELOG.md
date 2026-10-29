@@ -49,6 +49,17 @@ was developed in the open before packaging and is summarised by theme.
 - **Cross-platform.** Verified on x86-64 Linux, ARM64 Kali and Windows x64 (x64 Python on
   Windows-on-ARM); test fixtures build for the host architecture.
 
+- **October 2026 round (VALIDATION.md §62–§70).** Keyless LZ4 / aPLib / BriefLZ / LZNT1
+  decompression in blob triage (`decompress.py`); async `Future::poll` state machines
+  (`recover_async.py`, rustc 1.70–1.99, ELF/PE/Mach-O, x86-64/AArch64/i386); per-binary
+  library-signature DBs for the binary's own rustc, target and crates (`gen_sigdb.py`) plus a
+  bundled std layer for AArch64 and PE; Rust idioms in stripped binaries -- format strings with
+  their traits, panic/safety checks with `file:line:col`, drops, enum-like returns
+  (`recover_idioms.py`, annotated in Ghidra); a bridge pushing all of it into a running GhidraMCP or
+  ida-pro-mcp (`decompiler_bridge.py`, `decompiler_selfcheck.py`); 32-bit PE emulation; the 2026
+  obfuscation crates obfuse and obfany in the benchmark; ~1.4–1.6x faster emulation and 2.5–3.7x
+  faster devirtualisation with identical output.
+
 ### Fixed
 - A full bug-review round across the toolkit (emulator `.bss`/TLS/strlen edge cases, embedded and
   blob carving bounds, import binding past junk bytes and on ARM64, YARA/capa output that always
