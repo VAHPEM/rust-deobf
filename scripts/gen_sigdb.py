@@ -39,6 +39,8 @@ DB the binary actually needs (the idea behind rustbinsign / Oxidizer's per-versi
     python3 scripts/gen_sigdb.py path/to/binary --build-crates     # + the crates (IN THE ANALYSIS VM)
     python3 scripts/gen_sigdb.py path/to/binary --allow-download   # rustup install + crates.io
     python3 scripts/gen_sigdb.py path/to/binary --json             # the report as JSON
+    # maintainer: regenerate the bundled prebuilt-std layer (scripts/data/libfunc_sigs_std.json.gz)
+    python3 scripts/gen_sigdb.py --bundle-std x86_64-unknown-linux-gnu,aarch64-unknown-linux-musl,x86_64-pc-windows-gnu
     python3 scripts/gen_sigdb.py --selftest
 
 SECURITY: the crate list comes from the (untrusted) binary, and COMPILING a crate runs its build
@@ -1481,6 +1483,55 @@ def std_anchor_rate(path: Path, std_entries: list, arch: str, matches=None) -> f
     return round(sum(1 for t in have if any(t in x for x in syms)) / len(have), 3)
 
 
+def _triple_arch_fmt(triple: str) -> tuple[str, str]:
+    a = triple.split("-")[0]
+    arch = {"x86_64": "x86_64", "aarch64": "aarch64", "i686": "x86", "i586": "x86"}.get(a, a)
+    fmt = "pe" if "-windows-" in triple else ("macho" if "-apple-" in triple else "elf")
+    return arch, fmt
+
+
+def bundle_std(toolchain: str | None, triples: list, out: Path, log=lambda m: None) -> dict:
+    """The bundled prebuilt-std signature file (recover_libfuncs.STD_OUT): one rustc's std rlibs
+    for several targets, keyed "<arch>-<format>", gzip JSON; `name` is omitted where it is
+    derivable from the mangled `sym` (recover_libfuncs re-derives labels from symbols)."""
+    import gzip
+    import recover_libfuncs as L
+    budget = Budget(3600)
+    env = _base_env(False)
+    tc = toolchain_info(toolchain, env, budget)
+    if tc is None:
+        raise ValueError("toolchain %r not found" % toolchain)
+    tool = _tool_key(tc)
+    db = {"__meta__": {"format": SIGDB_FORMAT, "rustc": tc["version"], "commit": tc["commit"],
+                       "targets": {}}, tool: {}}
+    for t in triples:
+        if not _TRIPLE.match(t) or not target_installed(tc, t):
+            raise ValueError("target %s not installed for %s" % (t, tc.get("name")))
+        arch, fmt = _triple_arch_fmt(t)
+        entries, _st = sign_std(tc, t, arch, budget)
+        # two targets of one arch+format (aarch64 gnu + musl) share a group: prune them together
+        db[tool].setdefault("%s-%s" % (arch, fmt), []).extend(entries)
+        db["__meta__"]["targets"][t] = len(prune(entries))
+        log("%s: %d signatures" % (t, db["__meta__"]["targets"][t]))
+    for k, lst in db[tool].items():
+        compact = []
+        for e in prune(lst):
+            e = dict(e)
+            if e["sym"].lstrip("_")[:1] in ("R", "Z") and L._label(e) == e["name"]:
+                del e["name"]                      # recover_libfuncs re-derives it from `sym`
+            compact.append(e)
+        db[tool][k] = compact
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(db, separators=(",", ":"), sort_keys=True).encode()
+    tmp = out.with_name(out.name + ".tmp%d" % os.getpid())
+    with open(tmp, "wb") as fh:                     # mtime=0: byte-reproducible output
+        with gzip.GzipFile(fileobj=fh, mode="wb", compresslevel=9, mtime=0, filename="") as gz:
+            gz.write(raw)
+    os.replace(tmp, out)
+    return db["__meta__"]
+
+
 def _tool_key(tc: dict) -> str:
     """The DB group key recover_libfuncs._toolchain() derives for a binary of this toolchain."""
     import recover_rust_meta as M
@@ -1760,11 +1811,27 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true", help="rebuild even if a cached DB exists")
     ap.add_argument("--out", help="write the DB here instead of the cache")
     ap.add_argument("--print-key", action="store_true", help="print the cache key/path and exit")
+    ap.add_argument("--bundle-std", metavar="TRIPLES",
+                    help="maintainer: write the bundled prebuilt-std signature file for these "
+                         "comma-separated targets of --toolchain (default: the one on PATH) to "
+                         "--out (default scripts/data/libfunc_sigs_std.json.gz); no binary needed")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
         _selftest()
+        return 0
+    if a.bundle_std:
+        import recover_libfuncs as L
+        try:
+            meta = bundle_std(a.toolchain, [t.strip() for t in a.bundle_std.split(",") if t.strip()],
+                              Path(a.out) if a.out else L.STD_OUT,
+                              log=lambda m: print("  " + m, file=sys.stderr))
+        except ValueError as e:
+            print("bundle-std: %s" % e, file=sys.stderr)
+            return 3
+        print(json.dumps(meta, indent=1) if a.json else "wrote %s: %s" % (
+            a.out or L.STD_OUT, ", ".join("%s=%d" % kv for kv in meta["targets"].items())))
         return 0
     if not a.binary:
         ap.error("binary required (or --selftest)")

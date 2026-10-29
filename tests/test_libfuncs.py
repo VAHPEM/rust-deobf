@@ -130,3 +130,25 @@ def test_per_binary_db_end_to_end(tmp_path, monkeypatch):
     no_truth = sum(1 for x in res if x["va"] not in truth)
     assert no_truth == 0, "matches at addresses with no function"
     assert correct >= 100 and correct >= 0.97 * len(res), (correct, len(res))
+
+
+@pytest.mark.skipif(not shutil.which("rustc"), reason="no rustc")
+def test_bundle_std_roundtrip(tmp_path):
+    """gen_sigdb --bundle-std writes a reproducible gzip DB recover_libfuncs can load."""
+    import gen_sigdb as S
+    host = subprocess.run(["rustc", "-vV"], capture_output=True, text=True).stdout
+    triple = next((l.split(":", 1)[1].strip() for l in host.splitlines() if l.startswith("host:")), None)
+    if not triple:
+        pytest.skip("no host triple")
+    out = tmp_path / "std.json.gz"
+    meta = S.bundle_std(None, [triple], out)
+    first = out.read_bytes()
+    S.bundle_std(None, [triple], out)
+    assert out.read_bytes() == first                       # byte-reproducible (gzip mtime=0)
+    assert meta["targets"][triple] > 500
+    import gzip
+    import json as _json
+    d = _json.loads(gzip.decompress(first))
+    arch, fmt = S._triple_arch_fmt(triple)
+    tool = [k for k in d if not k.startswith("__")][0]
+    assert len(d[tool]["%s-%s" % (arch, fmt)]) == meta["targets"][triple]

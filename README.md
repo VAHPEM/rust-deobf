@@ -739,10 +739,13 @@ This is research code, not a finished product. The ones that matter most:
   verified 5/5 (VALIDATION.md §14). FickleStealer is also packed, so it needs unpacking regardless
   of arch. The benchmark's obfuscation crates model one real pattern, not all of them.
 - **Library-function identification** (`recover_libfuncs.py`) names std/crate functions by byte
-  signature on ELF, PE and Mach-O (x86-64, AArch64; 32-bit x86 ELF); the bundled DB is for one
-  toolchain (rustc 1.97 x86-64) and must be regenerated (`--gen`) for another rustc, architecture
-  or format -- or built per binary with `gen_sigdb.py` (its own rustc, target and crate versions)
-  and picked with `--db auto` -- and generic-heavy labels flatten their type args.
+  signature on ELF, PE and Mach-O (x86-64, AArch64, 32-bit x86); the bundled DBs are for one
+  toolchain, rustc 1.97 (linked-build signatures for x86-64, plus prebuilt-std signatures for
+  x86_64 Linux, aarch64 Linux and x86_64 windows-gnu in `scripts/data/libfunc_sigs_std.json.gz`,
+  ~600 KB gzip), and are used only for a binary of that rustc (same minor): signatures of another
+  rustc mislabel more than they name. For any other rustc / target / crate set build a DB per
+  binary with `gen_sigdb.py` and pick it with `--db auto`; generic-heavy labels flatten their
+  type args.
 
 Full matrix: `RESULTS.md` · reproducible metrics: `METRICS.md` · real-binary validation and the
 generalisation work: `VALIDATION.md` (§10) · artifact tiers: `ARTIFACT_TIERS.md`.

@@ -58,7 +58,9 @@ MAX_WILDCARD = 0.4    # drop a signature that is mostly masked (no discriminatin
 # misidentification, only a less pretty name.
 # ---------------------------------------------------------------------------------------------
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_LLVM_SUFFIX = re.compile(r"\.llvm\.\d+$")
+# LLVM's ThinLTO/internalisation suffixes (`.llvm.<digits>`, and `.<digits>` on functions LTO
+# localised or cloned) differ between builds of the same function
+_LLVM_SUFFIX = re.compile(r"(?:\.llvm)?\.\d+$")
 
 
 def _v0_path(sym: str):
@@ -128,7 +130,12 @@ def readable(sym: str) -> str:
     """A human label for a mangled symbol: v0 path, legacy demangle, or the raw symbol."""
     # LLVM's ThinLTO/internalisation suffix (`.llvm.<digits>`) differs between builds of the
     # same function; drop it so the label (and its demangling) is build-independent
-    sym = _LLVM_SUFFIX.sub("", sym)
+    sym = _macho_sym(sym)                          # Mach-O / i386 COFF add one leading `_`
+    for _ in range(3):                             # `.llvm.123.4` style stacks
+        sym2 = _LLVM_SUFFIX.sub("", sym)
+        if sym2 == sym:
+            break
+        sym = sym2
     p = _v0_path(sym)
     if p:
         return p
@@ -173,6 +180,132 @@ def _engine():
     return G
 
 
+def function_starts(binary) -> set:
+    """gen_runtime_sigs.function_starts, plus the FDEs of a raw `.eh_frame` for a PE without
+    `.pdata`: a stripped 32-bit mingw PE has no symbols, no .pdata (x86-64 only) and no
+    .eh_frame_hdr -- only `.eh_frame`, whose name the strip even reduced to `/4` -- so it used to
+    yield no function starts at all (0 matches)."""
+    G = _engine()
+    starts = set(G.function_starts(binary))
+    if binary.format.name == "PE" and not any(s.name == ".pdata" for s in binary.sections):
+        text = next((s for s in binary.sections if s.name == ".text"), None)
+        if text is not None:
+            lo, hi = text.virtual_address, text.virtual_address + text.size
+            ib = binary.optional_header.imagebase
+            ptr = 4 if G._arch(binary) == "x86" else 8
+            for sec in binary.sections:
+                nm = sec.name if isinstance(sec.name, str) else ""
+                if nm == ".eh_frame" or nm.startswith("/"):
+                    got = eh_frame_fde_starts(bytes(sec.content), sec.virtual_address, ptr, ib)
+                    inside = {a for a in got if lo <= a < hi}
+                    if len(inside) >= max(1, len(got) // 2):     # it really is .eh_frame
+                        starts |= inside
+    return starts
+
+
+def _uleb(d: bytes, i: int) -> tuple[int, int]:
+    v = sh = 0
+    while i < len(d):
+        b = d[i]
+        i += 1
+        v |= (b & 0x7F) << sh
+        sh += 7
+        if not b & 0x80:
+            return v, i
+    raise ValueError("uleb")
+
+
+def _sleb(d: bytes, i: int) -> tuple[int, int]:
+    v = sh = 0
+    while i < len(d):
+        b = d[i]
+        i += 1
+        v |= (b & 0x7F) << sh
+        sh += 7
+        if not b & 0x80:
+            if b & 0x40:
+                v -= 1 << sh
+            return v, i
+    raise ValueError("sleb")
+
+
+def eh_frame_fde_starts(data: bytes, va: int, ptr: int, imagebase: int = 0) -> set:
+    """pc_begin of every FDE in a raw .eh_frame (section RVA `va`), as RVAs. Absolute pointers
+    (DW_EH_PE_absptr, what i686 mingw emits) are rebased by `imagebase`. Malformed data ends the
+    walk; nothing raises."""
+    import struct
+    out, cies, off = set(), {}, 0
+
+    def enc_read(enc, i):
+        fmt, app = enc & 0x0F, enc & 0x70
+        if fmt == 0x00:
+            v = int.from_bytes(data[i:i + ptr], "little")
+            n = ptr
+        elif fmt in (0x01, 0x09):
+            v, j = (_uleb if fmt == 0x01 else _sleb)(data, i)
+            n = j - i
+        else:
+            size = {0x02: 2, 0x03: 4, 0x04: 8, 0x0A: 2, 0x0B: 4, 0x0C: 8}[fmt]
+            v = int.from_bytes(data[i:i + size], "little", signed=fmt >= 0x09)
+            n = size
+        if app == 0x10:
+            v += va + i
+        return v, i + n
+
+    try:
+        while off + 8 <= len(data) and len(out) < 1_000_000:
+            length = struct.unpack_from("<I", data, off)[0]
+            if length == 0:
+                break
+            hdr = 4
+            if length == 0xFFFFFFFF:
+                length, hdr = struct.unpack_from("<Q", data, off + 4)[0], 12
+            body = off + hdr
+            end = body + length
+            if end > len(data):
+                break
+            cid = struct.unpack_from("<I", data, body)[0]
+            if cid == 0:                                       # CIE
+                i = body + 5
+                aug_end = data.index(b"\0", i)
+                aug = data[i:aug_end].decode("latin-1")
+                i = aug_end + 1
+                if "eh" in aug:
+                    i += ptr
+                _ca, i = _uleb(data, i)
+                _da, i = _sleb(data, i)
+                if data[body + 4] == 1:
+                    i += 1
+                else:
+                    _ra, i = _uleb(data, i)
+                fde_enc = 0x00
+                if aug.startswith("z"):
+                    _alen, i = _uleb(data, i)
+                    for ch in aug[1:]:
+                        if ch == "R":
+                            fde_enc = data[i]
+                            i += 1
+                        elif ch == "P":
+                            penc = data[i]
+                            _p, i = enc_read(penc & 0x7F, i + 1)
+                        elif ch == "L":
+                            i += 1
+                cies[off] = fde_enc
+            else:                                              # FDE: CIE pointer is relative
+                cie = body - cid
+                enc = cies.get(cie)
+                if enc is not None:
+                    pc, _ = enc_read(enc & 0x7F, body + 4)
+                    pc &= (1 << (8 * ptr)) - 1
+                    if imagebase and pc >= imagebase:
+                        pc -= imagebase
+                    out.add(pc)
+            off = end
+    except (ValueError, struct.error, KeyError, IndexError):
+        pass
+    return out
+
+
 def _toolchain_from_meta(d: dict) -> str:
     """DB group key for a binary from recover_rust_meta's result: rustc-<release> /
     commit-<12 hex> / unknown."""
@@ -209,7 +342,7 @@ def _own_crate(binary) -> str | None:
     macho = binary.format.name == "MACHO"
     c = Counter()
     for s in binary.symbols:
-        nm = _macho_sym(s.name) if macho else s.name
+        nm = _macho_sym(s.name)
         if (macho or getattr(s, "is_function", False)) and nm.startswith("_R"):
             p = _v0_path(nm)
             if p:
@@ -234,7 +367,7 @@ def generate(paths):
         if text is None:
             continue
         code, base = bytes(text.content), text.virtual_address
-        starts = G.function_starts(b)
+        starts = function_starts(b)
         crates = set()
         try:
             import recover_rust_meta as M
@@ -250,7 +383,7 @@ def generate(paths):
                 continue
             if not macho and not getattr(sym, "is_function", False):
                 continue
-            nm = _macho_sym(sym.name) if macho else sym.name
+            nm = _macho_sym(sym.name)
             if not _is_library_symbol(nm, own, crates):
                 continue
             size = sym.size or SIG_LEN
@@ -286,9 +419,31 @@ def generate(paths):
     return db
 
 
+STD_OUT = ROOT / "scripts" / "data" / "libfunc_sigs_std.json.gz"
+
+
 def load_db(path: Path | None = None):
+    """A DB file. Without a path: the bundled DB, plus (under `__std__`) the bundled prebuilt-std
+    signatures (gen_sigdb.py --bundle-std), which match_binary uses ONLY for a binary of exactly
+    that rustc -- std code from another toolchain mislabels far more than it names."""
     p = Path(path) if path is not None else OUT
-    return json.loads(p.read_text()) if p.exists() else {}
+    db = json.loads(p.read_text()) if p.exists() else {}
+    if path is None:
+        std = load_std_db()
+        if std:
+            db["__std__"] = std
+    return db
+
+
+def load_std_db() -> dict:
+    """{tool: {"<arch>-<format>": [sig]}} from STD_OUT (gzip JSON), or {}."""
+    import gzip
+    try:
+        with gzip.open(STD_OUT, "rt", encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return _groups(d) if isinstance(d, dict) else {}
 
 
 def _groups(db: dict) -> dict:
@@ -297,6 +452,10 @@ def _groups(db: dict) -> dict:
     return {k: v for k, v in db.items() if not str(k).startswith("__") and isinstance(v, dict)}
 
 
+# AArch64 only: adrp/add/ldr words are masked whole, so two functions differing only in the data
+# they load look identical; a repeated full match there must be almost unmasked. (On x86-64 the
+# same rule cost 14 points of recall on per-CGU copies at no precision gain -- measured.)
+FULL_REPEAT_MAX_WILD = 0.10
 _PREFIX = 4                                       # index signatures by up to 4 leading concrete bytes
 
 
@@ -333,7 +492,7 @@ def _label(e: dict) -> str:
     sym = e.get("sym")
     if isinstance(sym, str) and sym.lstrip("_")[:1] in ("R", "Z"):
         return readable(_macho_sym(sym))
-    return e["name"]
+    return e.get("name") or str(sym)
 
 
 _X86_PAD = {0x00, 0x90, 0xCC}
@@ -370,24 +529,36 @@ def match_binary(path: Path, db=None, tool: str | None = None):
     G = _engine()
     if db is None:
         db = load_db()
+    std = db.get("__std__") if isinstance(db.get("__std__"), dict) else {}
     db = _groups(db)
     b = lief.parse(str(path))
     arch = G._arch(b)
+    fmt = b.format.name.lower()
     text = next((s for s in b.sections if s.name == ("__text" if b.format.name == "MACHO" else ".text")), None)
     if text is None:
         return []
     code, base = bytes(text.content), text.virtual_address
-    starts = sorted(a for a in G.function_starts(b) if base <= a < base + len(code))
+    starts = sorted(a for a in function_starts(b) if base <= a < base + len(code))
     if tool is None:
         tool = _toolchain(path)
-    # prefer the target's own toolchain; else pool every toolchain's sigs for this arch
+    # the target's own toolchain; pool every toolchain's sigs only when the binary's toolchain is
+    # unknown -- for a KNOWN other rustc, signatures from a different toolchain mislabel more
+    # than they name (measured: 1.97 sigs on a 1.85 binary, 0.4-24% precision)
     groups = []
+    minor = ".".join(tool.split(".")[:2]) + "." if tool.startswith("rustc-") else None
     if tool in db and arch in db[tool]:
         groups.append(db[tool][arch])
-    else:
+    elif minor and any(str(t).startswith(minor) and arch in db[t] for t in db):
+        # another patch release of the same minor (1.85.0 vs 1.85.1): same std, near-same codegen
+        groups += [db[t][arch] for t in db if str(t).startswith(minor) and arch in db[t]]
+    elif tool == "unknown" or not any(str(t).startswith(("rustc-", "commit-")) for t in db):
+        # (nothing to compare: the binary's toolchain, or every DB group's, is unknown)
         for t, byarch in db.items():
             if arch in byarch:
                 groups.append(byarch[arch])
+    # bundled prebuilt-std signatures: same rustc only, same arch AND format
+    if tool in std and isinstance(std[tool], dict):
+        groups.append(std[tool].get("%s-%s" % (arch, fmt), []))
     sigs = [e for g in groups for e in g]
     idx = _index(sigs)
     labels: dict[int, str] = {}
@@ -435,20 +606,34 @@ def match_binary(path: Path, db=None, tool: str | None = None):
     # 3) assign a start from its tight signatures when they agree on one name
     out = []
     fullc: dict[str, tuple] = {}
+    verified: dict[int, dict] = {}                # start -> {name: (sym, full)}
+    full_hits: dict[str, set] = {}                # full pattern -> starts it verified at
     for a in sorted(matched_at):
         tight = [(n, s) for pat, n, s, _e in matched_at[a] if pat not in loose or (pat, a) in copies]
         names = {n: s for n, s in tight}
-        if len(names) != 1:
-            # 4) the prefix alone is ambiguous (several starts, or several names): a candidate
-            #    whose WHOLE-function pattern (gen_sigdb DBs) matches and ends here still names it
-            names = {}
-            for _pat, n, s, e in matched_at[a]:
-                full = e.get("full")
-                if isinstance(full, str) and _full_match(code, base, a, full, nxt.get(a, a), arch, fullc):
-                    names[n] = s
         if len(names) == 1:
             (name, sym), = names.items()
             out.append({"va": a, "name": name, "sym": sym})
+            continue
+        # 4) the prefix alone is ambiguous (several starts, or several names): a candidate whose
+        #    WHOLE-function pattern (gen_sigdb DBs) matches and ends here may still name it
+        for _pat, n, s, e in matched_at[a]:
+            full = e.get("full")
+            if isinstance(full, str) and _full_match(code, base, a, full, nxt.get(a, a), arch, fullc):
+                verified.setdefault(a, {})[n] = (s, full)
+                full_hits.setdefault(full, set()).add(a)
+    for a, cands in verified.items():
+        if len(cands) != 1:
+            continue
+        (name, (sym, full)), = cands.items()
+        # one whole-function pattern verifying at several starts is either per-CGU copies of one
+        # function or DIFFERENT functions that differ only in what the masked bytes point at
+        # (derived Debug impls on AArch64: same code, other strings)
+        if (arch == "aarch64" and len(full_hits[full]) > 1
+                and full.count("..") > len(full) // 2 * FULL_REPEAT_MAX_WILD):
+            continue
+        out.append({"va": a, "name": name, "sym": sym})
+    out.sort(key=lambda r: r["va"])
     return out
 
 
@@ -546,9 +731,9 @@ def select_db(path: Path, mode: str = "bundled", meta: dict | None = None) -> tu
     else:
         info["toolchain_match"], info["db_rustc"] = _bundled_quality(db, meta)
     if info["toolchain_match"] == "mismatch":
-        info["warning"] = ("the DB was built by another rustc than the binary's: codegen differs, so "
-                           "matches are few and their labels unreliable -- build a matching DB with "
-                           "gen_sigdb.py <binary>")
+        info["warning"] = ("the DB was built by another rustc than the binary's: its signatures are "
+                           "not used for this binary (another rustc's code mislabels far more than it "
+                           "names) -- build a matching DB with gen_sigdb.py <binary>")
     return db, info
 
 
@@ -692,7 +877,7 @@ def propagate(path: Path, matches: list, db=None) -> list:
     if text is None:
         return []
     code, base = bytes(text.content), text.virtual_address
-    starts = sorted(a for a in G.function_starts(b) if base <= a < base + len(code))
+    starts = sorted(a for a in function_starts(b) if base <= a < base + len(code))
     graph = _call_graph(code, base, starts, arch)
     return _propagate_from_graph(starts, graph, matches)
 
@@ -837,6 +1022,8 @@ def _selftest():
     # metadata keys are not signature groups; .llvm.<n> suffixes do not leak into labels
     assert _groups({"__meta__": {"x": 1}, "rustc-1.0.0": {"x86_64": []}}) == {"rustc-1.0.0": {"x86_64": []}}
     assert readable("_ZN4core3fmt9Formatter3pad17h0123456789abcdefE.llvm.123") == "core::fmt::Formatter::pad"
+    assert readable("_ZN5alloc6string6String4push17h602a7f5c73cf964eE.910") == "alloc::string::String::push"
+    assert readable("__RNvNtCsk_4core6option13unwrap_failed") == "core::option::unwrap_failed"   # i386 COFF
     # whole-function copies: only alignment padding may follow the matched bytes
     pad = b"\xc3" + b"\x66\x0f\x1f\x44\x00\x00" + b"\x90" * 9      # ret; 6-byte nop; 9x nop
     assert _ends_with_padding(pad, 0x1000, 0x1001, 0x1010, "x86_64")

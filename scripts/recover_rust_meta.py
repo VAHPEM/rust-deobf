@@ -25,8 +25,10 @@ from pathlib import Path
 # start and the extension, or the match starts partway in and the Location pointer (which points at
 # the true start) falls outside it: spaces ("C:\Users\John Doe\..."), '~', and UTF-8 bytes
 # (\x80-\xff, e.g. "C:\Users\Phạm\..."). NUL and newline are excluded, so a match still stays within
-# one rodata string.
-RE_SRC_PATH = re.compile(rb"[0-9A-Za-z_./\\:+~ \x80-\xff-]*?\.rs\b")
+# one rodata string. The end is `.rs` NOT followed by a lowercase/digit/underscore -- rodata glues
+# the next string straight on ("smallvec-1.16.4/src/lib.rsErrorcontext"), so a word boundary
+# (`\b`) missed every path followed by an uppercase letter.
+RE_SRC_PATH = re.compile(rb"[0-9A-Za-z_./\\:+~ \x80-\xff-]*?\.rs(?![a-z0-9_])")
 # semver allowing BOTH a pre-release and a build-metadata part (1.0.0-rc.1+build.5)
 _SEMVER = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
 # `.cargo/registry/src/<index>/<crate>-<ver>/` under ~/.cargo, or `cargo/registry/...` when

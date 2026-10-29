@@ -427,3 +427,17 @@ def test_offline_all_features_skip_optional_dependencies():
             "aho-corasick": [({"logging": ["dep:log"]}, {"log"}, {"log": "log"})]}
     pulls = {f for f in fmap if S._pulls_optional_dep("serde_json", f, pkgs)}
     assert pulls == {"preserve_order", "arbitrary", "uses_po", "logging"}, pulls
+
+
+def test_source_path_glued_to_next_string():
+    """rodata strings are not separated: `.../smallvec-1.16.4/src/lib.rsErrorcontext` -- the path
+    regex used a word boundary after `.rs` and missed every path followed by an uppercase letter
+    (smallvec was undetectable in a stripped clap/smallvec program)."""
+    import recover_rust_meta as M
+    blob = (b"\0/h/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/smallvec-1.16.4/src/lib.rs"
+            b"Errorcontext\0/h/.cargo/registry/src/idx/itoa-1.0.18/src/lib.rs\0")
+    paths = M.find_source_paths([(0x1000, blob)])
+    crates, _ = M.fingerprint_crates(paths.keys(), "", True)
+    assert crates.get("smallvec") == {"1.16.4"} and crates.get("itoa") == {"1.0.18"}, crates
+    # a lowercase continuation still does not end a path (`x.rsx` is not a source file)
+    assert not M.find_source_paths([(0, b"\0/a/src/x.rsx\0")])
