@@ -46,6 +46,7 @@ for _p in (str(_HERE), str(_CORE)):
 
 import lift_vm                              # premium: static decode + lift_region (devirtualizer)
 from recover_emulate import Image, map_image, _fast_access, STACK, STACK_SIZE  # core emulation infra
+from emu_backend import fast_hook_add, release  # core: cheap hook dispatch, refcount teardown
 
 from unicorn import (Uc, UcError, UC_ARCH_X86, UC_MODE_64,
                      UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE)
@@ -166,9 +167,9 @@ def _trace(img, fva, size, args, cap=_TRACE_CAP):
     def on_write(uc, _t, addr, sz, v, _u):
         events.append(("w", addr, sz, v & ((1 << (8 * sz)) - 1)))
 
-    uc.hook_add(UC_HOOK_CODE, on_code)
-    uc.hook_add(UC_HOOK_MEM_READ, on_read)
-    uc.hook_add(UC_HOOK_MEM_WRITE, on_write)
+    fast_hook_add(uc, UC_HOOK_CODE, on_code)
+    fast_hook_add(uc, UC_HOOK_MEM_READ, on_read)
+    fast_hook_add(uc, UC_HOOK_MEM_WRITE, on_write)
     retval = None
     try:
         uc.emu_start(fva, _RETADDR, count=cap)
@@ -179,6 +180,8 @@ def _trace(img, fva, size, args, cap=_TRACE_CAP):
             retval = uc.reg_read(X.UC_X86_REG_RAX) & _M64
     except UcError:
         pass
+    release(uc)                    # the hooks drop their reference: uc is freed when this returns
+    del uc
 
     byte_reads = [a for k, a, s, v in events if k == "r" and s == 1 and _rodata(img, a)]
     if not byte_reads:
@@ -227,32 +230,51 @@ def _trace(img, fva, size, args, cap=_TRACE_CAP):
 def _rodata(img, va):
     # RustCloak keeps the bytecode and pool as *mutable* globals (volatile reads defeat
     # constant-folding), so they sit in .data as often as .rodata.
-    for s in img.binary.sections:
-        if s.name in (".rodata", ".data.rel.ro", ".data") and \
-                s.virtual_address <= va < s.virtual_address + s.size:
+    # (The section ranges are read from LIEF once per image: walking binary.sections on every call
+    # -- once per traced memory read -- was the largest single cost of devirtualisation.)
+    rng = img.__dict__.get("_devirt_rodata")
+    if rng is None:
+        rng = img.__dict__["_devirt_rodata"] = tuple(
+            (s.virtual_address, s.virtual_address + s.size) for s in img.binary.sections
+            if s.name in (".rodata", ".data.rel.ro", ".data"))
+    for lo, hi in rng:
+        if lo <= va < hi:
             return True
     return False
 
 
 # value-relation tests: logical op (OPS key) -> f(a, b) at a given width mask, matched against the
 # observed result. Ordered so a more specific relation is preferred over one it subsumes.
+_REL = {
+    2: lambda a, b, m, sa, sb: (a + b) & m, 3: lambda a, b, m, sa, sb: (a - b) & m,
+    4: lambda a, b, m, sa, sb: (a * b) & m,
+    5: lambda a, b, m, sa, sb: a & b, 6: lambda a, b, m, sa, sb: a | b,
+    7: lambda a, b, m, sa, sb: a ^ b,
+    8: lambda a, b, m, sa, sb: (a << (b & 63)) & m, 9: lambda a, b, m, sa, sb: (a & m) >> (b & 63),
+    10: lambda a, b, m, sa, sb: ((sa >> (b & 63)) & m),
+    11: lambda a, b, m, sa, sb: (a // b) & m if b else None,
+    13: lambda a, b, m, sa, sb: (a % b) & m if b else None,
+    12: lambda a, b, m, sa, sb: (sa // sb) & m if sb else None,
+    14: lambda a, b, m, sa, sb: (sa % sb) & m if sb else None,
+    16: lambda a, b, m, sa, sb: int(a == b), 17: lambda a, b, m, sa, sb: int(a != b),
+    18: lambda a, b, m, sa, sb: int(a < b), 19: lambda a, b, m, sa, sb: int(a <= b),
+    20: lambda a, b, m, sa, sb: int(a > b), 21: lambda a, b, m, sa, sb: int(a >= b),
+    22: lambda a, b, m, sa, sb: int(sa < sb), 23: lambda a, b, m, sa, sb: int(sa <= sb),
+    24: lambda a, b, m, sa, sb: int(sa > sb), 25: lambda a, b, m, sa, sb: int(sa >= sb),
+    26: lambda a, b, m, sa, sb: a,
+}
+
+
 def _rel(op, a, b, m):
-    half = (m == 0xffffffff)
+    # (one relation evaluated per call: building every relation's value in a dict on each call --
+    # the earlier form -- dominated op inference and the verifier's interpreter loop)
+    f = _REL.get(op)
+    if f is None:
+        return None
     sa = a - (m + 1) if a > (m >> 1) else a
     sb = b - (m + 1) if b > (m >> 1) else b
     try:
-        return {
-            2: (a + b) & m, 3: (a - b) & m, 4: (a * b) & m,
-            5: a & b, 6: a | b, 7: a ^ b,
-            8: (a << (b & 63)) & m, 9: (a & m) >> (b & 63),
-            10: ((sa >> (b & 63)) & m),
-            11: (a // b) & m if b else None, 13: (a % b) & m if b else None,
-            12: (sa // sb) & m if sb else None, 14: (sa % sb) & m if sb else None,
-            16: int(a == b), 17: int(a != b),
-            18: int(a < b), 19: int(a <= b), 20: int(a > b), 21: int(a >= b),
-            22: int(sa < sb), 23: int(sa <= sb), 24: int(sa > sb), 25: int(sa >= sb),
-            26: a,
-        }.get(op)
+        return f(a, b, m, sa, sb)
     except (ZeroDivisionError, ValueError):
         return None
 
@@ -748,12 +770,16 @@ def _vm_exec(prog, bytemap, key, pool, idx_of, args, maxsteps=500_000, argmap=No
         return j if j < len(prog) else None
 
     i = steps = 0
+    wm = {}                                                  # op -> (width, mask), per op not step
     while 0 <= i < len(prog) and steps < maxsteps:
         steps += 1
         off, op, dst, a, b = prog[i]
         base = bytemap.get(op)
-        w = lift_vm._width(op)
-        m = (1 << w) - 1
+        t = wm.get(op)
+        if t is None:
+            w = lift_vm._width(op)
+            t = wm[op] = (w, (1 << w) - 1)
+        w, m = t
         if base == 0:
             return reg.get(a, 0), mem
         if base == 35:
