@@ -163,29 +163,21 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
     if fmt is None:
         result["notes"].append("not an ELF/PE/Mach-O binary LIEF can parse: nothing to recover")
         return result
-    # The emulation engine loads ELF, PE and Mach-O on x86-64, AArch64 and 32-bit x86, and is
-    # verified (5/5 canaries) on every combination EXCEPT 32-bit PE: Windows-std under-emulation
-    # there (fake-argument-driven recursion in non-decoder functions, runtime-initialised globals
-    # the decoders chain through) recovers no canaries and risks false-positive strings, so 32-bit
-    # PE is routed to literal recovery only until it is verified 5/5. The loader itself does handle
-    # 32-bit PE (PE32 HIGHLOW base relocations, imagebase rebasing) so the groundwork is in place.
+    # The emulation engine loads ELF, PE and Mach-O on x86-64, AArch64 and 32-bit x86. 32-bit PE
+    # was routed to literals only until its Windows-std emulation was verified: stdcall imports
+    # now pop their arguments, function starts come from .eh_frame (no .pdata on i386) and the
+    # import trampolines cannot be overwritten, and the benchmark recovers every string on
+    # i686-pc-windows-gnu builds. Library-function identification is still not verified there.
     # The static call-site recoverers, cryptify, stack-strings and libfuncs are ELF/PE
     # x86-64/AArch64 only; elsewhere (32-bit x86, Mach-O) only emulation + literals run.
     pe32 = fmt == "PE" and arch == "x86"
-    emu_ok = (fmt in ("ELF", "PE", "MACHO") and arch in ("x86_64", "aarch64", "x86")
-              and not pe32)
+    emu_ok = fmt in ("ELF", "PE", "MACHO") and arch in ("x86_64", "aarch64", "x86")
     static_ok = fmt in ("ELF", "PE") and arch in ("x86_64", "aarch64")
     static_records = []
-    if pe32:
+    if not emu_ok:
         result["notes"].append(
-            "32-bit PE: emulation and library-function identification are not yet verified here "
-            "(Windows-std under-emulation recovers no canaries and risks false positives), so they "
-            "are skipped. Literal recovery runs; for strings also try recover_rust_meta.py (crates, "
-            "panic sites) and, in an isolated VM, recover_dynamic.py.")
-    elif not emu_ok:
-        result["notes"].append(
-            f"the emulation engine supports ELF/PE/Mach-O on x86-64/aarch64, plus 32-bit x86 for "
-            f"ELF/Mach-O (this is {fmt}/{arch}): skipped. Literal recovery still runs; for strings "
+            f"the emulation engine supports ELF/PE/Mach-O on x86-64/aarch64 and 32-bit x86 "
+            f"(this is {fmt}/{arch}): skipped. Literal recovery still runs; for strings "
             f"also try recover_rust_meta.py (crates, panic sites — works here) and, in a VM, "
             f"recover_dynamic.py.")
     elif not static_ok:
@@ -276,7 +268,10 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
                                       "unexplained": len(result["literals_missed"]),
                                       "seconds": round(time.monotonic() - t0, 1)})
 
-    if libfuncs and emu_ok:
+    if pe32 and libfuncs:
+        result["notes"].append("32-bit PE: library-function identification is not verified here; "
+                               "skipped.")
+    if libfuncs and emu_ok and not pe32:
         def _libfuncs():
             import recover_libfuncs as LF
             db = LF.load_db()

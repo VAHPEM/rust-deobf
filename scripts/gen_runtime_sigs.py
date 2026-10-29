@@ -17,6 +17,7 @@ matches exactly one function start in every build it was generated from.
 
     python scripts/gen_runtime_sigs.py build/*elf-arm64*nostrip   # writes scripts/data/runtime_sigs.json
     python scripts/gen_runtime_sigs.py <i686-unknown-linux-musl unstripped builds>   # the "x86" table
+    python scripts/gen_runtime_sigs.py --stdcall <i686-pc-windows-gnu unstripped builds>  # "x86_stdcall"
     python scripts/gen_runtime_sigs.py --selftest
 
 The signatures describe the musl that rustc bundles (self-contained CRT); a toolchain that bundles
@@ -181,6 +182,39 @@ def generate(paths):
     return sigs
 
 
+CRT_DLLS = ("msvcrt", "ucrtbase", "api-ms-win-crt-", "vcruntime")   # cdecl: the caller cleans
+
+
+def stdcall_sizes(paths):
+    """{API: bytes it pops} for the stdcall Win32 imports of unstripped i686-pc-windows-gnu builds.
+
+    mingw links each import through a thunk `_Name@N: jmp *[__imp__Name@N]`, and the `@N` is the
+    argument size the callee pops on return. A stripped binary keeps only the undecorated import
+    name, so recover_emulate looks the size up here (runtime_sigs.json "x86_stdcall")."""
+    import lief
+    import re
+    out = {}
+    for p in paths:
+        b = lief.parse(str(p))
+        if b is None or b.format.name != "PE" or _arch(b) != "x86":
+            continue
+        api = {e.name for imp in b.imports if not imp.name.lower().startswith(CRT_DLLS)
+               for e in imp.entries if e.name}
+        text = next((x for x in b.sections if x.name == ".text"), None)
+        if text is None:
+            continue
+        code, base = bytes(text.content), text.virtual_address
+        for sym in b.symbols:
+            m = re.fullmatch(r"_([A-Za-z_][A-Za-z0-9_]*)@(\d+)", sym.name)
+            va = sym_va(b, sym)
+            if not m or m.group(1) not in api or not va or not base <= va < base + len(code) - 2:
+                continue
+            if code[va - base:va - base + 2] != b"\xff\x25":      # jmp *[abs]: the import thunk
+                continue
+            out[m.group(1)] = int(m.group(2))
+    return dict(sorted(out.items()))
+
+
 def _selftest():
     # AArch64: `adrp x0, #page` (0x90000000) masked, `ret` kept
     pat = mask(bytes.fromhex("00000090c0035fd6"), 0x1000, "aarch64")
@@ -200,11 +234,18 @@ def main():
         _selftest()
         return
     sys.path.insert(0, str(ROOT / "scripts"))
-    paths = [Path(a) for a in sys.argv[1:]]
+    stdcall = "--stdcall" in sys.argv
+    paths = [Path(a) for a in sys.argv[1:] if a != "--stdcall"]
     if not paths:
-        sys.exit("usage: gen_runtime_sigs.py <unstripped static builds...>")
-    sigs = generate(paths)
+        sys.exit("usage: gen_runtime_sigs.py [--stdcall] <unstripped builds...>")
     old = json.loads(OUT.read_text()) if OUT.exists() else {}
+    if stdcall:
+        sizes = stdcall_sizes(paths)
+        old["x86_stdcall"] = dict(sorted({**old.get("x86_stdcall", {}), **sizes}.items()))
+        OUT.write_text(json.dumps(old, indent=1) + "\n")
+        print("x86_stdcall:", len(sizes), "imports from", len(paths), "builds")
+        return
+    sigs = generate(paths)
     old.update(sigs)
     OUT.write_text(json.dumps(old, indent=1) + "\n")
     for arch, lst in sigs.items():

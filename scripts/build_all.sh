@@ -28,12 +28,13 @@ strip_one() {
   local fmt="$1" f="$2" tool cands
   case "$fmt" in
     pe) cands="x86_64-w64-mingw32-strip llvm-strip" ;;
+    pe32) cands="i686-w64-mingw32-strip llvm-strip" ;;
     elf-arm64*) cands="llvm-strip aarch64-linux-gnu-strip strip" ;;
     *) cands="strip llvm-strip" ;;
   esac
   # macOS's own strip cannot process ELF/PE: use the LLVM / cross binutils ones there
   if [ "$(uname -s)" = Darwin ]; then
-    case "$fmt" in pe) ;; elf-arm64*) cands="llvm-strip aarch64-linux-gnu-strip" ;; *) cands="llvm-strip x86_64-linux-gnu-strip" ;; esac
+    case "$fmt" in pe|pe32) ;; elf-arm64*) cands="llvm-strip aarch64-linux-gnu-strip" ;; *) cands="llvm-strip x86_64-linux-gnu-strip" ;; esac
   fi
   for tool in $cands; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -50,9 +51,11 @@ strip_one() {
 MANIFEST="$OUT/build_manifest.jsonl"; [ "${SKIP_EXISTING:-0}" = 1 ] || : > "$MANIFEST"
 
 targets=( "x86_64-unknown-linux-gnu:elf" "x86_64-pc-windows-gnu:pe" )
-# FORMATS="pe elf-arm64" builds only those output formats (CI runs one job per format)
+# FORMATS="pe elf-arm64" builds only those output formats (CI runs one job per format);
+# "pe32" (32-bit PE, i686-pc-windows-gnu + i686-w64-mingw32-gcc) is built only when named here
 if [ -n "${FORMATS:-}" ]; then
-  all=( "x86_64-unknown-linux-gnu:elf" "x86_64-pc-windows-gnu:pe" "aarch64-unknown-linux-musl:elf-arm64" )
+  all=( "x86_64-unknown-linux-gnu:elf" "x86_64-pc-windows-gnu:pe" "aarch64-unknown-linux-musl:elf-arm64"
+        "i686-pc-windows-gnu:pe32" )
   targets=()
   for t in "${all[@]}"; do case " $FORMATS " in *" ${t##*:} "*) targets+=( "$t" );; esac; done
   case " $FORMATS " in *" elf-arm64 "*) export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld;; esac
@@ -88,7 +91,7 @@ e=v.get('env');print((f'{e[0]}={e[1]}' if e else '-'), v.get('suite','canary'))"
   else profiles="debug release size-lto speed-lto"; fi
   for t in "${targets[@]}"; do
     triple="${t%%:*}"; fmt="${t##*:}"
-    ext=""; [ "$fmt" = pe ] && ext=".exe"
+    ext=""; case "$fmt" in pe|pe32) ext=".exe";; esac
     for profile in $profiles; do
       if [ "${SKIP_EXISTING:-0}" = 1 ] && [ -f "$OUT/${proj}__${fmt}__${profile}__strip$ext" ]; then
         continue

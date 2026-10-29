@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import BUILD, NOT_BUILT, ROOT
+from conftest import BUILD, CANARIES, NOT_BUILT, ROOT
 
 import recover
 
@@ -51,21 +51,24 @@ def test_detect_and_route_32bit():
 
 
 def test_detect_and_route_32bit_pe():
-    """32-bit PE must detect as PE/x86 and route to literals only -- emulation and libfuncs are
-    skipped (not verified there), so no engine named 'emulation' or 'libfunc' may run and the note
-    must say so. This guards against re-enabling PE32 emulation (which produces false positives)
-    before it is verified 5/5."""
-    cands = sorted(ROOT.glob("bench_src/*/target/i686-pc-windows-gnu/release/*.exe"))
+    """32-bit PE detects as PE/x86 and is emulated: its Windows-std path is verified on the
+    benchmark (stdcall imports pop their arguments, function starts from .eh_frame, import
+    trampolines protected), so an obfuscated canary build gives its five strings and nothing
+    else. Library-function identification is still skipped there, with a note."""
+    cands = sorted(ROOT.glob("bench_src/xor_custom/target/i686-pc-windows-gnu/release/*.exe")) + \
+        sorted(BUILD.glob("xor_custom__pe32__release__strip.exe"))
     b = next((p for p in cands if p.is_file()), None)
     if b is None:
-        pytest.skip("no i686-pc-windows-gnu canary built")
+        pytest.skip("no i686-pc-windows-gnu xor_custom build")
     fmt, arch, _ = recover.detect(b)
     assert (fmt, arch) == ("PE", "x86"), (fmt, arch)
-    res = recover.run(b, emulate="always", stackstrings=True, literals=True, libfuncs=True)
-    assert not any("emulation" in e["engine"] for e in res["engines"]), res["engines"]
+    res = recover.run(b, emulate="always", stackstrings=True, literals=True, libfuncs=True,
+                      time_budget=300)
+    assert any("emulation" in e["engine"] for e in res["engines"]), res["engines"]
     assert not any("libfunc" in e["engine"].lower() for e in res["engines"]), res["engines"]
-    assert res["literals"], "literal recovery should still run on 32-bit PE"
     assert any("32-bit PE" in n for n in res["notes"]), res["notes"]
+    assert res["literals"], "literal recovery should still run on 32-bit PE"
+    assert {x["string"] for x in res["decoded"]} == set(CANARIES), res["decoded"]
 
 
 def test_detect_64bit_still_emulates():

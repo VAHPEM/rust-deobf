@@ -326,3 +326,96 @@ def test_i386_decode_views_are_dropped():
              {"string": "nw-agent.example", "function": 2}]       # unrelated: kept
     kept = {r["string"] for r in R._drop_overlap_artifacts(recs)}
     assert kept == {charlie, delta, echo, "nw-agent.example"}, kept
+
+
+class _Obj:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def test_pe32_stdcall_import_pops_its_arguments():
+    # A Win32 API is stdcall (`ret n`); the import trampoline's plain `ret` left the arguments on
+    # the stack, the caller's `pop ebp; ret` then returned into nowhere and HeapAlloc returned 0
+    # to every PE32 decoder. The size: C runtime 0 (cdecl), else the table of the imports Rust std
+    # links, else the pushes right before the call.
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+    code = bytes.fromhex("56" "6a00" "50" "ff1534120000")      # push esi; push 0; push eax; call [..]
+    fake = _Obj(x32=True, img=_Obj(pe=True, tramp=["HeapAlloc", "memcpy", "OddApi", "x"],
+                                   tramp_dll=["KERNEL32.dll", "msvcrt.dll", "kernel32.dll", "msvcrt.dll"]),
+                _call_blk=(0x1000, len(code)), _md_lite=Cs(CS_ARCH_X86, CS_MODE_32),
+                uc=_Obj(mem_read=lambda a, n: code[a - 0x1000:a - 0x1000 + n]))
+    sb = R.Emulator._stdcall_bytes
+    assert R._stdcall_table().get("HeapAlloc") == 12
+    assert sb(fake, 0) == 12                  # the table
+    assert sb(fake, 1) == 0                   # msvcrt: cdecl
+    assert sb(fake, 2) == 12                  # unknown API: three pushes before the call
+    fake.img.pe = False
+    assert sb(fake, 0) == 0                   # ELF / 64-bit: never
+
+
+def test_pe32_eh_frame_gives_function_starts():
+    # i386 PE has no .pdata; mingw's .eh_frame (named `/4` once stripped) lists the functions.
+    # Without it a stripped PE32 knew only direct call targets and `main` ran as the tail of the
+    # function before it. One CIE (zR, pc-relative sdata4) and two FDEs.
+    import struct as st
+    cie_body = b"\x00\x00\x00\x00" + b"\x01" + b"zR\x00" + b"\x01" + b"\x7c" + b"\x08" + b"\x01" + b"\x1b"
+    cie_body += b"\x00" * ((4 - (len(cie_body) + 4) % 4) % 4)
+    data = st.pack("<I", len(cie_body)) + cie_body
+    va = 0x9000
+    for target in (0x1500, 0x1710):
+        start = len(data) + 4                                 # where the CIE pointer field sits
+        field = start + 4                                     # pc_begin
+        body = st.pack("<I", start) + st.pack("<i", target - (va + field)) + st.pack("<I", 0x40)
+        data += st.pack("<I", len(body)) + body
+    data += b"\x00\x00\x00\x00"
+    binary = _Obj(sections=[_Obj(name=".text", content=b"\x90" * 16, virtual_address=0x1000),
+                            _Obj(name="/4", content=data, virtual_address=va)])
+    assert R._pe_eh_frame_starts(binary, 0x400000) == [0x1500, 0x1710]
+    junk = _Obj(sections=[_Obj(name="/4", content=b"\x10\x00\x00\x00" + b"\x01" * 16, virtual_address=va)])
+    assert R._pe_eh_frame_starts(junk, 0x400000) == []
+
+
+def test_import_trampolines_cannot_be_overwritten():
+    # A data import (msvcrt's `__initenv`) is bound to a `ret` trampoline; CRT start-up code
+    # storing through it (or memset on a fake pointer that was a function pointer) zeroed the
+    # stubs, and every later run in that emulator fell through them (PE32: 1/5 instead of 5/5).
+    img, emu = _emu("ct64")
+    emu._reset()
+    good = bytes(emu.uc.mem_read(R.TRAMP, 16))
+    emu.uc.reg_write(emu.ARGS[0], R.TRAMP)
+    emu.uc.reg_write(emu.ARGS[1], 0)
+    emu.uc.reg_write(emu.ARGS[2], 64)
+    emu._stub("memset")                                        # the model refuses
+    assert bytes(emu.uc.mem_read(R.TRAMP, 16)) == good
+    from unicorn import UC_PROT_READ, UC_PROT_EXEC
+    perms = [p for b, e, p in emu.uc.mem_regions() if b <= R.TRAMP <= e]
+    assert perms == [UC_PROT_READ | UC_PROT_EXEC], perms      # a guest store faults
+    emu.uc.mem_write(R.TRAMP, b"\x00" * 16)                   # (host writes still can) ...
+    emu._reset()
+    assert bytes(emu.uc.mem_read(R.TRAMP, 16)) == good         # ... and a reset restores them
+
+
+def test_reversed_view_is_dropped():
+    delta = "canary::delta::feature-flag-telemetry-off"
+    recs = [{"string": delta, "function": 1, "used": True},
+            {"string": "ffo-yrtemelet-galf-e", "function": 1},
+            {"string": "level.example", "function": 2}]
+    kept = {r["string"] for r in R._drop_overlap_artifacts(recs)}
+    assert kept == {delta, "level.example"}, kept
+
+
+def test_eh_frame_cie_with_8_byte_personality():
+    # `zPLR` with an 8-byte personality pointer (udata8): the CIE parser must skip all 8 bytes to
+    # read the FDE encoding (R) after it (coverage for the P/L/R augmentation path)
+    import struct as st
+    cie = b"\x00\x00\x00\x00" + b"\x01" + b"zPLR\x00" + b"\x01" + b"\x7c" + b"\x08"
+    cie += b"\x0b" + b"\x04" + b"\xaa" * 8 + b"\x00" + b"\x1b"       # aug len 11: P(0x04, 8 bytes) L R
+    cie += b"\x00" * ((4 - (len(cie) + 4) % 4) % 4)
+    data = st.pack("<I", len(cie)) + cie
+    va = 0x9000
+    start = len(data) + 4
+    body = st.pack("<I", start) + st.pack("<i", 0x1500 - (va + start + 4)) + st.pack("<I", 0x10)
+    body += b"\x00"                                                  # (FDE augmentation length)
+    data += st.pack("<I", len(body)) + body + b"\x00\x00\x00\x00"
+    binary = _Obj(sections=[_Obj(name="/4", content=data, virtual_address=va)])
+    assert R._pe_eh_frame_starts(binary, 0x400000) == [0x1500]

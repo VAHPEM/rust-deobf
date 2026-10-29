@@ -295,6 +295,15 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `"x86"` table in `scripts/data/runtime_sigs.json` (from `gen_runtime_sigs.py` on unstripped
   `i686-unknown-linux-musl` builds) or malloc runs for real and returns NULL.
   `tests/test_32bit.py` builds that shape itself (rust-lld; no i686 C library needed).
+- **32-bit PE (i686-pc-windows-gnu) is emulated** (`build_all.sh FORMATS=pe32`, CI job `pe32`).
+  What it took: Win32 imports are **stdcall** -- the trampoline must pop the arguments (sizes in
+  runtime_sigs.json `"x86_stdcall"`, from `gen_runtime_sigs.py --stdcall`; msvcrt is cdecl);
+  function starts come from **`.eh_frame`** (no `.pdata` on i386; stripped, it is named `/4`);
+  i386 names data by **absolute imm32**, so `_features` counts `mov/push imm32` ciphertext refs.
+- **Import trampolines are read+execute and restored on every reset**: a data import (msvcrt's
+  `__initenv`) is bound to one, and a store through it -- or a C-runtime model writing through a
+  fake pointer -- corrupted the `ret` stubs for every later run. Unicorn's `uc.mem_write` ignores
+  page protection AND does not invalidate translated blocks (use `ctl_remove_cache`).
 
 ## Maintenance: a new rustc release does NOT mean a rewrite
 Rust ships a stable release every 6 weeks, but that is a *release* cadence, not an *architecture*

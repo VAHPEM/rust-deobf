@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        format: [elf, pe, elf-arm64, elf-arm64gnu]
+        format: [elf, pe, elf-arm64, elf-arm64gnu, pe32]
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -83,12 +83,16 @@ jobs:
         run: |
           rustup update stable --no-self-update
           rustup default stable
-          rustup target add x86_64-pc-windows-gnu aarch64-unknown-linux-musl
+          rustup target add x86_64-pc-windows-gnu aarch64-unknown-linux-musl i686-pc-windows-gnu
           rustc --version
 
       - name: mingw-w64 (PE target linker)
         if: matrix.format == 'pe'
         run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64
+
+      - name: mingw-w64 i686 (32-bit PE target linker)
+        if: matrix.format == 'pe32'
+        run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-i686
 
       - name: llvm-strip (AArch64)
         if: matrix.format == 'elf-arm64'
@@ -117,7 +121,7 @@ jobs:
           tests/test_formats.py::test_detect_64bit_still_emulates tests/test_soc_triage.py
 
       - name: Obfuscation crates (goldberg et al.)
-        if: matrix.format != 'elf-arm64gnu'
+        if: matrix.format != 'elf-arm64gnu' && matrix.format != 'pe32'
         run: |
           FORMATS=${{ matrix.format }} bash obf_src/build_obf.sh
           python -m pytest tests/test_obf.py -q -rs

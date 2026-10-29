@@ -7,6 +7,9 @@ import pytest
 from conftest import BUILD, CANARIES
 
 FORMATS = [("elf", ""), ("pe", ".exe"), ("elf-arm64", "")]
+# 32-bit PE (build_all.sh FORMATS=pe32): emulated only -- the static call-site, cryptify, literal
+# and disassembly checks below are x86-64/AArch64 engines, so it joins the emulation tests
+EMU_FORMATS = FORMATS + [("pe32", ".exe")]
 STATIC = ["xor_custom", "add_custom", "sub_custom", "litcrypt", "litcrypt2"]
 NO_STRINGS = ["plaintext", "muddy"]   # nothing obfuscated / AEAD: no static decoder to read
 
@@ -35,7 +38,7 @@ def test_static_recall(crate, fmt, ext, strip):
 
 
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])
-@pytest.mark.parametrize("fmt,ext", FORMATS)
+@pytest.mark.parametrize("fmt,ext", EMU_FORMATS)
 def test_obfstr_emulation_without_canaries(fmt, ext, strip):
     import recover_emulate
     r = recover_emulate.recover(binary("obfstr", fmt, ext, strip), [])
@@ -44,7 +47,7 @@ def test_obfstr_emulation_without_canaries(fmt, ext, strip):
 
 
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])
-@pytest.mark.parametrize("fmt,ext", FORMATS)
+@pytest.mark.parametrize("fmt,ext", EMU_FORMATS)
 def test_tight_strings_by_emulation(fmt, ext, strip):
     # stack buffer decoded in place by a (vectorised) loop: exact strings, nothing else
     import recover_emulate
@@ -53,7 +56,7 @@ def test_tight_strings_by_emulation(fmt, ext, strip):
 
 
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])
-@pytest.mark.parametrize("fmt,ext", [("elf", ""), ("pe", ".exe")])
+@pytest.mark.parametrize("fmt,ext", [("elf", ""), ("pe", ".exe"), ("pe32", ".exe")])
 def test_obfstr_exact_on_x86(fmt, ext, strip):
     import recover_emulate
     r = recover_emulate.recover(binary("obfstr", fmt, ext, strip), [])
@@ -69,7 +72,7 @@ EMULATED_2026 = ["obfuse", "obfuse_aes", "obfuse_xor", "obfany"]
 
 
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])
-@pytest.mark.parametrize("fmt,ext", FORMATS)
+@pytest.mark.parametrize("fmt,ext", EMU_FORMATS)
 @pytest.mark.parametrize("crate", EMULATED_2026)
 def test_2026_crates_by_emulation(crate, fmt, ext, strip):
     import recover
@@ -78,6 +81,19 @@ def test_2026_crates_by_emulation(crate, fmt, ext, strip):
     got = {x["string"] for x in res["decoded"]}
     assert set(CANARIES) <= got, sorted(set(CANARIES) - got)
     assert not got - set(CANARIES), sorted(got - set(CANARIES))
+
+
+@pytest.mark.parametrize("strip", ["nostrip", "strip"])
+@pytest.mark.parametrize("crate", ["xor_custom", "add_custom", "sub_custom", "litcrypt", "litcrypt2",
+                                   "cryptify_default", "muddy", "plaintext", "cryptify"])
+def test_pe32_canaries_by_pipeline(crate, strip):
+    # 32-bit PE through the default pipeline (emulation): the five canaries exactly; the plain
+    # program and cryptify with a custom key (not in the binary) give nothing
+    import recover
+    res = recover.run(binary(crate, "pe32", ".exe", strip), stackstrings=False, literals=False,
+                      time_budget=300)
+    want = set() if crate in ("plaintext", "cryptify") else set(CANARIES)
+    assert {x["string"] for x in res["decoded"]} == want, res["decoded"]
 
 
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])

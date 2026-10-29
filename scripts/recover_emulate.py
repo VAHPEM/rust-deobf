@@ -60,7 +60,7 @@ from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_MODE_32, CS_ARCH_ARM64, CS_
 from unicorn import (Uc, UcError, UC_ERR_ARG, UC_ARCH_X86, UC_ARCH_ARM64, UC_MODE_64, UC_MODE_32, UC_MODE_ARM,
                      UC_HOOK_BLOCK, UC_HOOK_MEM_WRITE, UC_HOOK_INSN, UC_HOOK_INTR,
                      UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
-                     UC_HOOK_MEM_FETCH_UNMAPPED)
+                     UC_HOOK_MEM_FETCH_UNMAPPED, UC_PROT_READ, UC_PROT_EXEC)
 from unicorn import x86_const as X
 from unicorn import arm64_const as A
 
@@ -204,6 +204,7 @@ class Image:
         self.patches = {}   # va -> 8-byte value written after mapping (relocations, import slots)
         self._tls_off = {}  # TLS symbol -> distinct thread-pointer-relative offset (initial-exec)
         self.tramp = []     # import names; import i lives at TRAMP + 16*i
+        self.tramp_dll = []  # ... and the DLL each comes from (PE; "" elsewhere)
         self._relocate()
         self.lse_flags = self._lse_flags() if self.arm else []
 
@@ -319,8 +320,9 @@ class Image:
                 return max(segs, key=lambda sg: len(sg.content))
         return None
 
-    def _import(self, name):
+    def _import(self, name, dll=""):
         self.tramp.append(name or "?")
+        self.tramp_dll.append(dll or "")
         return TRAMP + 16 * (len(self.tramp) - 1)
 
     def _exec_sec(self, s):
@@ -376,7 +378,7 @@ class Image:
                 for imp in b.imports:
                     for e in imp.entries:
                         nm = e.name if e.name else f"{imp.name}#{e.ordinal}"
-                        self.patches[e.iat_address] = self._import(nm)
+                        self.patches[e.iat_address] = self._import(nm, imp.name)
                 for blk in b.relocations:
                     for e in blk.entries:
                         t = str(e.type)
@@ -618,6 +620,12 @@ class Image:
         starts = set()
         if self.pe:
             starts.update(f for f, _ in pdata_ranges(self.binary, self.code, self.text_va))
+            if self.x32:
+                # i386 has no .pdata: mingw describes functions in .eh_frame (DWARF CFI). Without
+                # it a stripped PE32 knew only direct call targets, and `main` -- reached through
+                # a pointer handed to lang_start -- ran as the tail of the function before it
+                starts.update(a for a in _pe_eh_frame_starts(self.binary, self.imagebase)
+                              if lo <= a < hi)
         else:
             starts.update(a for a in _eh_frame_starts(self.binary) if lo <= a < hi)
         starts.update(a for a, _ in self.function_symbols() if lo <= a < hi)
@@ -702,6 +710,107 @@ def _eh_frame_starts(binary):
         return out
     except (ValueError, struct.error):
         return []
+
+
+def _uleb(data, off):
+    v = shift = 0
+    while off < len(data):
+        b = data[off]
+        off += 1
+        v |= (b & 0x7f) << shift
+        shift += 7
+        if not b & 0x80 or shift > 63:
+            break
+    return v, off
+
+
+def _cie_fde_encoding(data, off, end):
+    """The FDE pointer encoding a CIE declares (augmentation 'R'; DW_EH_PE_absptr without one),
+    or None when the bytes at `off` (after the CIE id) are not a CIE we understand."""
+    if off >= end or data[off] not in (1, 3):
+        return None
+    version = data[off]
+    nul = data.find(b"\0", off + 1, end)
+    if nul < 0:
+        return None
+    aug = data[off + 1:nul].decode("ascii", "replace")
+    q = nul + 1
+    _, q = _uleb(data, q)                      # code alignment
+    _, q = _uleb(data, q)                      # data alignment (SLEB: only skipped)
+    if version == 1:
+        q += 1                                 # return-address register
+    else:
+        _, q = _uleb(data, q)
+    enc = 0x00
+    if aug.startswith("z"):
+        _, q = _uleb(data, q)                  # augmentation data length
+        for c in aug[1:]:
+            if q >= end:
+                return None
+            if c == "R":
+                enc = data[q]
+                q += 1
+            elif c == "L":
+                q += 1
+            elif c == "P":
+                penc = data[q]
+                width = penc & 0x0f
+                q += 1 + (8 if width in (0x04, 0x0c) else 2 if width in (0x02, 0x0a) else 4)
+            elif c not in "SB":
+                return None
+    elif aug not in ("", "eh"):
+        return None
+    return enc
+
+
+def _pe_eh_frame_starts(binary, imagebase, cap=1 << 20):
+    """Function starts (RVAs) from a 32-bit PE's .eh_frame FDEs. After `strip` the section's long
+    name is gone (`/4`: the COFF string table that resolved it is stripped too), so a section is
+    taken when its name is `.eh_frame` or `/N` and its first record is a CIE."""
+    for sec in binary.sections:
+        name = sec.name if isinstance(sec.name, str) else ""
+        if name != ".eh_frame" and not name.startswith("/"):
+            continue
+        data, va = bytes(sec.content)[:_SEG_CAP], sec.virtual_address
+        out, cies, off = [], {}, 0
+        try:
+            while off + 8 <= len(data) and len(out) < cap:
+                length = struct.unpack_from("<I", data, off)[0]
+                if length == 0 or length == 0xffffffff:
+                    break                      # terminator / 64-bit DWARF (not on PE32)
+                start, end = off + 4, off + 4 + length
+                if end > len(data):
+                    break
+                cid = struct.unpack_from("<I", data, start)[0]
+                if cid == 0:
+                    enc = _cie_fde_encoding(data, start + 4, end)
+                    if enc is None:
+                        break
+                    cies[off] = enc
+                else:
+                    enc = cies.get(start - cid)
+                    if enc is None:
+                        break                  # an FDE whose CIE we did not see: not .eh_frame
+                    field = start + 4
+                    fmt = enc & 0x0f
+                    if fmt in (0x00, 0x03):
+                        v = struct.unpack_from("<I", data, field)[0]
+                    elif fmt == 0x0b:
+                        v = struct.unpack_from("<i", data, field)[0]
+                    else:
+                        break                  # (2- and 8-byte forms do not occur on PE32)
+                    if enc & 0x70 == 0x10:
+                        rva = va + field + v   # pc-relative: already an RVA
+                    else:
+                        rva = v - imagebase    # absolute VA
+                    if v:
+                        out.append(rva & 0xffffffff)
+                off = end
+        except struct.error:
+            pass
+        if cies and out:
+            return out
+    return []
 
 
 def _machine(binary):
@@ -1280,9 +1389,13 @@ class Emulator:
                 pass
         _fast_access(uc)
         map_image(uc, self.img.binary)
-        uc.mem_map(TRAMP, TRAMP_SIZE)
+        # read+execute only: a store through an import's address (a data import such as msvcrt's
+        # `__initenv`, or a fake pointer that is really a function pointer) faults like it would
+        # natively, instead of overwriting the `ret` stubs every later call goes through
+        uc.mem_map(TRAMP, TRAMP_SIZE, UC_PROT_READ | UC_PROT_EXEC)
         ret = b"\xc0\x03\x5f\xd6" if self.arm else b"\xc3"
-        uc.mem_write(TRAMP, (ret + b"\x00" * (16 - len(ret))) * min(len(self.img.tramp) + 1, TRAMP_SIZE // 16))
+        self._tramp_code = (ret + b"\x00" * (16 - len(ret))) * min(len(self.img.tramp) + 1, TRAMP_SIZE // 16)
+        uc.mem_write(TRAMP, self._tramp_code)
         for va, v in self.img.patches.items():
             try:
                 uc.mem_write(BASE + va, struct.pack(self.pfmt, v & self.pmask))
@@ -1351,6 +1464,16 @@ class Emulator:
         if self.runs_on_this_uc >= 64:     # Unicorn grows its TB cache; start over now and then
             self._fresh()
         uc = self.uc                       # (after _fresh: the new instance, not the old one)
+        # the import trampolines too: a DATA import (msvcrt's `__initenv`) is bound to one, and
+        # CRT start-up code storing through it overwrote a `ret` -- every later run in this
+        # emulator then fell through into the next import (PE32: 1/5 instead of 5/5)
+        code = getattr(self, "_tramp_code", None)
+        if code is not None and bytes(uc.mem_read(TRAMP, len(code))) != code:
+            uc.mem_write(TRAMP, code)
+            try:
+                uc.ctl_remove_cache(TRAMP, TRAMP + len(code))   # stale translations of the junk
+            except Exception:
+                pass
         self.runs_on_this_uc += 1
         for page in self.auto_pages:
             try:
@@ -1610,12 +1733,13 @@ class Emulator:
                 return p
             if n == "posix_memalign":
                 p = self._alloc(arg(2))
-                uc.mem_write(arg(0), struct.pack(self.pfmt, p & self.pmask))   # 4-byte ptr on x86-32
-                self._touch(arg(0), self.ptr)
+                if not _in_tramp(arg(0), self.ptr):
+                    uc.mem_write(arg(0), struct.pack(self.pfmt, p & self.pmask))   # 4-byte on x86-32
+                    self._touch(arg(0), self.ptr)
                 return 0
             if n in ("memcpy", "memmove", "memcpy_chk", "memmove_chk"):
                 d, s, k = arg(0), arg(1), arg(2)
-                if 0 < k <= 0x100000:
+                if 0 < k <= 0x100000 and not _in_tramp(d, k):
                     data = bytes(uc.mem_read(s, k))
                     uc.mem_write(d, data)
                     self._touch(d, k)
@@ -1624,7 +1748,7 @@ class Emulator:
                 return d
             if n in ("memset", "memset_chk"):
                 d, c, k = arg(0), arg(1) & 0xff, arg(2)
-                if 0 < k <= 0x100000:
+                if 0 < k <= 0x100000 and not _in_tramp(d, k):
                     uc.mem_write(d, bytes([c]) * k)
                     self._touch(d, k)
                 return d
@@ -1815,6 +1939,35 @@ class Emulator:
                 if 0x20 <= nxt <= 0x7e and (w.generation(end) < w.generation(end - 1)
                                             or self._static_tag_after(end)):
                     self.exact.add(t)              # complete: what follows is stale
+
+    def _stdcall_bytes(self, i):
+        """Bytes of arguments import `i` pops on return: 32-bit PE only. The C runtime (msvcrt,
+        ucrt) is cdecl -> 0; a Win32 API is stdcall: its size from the table of the imports Rust
+        std links (runtime_sigs.json "x86_stdcall", from gen_runtime_sigs.py --stdcall), else the
+        arguments the caller pushed right before the call."""
+        if not (self.x32 and self.img.pe):
+            return 0
+        img = self.img
+        dll = (img.tramp_dll[i] if i < len(img.tramp_dll) else "").lower()
+        if dll.startswith(("msvcrt", "ucrtbase", "api-ms-win-crt-", "vcruntime")):
+            return 0
+        n = _stdcall_table().get(img.tramp[i] if i < len(img.tramp) else "")
+        if n is not None:
+            return n
+        blk = getattr(self, "_call_blk", None)
+        if not blk:
+            return 0
+        try:
+            code = bytes(self.uc.mem_read(blk[0], blk[1]))
+        except UcError:
+            return 0
+        ins = [mn for _a, _s, mn, _o in self._md_lite.disasm_lite(code, blk[0])]
+        k = len(ins) - 2                               # (ins[-1] is the call)
+        pushes = 0
+        while k >= 0 and ins[k] == "push":
+            pushes += 1
+            k -= 1
+        return 4 * pushes
 
     def _static_tag_after(self, end):
         """Are the 16 bytes at `end` an AEAD tag left behind by an in-place decrypt?
@@ -2147,6 +2300,17 @@ class Emulator:
                 self._capture_args()
                 uc.reg_write(self.RET, self._stub(self.img.tramp[i] if i < len(self.img.tramp)
                                                   else "") & 0xffffffffffffffff)
+                n = self._stdcall_bytes(i)
+                if n:
+                    # a Win32 API is stdcall: it pops its own arguments (`ret n`). The trampoline's
+                    # plain `ret` left them on the stack, so the caller's `pop ebp; ret` popped an
+                    # argument and returned into nowhere -- HeapAlloc returned 0 to every PE32 decoder
+                    sp = uc.reg_read(self.SP)
+                    try:
+                        uc.mem_write(sp + n, bytes(uc.mem_read(sp, 4)))
+                        uc.reg_write(self.SP, sp + n)
+                    except UcError:
+                        pass
                 self.count += 1
                 # the trampoline's `ret` runs next
                 self.prev = ("ret", 0, address, 1, not self.frames)
@@ -2182,6 +2346,7 @@ class Emulator:
         self.nblocks += 1
         if kind in _CALL_KINDS:
             self.prev = ("call", val, la, ln, not self.frames)
+            self._call_blk = (address, size)         # (stdcall cleanup: the pushes before it)
         elif kind == "ret" or kind == "jcc":
             self.prev = (kind, val, la, ln, not self.frames)
 
@@ -2414,6 +2579,16 @@ def _features(img, fva, size):
                         cipher += 1
             elif mn in ("call", "jmp") and ops.startswith("0x"):
                 callees.append(int(ops, 16))       # a jmp out of the function is a tail call
+            elif img.x32 and mn in ("mov", "push"):
+                # i386 has no RIP-relative form: data is named by an absolute 32-bit immediate
+                # (`mov edx, 0x4a3175` -- the ciphertext a decoder call gets). Without this every
+                # i386 decoder scored 0 and its match-arm strings were never path-explored.
+                imm = ops.rsplit(",", 1)[-1].strip()
+                if imm.startswith("0x"):
+                    v = int(imm, 16)
+                    if img.span[0] <= v < img.span[1] and \
+                            _cipherish(img.read(v - img.imagebase, 16), *img.span):
+                        cipher += 1
     return imm64, xors, cipher, callees
 
 
@@ -2965,6 +3140,12 @@ def _drop_overlap_artifacts(records):
             if len(x) <= 16 and any(y.endswith(x[:k]) for k in range(6, min(len(x), len(y)))):
                 garbled.add(x)
                 break
+    # a reversed view: a piece of a used string backwards (`ffo-yrtemelet-galf-e` from
+    # `...feature-flag-telemetry-off`), a decode's intermediate state written in reverse order
+    used_pool = "\0".join(sorted(used))
+    for x in texts - used - exact:
+        if len(x) >= 8 and x[::-1] in used_pool:
+            garbled.add(x)
     # a seam: the end of one string the code used, then the start of another (`bin` +
     # `canary::delt`): two decodes side by side in scratch, neither of them whole
     # (heads of up to 64 characters: every suffix of every used string would be quadratic in
@@ -3011,11 +3192,11 @@ def _drop_overlap_artifacts(records):
     # a scramble of a surviving string: its pieces stored to scratch in another order or with
     # gaps before the final copy (`C:\Progr` + `Svc\stat` from `C:\ProgramData\NorthwindSvc\
     # state.db`, `a` + `bravo::b`), seen at -O1 and with thin LTO
-    # (on i386 a decode stores 4 bytes at a time: two 4-byte pieces of a used string, out of
-    # order, `hema` + `echo` from `...echo::schema-version-4`)
+    # (on i386 a decode stores 4 bytes at a time: 4-byte words of a used string out of order,
+    # each at a 4-aligned offset of it, maybe a few stray bytes after -- `hema` + `::sc` + `echo`
+    # from `...echo::schema-version-4`, `-id-` + `uild` + `8`)
     scrambled = {x for x in alive - used - exact
-                 if any(len(y) > len(x) and (_scramble_of(x, y) or
-                                             (y in used and len(x) == 8 and x[:4] in y and x[4:] in y))
+                 if any(len(y) > len(x) and (_scramble_of(x, y) or (y in used and _words_of(x, y)))
                         for y in alive if y != x)}
     # a stutter: a string followed by a repeat of (a piece of) itself (`--skip-update-ch` +
     # `--skip-update-check`), a decode attempt and the decode written side by side
@@ -3117,6 +3298,16 @@ def _char_class(c):
 _JUNK = set("&()`~^|{}[]<>!$#@*+=\"';,")
 
 
+def _words_of(x, y):
+    """x is 2+ four-byte words of y, each found at a 4-aligned offset of y, in an order y does not
+    have, plus at most 3 trailing bytes: aligned 32-bit stores of one decode, seen out of order."""
+    k = len(x) // 4
+    if k < 2 or len(x) - 4 * k > 3 or x[:4 * k] in y:
+        return False
+    words = {y[j:j + 4] for j in range(0, len(y) - 3, 4)}
+    return all(x[4 * i:4 * i + 4] in words for i in range(k))
+
+
 def _scramble_of(x, y, min_piece=4):
     """x is made entirely of 2+ pieces of y that are not contiguous in y: interior pieces of
     `min_piece`+ characters, the first and last of any length, one of them 6+ long."""
@@ -3140,6 +3331,26 @@ def _scramble_of(x, y, min_piece=4):
     return all(p >= min_piece for p in pieces[1:-1])
 
 
+
+
+def _in_tramp(addr, n):
+    """Does [addr, addr+n) touch the import trampolines? (The C-runtime models write with
+    uc.mem_write, which ignores page protection, so they check this themselves.)"""
+    return addr < TRAMP + TRAMP_SIZE and addr + n > TRAMP
+
+
+_STDCALL = None
+
+
+def _stdcall_table():
+    """API name -> bytes a 32-bit stdcall import pops (runtime_sigs.json "x86_stdcall")."""
+    global _STDCALL
+    if _STDCALL is None:
+        try:
+            _STDCALL = json.loads(_SIGS.read_text()).get("x86_stdcall", {})
+        except (OSError, ValueError):
+            _STDCALL = {}
+    return _STDCALL
 
 
 def _degenerate(st):
