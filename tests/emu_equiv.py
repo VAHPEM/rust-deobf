@@ -87,7 +87,14 @@ def dump_unpack(paths=None):
 
 def dump_devirt():
     import devirt_emulate as D
-    return {Path(p).name: D.recover_all(str(p)) for p in DEVIRT if Path(p).is_file()}
+    out = {}
+    for p in DEVIRT:
+        if Path(p).is_file():
+            r = D.recover_all(str(p))
+            if isinstance(r, dict) and "file" in r:      # an absolute path: differs per checkout
+                r = dict(r, file=Path(r["file"]).name)
+            out[Path(p).name] = r
+    return out
 
 
 def dump(devirt=False, explore=True):
