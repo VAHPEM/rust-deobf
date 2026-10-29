@@ -85,7 +85,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 ### scripts/ — engine (language-agnostic)
 | Script | Role |
 |--------|------|
-| `recover_emulate.py` | Unicorn emulation (x86-64 + AArch64); shared `Image`/section primitives. **Core.** |
+| `recover_emulate.py` | Unicorn emulation (x86-64 + x86-32 + AArch64); shared `Image`/section primitives. **Core.** |
 | `recover_callsite.py` / `recover_arm64.py` | call-site dataflow string recovery (x64 / ARM64) |
 | `recover_stackstrings.py` | stack-constructed strings (x64 + ARM64) |
 | `recover_apihash.py` | resolve hash-obfuscated API imports (Tier 2) |
@@ -115,13 +115,8 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_enums.py` | enum discriminant/niche layout; variant names via DWARF (pyelftools, optional) else a capstone dispatch-site heuristic (x86-64 + ARM64) |
 | `recover_embedded.py` | embedded artifacts: nested exes/archives (magic; LZ4/aPLib/BriefLZ containers header-validated), high-entropy blobs, base64 payloads (file offsets) |
 | `decompress.py` | strict pure-Python LZ4 (frame/legacy/block), aPLib (raw/AP32), BriefLZ (raw/blzpack), LZNT1 decoders: output-capped, linear, never raise; headerless decodes need an encoder signature (no literal runs/zero literals a compressor never emits), full consumption, expansion (waived for magic / >= 64 B text) and "interesting" output (validated magic / text / literal-entropy drop / repetitive). Test encoders in `tests/_compress.py`; reference vectors (jibsen BriefLZ, apultra, lz4_flex) in `tests/fixtures/compress/` |
-| `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64, ELF + PE |
-| `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64 + i386, ELF + PE |
-| `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64 + i386, ELF + PE + Mach-O; rustc 1.70 (inline `panic("...")`) to 1.97 (panic_const) |
-| `recover_idioms.py` | Rust idioms in stripped binaries: fmt macro sites → `println!("…")` text (newer rustc template encoding (1.97 measured) + older pieces array), panic / safety-check call sites (kind, `Location` file:line:col, guarding branch), drop / `__rust_dealloc` calls, enum-like (Option/Result?) returns; helpers named by symbols / libfuncs / message anchors; per-function register+stack dataflow (x86-64 SysV/Win64, i386, AArch64); `--eval <unstripped> <stripped>` measures P/R; → `ghidra_annotate.py` (`idioms`) |
-| `recover_idioms.py` | Rust idioms in stripped binaries: fmt macro sites → `println!("…")` text (newer rustc template encoding (1.97 measured) + older pieces array) with each placeholder's trait (`{:?}` `{:x}` …) from its formatter fn (symbol, else debug-builder / radix / quote / debug-hex-flag anchors), `write!(f, "lit")` lowered to a `dyn fmt::Write` vtable `write_str`, panic / safety-check call sites (kind, `Location` file:line:col, guarding branch), drop / `__rust_dealloc` calls, enum-like (Option/Result?) returns; helpers named by symbols / libfuncs / message anchors; per-function register+stack dataflow (x86-64 SysV/Win64, i386 incl. stdcall callee-pops and PE32 start seeding, AArch64); `--eval <unstripped> <stripped>` measures P/R; → `ghidra_annotate.py` (`idioms`) |
+| `recover_idioms.py` | Rust idioms in stripped binaries: fmt macro sites → `println!("…")` text (newer rustc template encoding (1.97 and 1.99.1 measured) + older pieces array) with each placeholder's trait (`{:?}` `{:x}` …) from its formatter fn (symbol, else debug-builder / radix / quote / debug-hex-flag anchors), `write!(f, "lit")` lowered to a `dyn fmt::Write` vtable `write_str`, panic / safety-check call sites (kind, `Location` file:line:col, guarding branch), drop / `__rust_dealloc` calls, enum-like (Option/Result?) returns; helpers named by symbols / libfuncs / message anchors; per-function register+stack dataflow (x86-64 SysV/Win64, i386 incl. stdcall callee-pops and PE32 start seeding, AArch64); `--eval <unstripped> <stripped>` measures P/R; → `ghidra_annotate.py` (`idioms`) |
 | `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64 + i386, ELF + PE + Mach-O; rustc 1.70 (inline `panic("...")`) to 1.99 (panic_const; 1.99 inlines a bare top-level future into the executor) |
-| `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
 ### scripts/ — front ends, export, orchestration
@@ -135,8 +130,6 @@ GhidraMCP EOL by default, IDA via ida-pro-mcp's `py_eval`; tests use `tests/deco
 which cites the plugin source each stand-in follows) · `decompiler_selfcheck.py` (run on the VM
 against a REAL GhidraMCP / ida-pro-mcp: mapping on N function starts, identity, `--write-test`
 comment write/read-back/restore; PASS/FAIL report) ·
-`ghidra_annotate.py` + `ghidra_run.sh` / `ghidra_dump_annotations.py` (Ghidra) ·
-`floss_export.py` / `export_rules.py` (FLOSS / capa+YARA output) · `mcp_server.py` (MCP over stdio) ·
 `ghidra_annotate.py` + `ghidra_run.sh` / `ghidra_dump_annotations.py` (Ghidra; also lays out
 recover_types vtables and recover_idioms comments/bookmarks/renames, Ghidra-free planning in
 `_idiom_plan`, stub-tested) ·
@@ -239,9 +232,10 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
 - **`fmt::Arguments` changed shape between rustc 1.91 and 1.97** (measured: 1.91 pieces, 1.97
   template): `{template: *const u8, args}` (a byte-coded template; `args` = `len << 1 | 1` for a
   plain `&'static str`) instead of `{pieces, fmt, args}` slices. `recover_idioms` decodes both; don't key new fmt code on a `pieces` array alone.
-- **recover_libfuncs' short labels drop the last v0 segment** of non-generic symbols
-  (`panic_bounds_check` → `core::panicking`); relabel from the match's `sym` (recover_idioms does
-  via `_readable`). Its signature DB is rustc-1.97 x86-64 only — AArch64 / i386 / PE get no hits.
+- **recover_libfuncs v0 labels:** short labels used to drop the last v0 segment of non-generic
+  symbols (`panic_bounds_check` → `core::panicking`); fixed (labels are re-derived from each entry's
+  `sym`). The bundled DB is rustc 1.97 only (x86-64 ELF + the std layer for AArch64 ELF and x86-64
+  PE); any other rustc needs a per-binary DB (`gen_sigdb.py`), it is never borrowed from another.
 - **Emulation time is Python hooks, not the engine** (bench_emu.py): recover_emulate's run ~2% engine,
   unpack_emulate's UPX run ~4%. A faster engine (icicle-emu: 5-14x on hook-free loops) buys ~1%;
   cut hook cost instead (`emu_backend.fast_hook_add`, narrower hook ranges, page-protection write
