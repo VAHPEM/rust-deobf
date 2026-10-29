@@ -11,10 +11,11 @@ keys, config — **without ever running the sample**.
 ![core license](https://img.shields.io/badge/core-Apache--2.0-blue)
 ![formats](https://img.shields.io/badge/formats-ELF%20%7C%20PE%20%7C%20Mach--O-informational)
 ![arch](https://img.shields.io/badge/arch-x86--64%20%7C%20ARM64%20%7C%20x86-informational)
-![python](https://img.shields.io/badge/python-3.12-blue)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+[![PyPI](https://img.shields.io/pypi/v/rust-deobf)](https://pypi.org/project/rust-deobf/)
 
 [Demo](#-30-second-demo) · [Use it from an AI agent](#-use-it-from-an-ai-agent) ·
-[Quick start](#-quick-start) · [Results](#-results) · [Real malware](#-real-malware) ·
+[Install / quick start](#-quick-start) · [Results](#-results) · [Real malware](#-real-malware) ·
 [Limitations](#-honest-limitations)
 
 </div>
@@ -275,15 +276,69 @@ host), the Anthropic or OpenAI API, or prints the grounded prompt for offline us
 
 ## 🚀 Quick start
 
+### Install
+
+```bash
+pipx install rust-deobf                    # isolated CLI install (recommended), or:
+python3 -m pip install rust-deobf          # into the current environment / venv
+rust-deobf doctor                          # checks Python, dependencies, platform, optional tools
+```
+
+Python 3.10+ on Linux, macOS and Windows (x86-64 and ARM64). One command, `rust-deobf`, runs
+every tool: `rust-deobf list` shows them all, `rust-deobf <tool> --help` its options, and each
+subcommand behaves exactly like the matching `scripts/<tool>.py`.
+
+```bash
+rust-deobf recover path/to/binary          # static + emulation (default), never runs it
+rust-deobf triage  path/to/binary          # one-screen triage card (soc_triage)
+rust-deobf recover path/to/binary --json   # machine-readable, for agents and pipelines
+rust-deobf mcp                             # MCP server over stdio
+```
+
+| | pip | pipx |
+|---|---|---|
+| install | `pip install rust-deobf` | `pipx install rust-deobf` |
+| upgrade | `pip install -U rust-deobf` | `pipx upgrade rust-deobf` |
+| a given version | `pip install rust-deobf==0.1.0` | `pipx install rust-deobf==0.1.0 --force` |
+| premium modules | `pip install -U "rust-deobf[premium]"` | `pipx install --force "rust-deobf[premium]"` |
+| dynamic (Frida) | `pip install "rust-deobf[dynamic]"` | `pipx inject rust-deobf frida frida-tools` |
+| check | `rust-deobf --version` / `rust-deobf doctor` | same |
+
+- **Premium modules** (`rust-deobf opaque|deflatten|cff|expr|devirt|lift-vm|opt-reverse`;
+  AGPL-3.0-or-later OR commercial, see [License](#-license)) are a separate distribution,
+  `rust-deobf-premium`, always the same version as the core. Upgrade them together:
+  `pip install -U "rust-deobf[premium]"` (a plain `pip install -U rust-deobf` leaves an older
+  premium behind, and `rust-deobf` then tells you to upgrade both). The core works without them.
+- **Extras:** `[dynamic]` Frida (runs the sample: isolated VM only), `[rules]` yara-python +
+  flare-capa to validate exported rules, `[dev]` pytest + build.
+- **Windows on ARM:** use the **x64** Python build (it runs under emulation). Native ARM64 Python
+  has no `unicorn`/`capstone<6` wheels; `pip install` still completes there, and `rust-deobf`
+  explains what to do instead of failing.
+- **Upgrades and data:** the signature/data files (`data/*.json`) ship inside the package and are
+  replaced on upgrade. Per-user caches live under `~/.cache/rust-deobf` (Linux; macOS
+  `~/Library/Caches/rust-deobf`, Windows `%LOCALAPPDATA%\rust-deobf` — `rust-deobf doctor` prints
+  the path). Caches are disposable: each carries a format version, a cache from another format is
+  ignored and rebuilt rather than misread, and deleting the directory is always safe. Release notes: [CHANGELOG.md](CHANGELOG.md).
+
+### From source (clone and run, or develop)
+
 ```bash
 git clone https://github.com/VAHPEM/rust-deobf.git
 cd rust-deobf
 python3 -m pip install -r requirements.txt          # lief, capstone, unicorn, z3-solver, pyelftools, pyyaml
 
-python3 scripts/recover.py path/to/binary            # static + emulation (default), never runs it
-python3 scripts/soc_triage.py path/to/binary         # one-screen triage card
-python3 scripts/recover.py path/to/binary --json     # machine-readable, for agents and pipelines
+python3 scripts/recover.py path/to/binary            # every tool runs straight from the clone
+python3 scripts/soc_triage.py path/to/binary
+python3 scripts/cli.py list                          # the `rust-deobf` command, without installing
+
+python3 -m pip install -e . -e premium               # or: an editable install of both distributions
 ```
+
+The examples below use the clone form (`python3 scripts/<tool>.py`); with an install,
+`rust-deobf <subcommand>` is the same (`recover_libfuncs.py` -> `libfuncs`, `recover_types.py` ->
+`types`, `soc_triage.py` -> `triage`, `ghidra_run.sh` -> `ghidra`; `rust-deobf list` has the map).
+Benchmark/evaluation tools that need the repository's `bench_src/` and `build/` (e.g.
+`evaluate_all.py`, `fuzz_recover.py`, `redblue_loop.py`) are clone-only.
 
 <details>
 <summary><b>All options</b></summary>

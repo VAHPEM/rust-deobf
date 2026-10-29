@@ -1,0 +1,127 @@
+# Release: push a tag `v<version>` (matching scripts/_version.py) to build, test, publish to PyPI and
+# create a GitHub Release. Steps for the maintainer: see "Releasing" in CLAUDE.md.
+#
+#   build   -> sdist + one py3-none-any wheel per distribution (rust-deobf, rust-deobf-premium),
+#              after checking tag == scripts/_version.py and CHANGELOG.md has that section
+#   test    -> install exactly those wheels into a fresh venv on Linux x86-64/ARM64, Windows and
+#              macOS; `rust-deobf --version|list|doctor`, `recover <committed fixture> --json`,
+#              premium subcommand, library mode (tests/test_packaging.py with RUST_DEOBF_WHEEL_DIR)
+#   publish -> PyPI via Trusted Publishing (no API token stored anywhere)
+#   github-release -> a GitHub Release with the CHANGELOG section as notes and the dists attached
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag matches scripts/_version.py and CHANGELOG.md
+        shell: bash
+        run: |
+          v=$(python -c "import re;print(re.search(r'^__version__\s*=\s*[\"\x27]([^\"\x27]+)', open('scripts/_version.py').read(), re.M).group(1))")
+          echo "version=$v tag=$GITHUB_REF_NAME"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match scripts/_version.py ($v)"; exit 1
+          fi
+          if ! grep -q "^## \[$v\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$v]' section"; exit 1
+          fi
+      - run: python -m pip install --upgrade build twine
+      - name: Build rust-deobf (core, Apache-2.0)
+        run: python -m build --outdir dist .
+      - name: Build rust-deobf-premium (AGPL-3.0-or-later OR commercial)
+        run: python -m build --outdir dist premium
+      - run: python -m twine check --strict dist/*
+      - run: ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4          # tests/test_packaging.py + the committed benign fixture
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - run: python -m pip install pytest
+      - name: Installed-wheel tests (fresh venv, run outside the checkout)
+        env:
+          RUST_DEOBF_WHEEL_DIR: ${{ github.workspace }}/dist
+        run: python -m pytest tests/test_packaging.py -v -rs
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/rust-deobf/
+    permissions:
+      id-token: write                       # PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      # uploads every file in dist/: both projects (rust-deobf, rust-deobf-premium); each PyPI
+      # project needs this repo + workflow + environment registered as a trusted publisher
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Release notes from CHANGELOG.md
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on && /^\[[^]]+\]: / { next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          printf '\n---\n`pip install -U rust-deobf==%s` · premium: `pip install -U "rust-deobf[premium]==%s"`\n' "$v" "$v" >> notes.md
+          cat notes.md
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *a[0-9]*|*b[0-9]*|*rc[0-9]*|*dev*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --title "rust-deobf ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md --verify-tag $pre

@@ -18,10 +18,11 @@ edit. Instead:
 
 | When | Command | Cost |
 |------|---------|------|
-| After editing any `scripts/*.py` | `./scripts/check.sh` (selftests + doc-drift guard) | **~8s, 26 tests** |
+| After editing any `scripts/*.py` | `./scripts/check.sh` (selftests + doc-drift guard) | **~8s, 36 tests** |
 | Just one module | `python3 scripts/<name>.py --selftest` (prints `selftest OK`) | <1s |
 | One module's full test | `python3 -m pytest tests/test_<name>.py -q` | seconds |
 | Before committing/pushing | the fast CI subset (below) | ~3.5 min |
+| After touching packaging (`pyproject.toml`, `setup.py`, `cli.py`, `__init__.py`) | `RUST_DEOBF_PACKAGING=1 python3 -m pytest tests/test_packaging.py` (needs `pip install build`; `RUST_DEOBF_PACKAGING_OFFLINE=1` reuses local deps) | ~1 min |
 | Never locally | `benchmark`/`precision` jobs (need a Rust build) | CI only |
 
 `scripts/check.sh` wraps these: `./scripts/check.sh` = the 8s gate; `./scripts/check.sh changed` =
@@ -152,6 +153,29 @@ Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `hel
 `bench_emu.py` (emulation-engine benchmark: Unicorn vs optional icicle-emu, and Unicorn hook layouts, on
 equal checked work — `--workload loop|hooks|unpack|setup|funcs`, `--json`; re-run it before any engine decision).
 
+### Packaging — `pip install rust-deobf` (see "Releasing" below)
+The import package `rust_deobf` **is** `scripts/` (setuptools `package-dir`), so the clone workflow
+and the installed one run the same files; nothing was moved and the scripts' bare sibling imports
+(`sys.path.insert(0, <own dir>)` + `import recover_emulate`) work unchanged when installed.
+
+| File | Role |
+|------|------|
+| `pyproject.toml` + `setup.py` | core distribution `rust-deobf` (Apache-2.0). `setup.py`: version from `_version.py`, the `premium` extra pinned `==` that version, and `SOURCE_ONLY` = clone-only tools left out of the wheel (need `bench_src/`/`build/`/RustCloak, or write into their own dir) |
+| `scripts/_version.py` | **the** version (both distributions); bump with a CHANGELOG section |
+| `scripts/cli.py` | the `rust-deobf` command: `COMMANDS` table (subcommand → module; rows for missing modules are skipped), `list`, `doctor`, `ghidra` (portable port of `ghidra_run.sh` — keep in step), `--version`; `--selftest`. Premium tools run as a **separate process** |
+| `scripts/__init__.py` / `__main__.py` | package init (only runs when installed): `rust_deobf.X` is the same object as bare `X`; library mode keeps the package dir LAST on sys.path so `recover`/`unpack`/`disasm` never shadow a host program's modules (cli.py turns it off). `python -m rust_deobf` |
+| `premium/pyproject.toml` + `premium/setup.py` + `premium/__init__.py` | `rust-deobf-premium` (AGPL-3.0-or-later OR LicenseRef-Commercial, `LICENSE-COMMERCIAL.md`), package `rust_deobf_premium` = `premium/`, depends on `rust-deobf==` same version |
+| `CHANGELOG.md` / `.github/workflows/release.yml` | Keep a Changelog; tag `v*` → build, per-OS installed-wheel tests, PyPI (Trusted Publishing), GitHub Release |
+| `tests/test_packaging.py` | fast static checks always; installed-mode (build + fresh venv, run outside the repo) with `RUST_DEOBF_PACKAGING=1` — the CI `packaging` job |
+
+Rules: **adding a tool** = one row in `cli.py` `COMMANDS` (and nothing else; a script that needs
+the repo tree goes in `setup.py` `SOURCE_ONLY` instead). A new data file under `scripts/data/` must
+match `package-data` (`data/*.json`). Locate data via `Path(__file__).resolve().parent / "data"`,
+never `ROOT / "scripts"` (= `site-packages/scripts` when installed). **The core never imports a
+premium module** (license boundary; `test_packaging` enforces it). A per-user cache goes under
+`cli.cache_dir()` (`~/.cache/rust-deobf`, macOS `~/Library/Caches`, Windows `%LOCALAPPDATA%`), must
+carry a format version, and must ignore + rebuild a cache of another format, never misread it.
+
 ### premium/ — Tier 4 deobfuscation (AGPL/commercial; each needs its own test)
 `deobf_cff.py` (detect control-flow flattening) · `deobf_deflatten.py` (recover flattened CF) ·
 `deobf_expr.py` (provable MBA/expression simplification) · `deobf_opaque.py` (opaque predicates) ·
@@ -265,6 +289,23 @@ it survives idiom drift and backs up the brittle pattern matchers.
 - **The only periodic *data* refresh** (not code): re-run `gen_rust_versions.py` to extend the rustc
   commit→release table `recover_rust_meta` uses for version attribution. It affects version *dating*,
   not recovery.
+
+## Releasing (PyPI)
+One-time PyPI setup (maintainer): on pypi.org create a **pending trusted publisher** for each of the
+two projects, `rust-deobf` and `rust-deobf-premium` (Account → Publishing → "Add a new pending
+publisher": owner `VAHPEM`, repository `rust-deobf`, workflow `release.yml`, environment `pypi`);
+the first release then creates both projects. In GitHub → Settings → Environments create `pypi`
+(optionally with required reviewers = a manual approval gate before upload). No API token is stored.
+Optional dry run: the same publisher on test.pypi.org with `repository-url:
+https://test.pypi.org/legacy/` on the publish step.
+Each release:
+1. bump `scripts/_version.py` (SemVer; pre-1.0 a minor bump may change `--json`/flags);
+2. move `CHANGELOG.md`'s `[Unreleased]` items into `## [X.Y.Z] - date`, update the link refs;
+3. `./scripts/check.sh full` + `RUST_DEOBF_PACKAGING=1 python3 -m pytest tests/test_packaging.py`;
+4. commit, `git tag vX.Y.Z`, `git push origin master vX.Y.Z` — the tag must equal the version (the
+   workflow refuses otherwise) and the workflow does the rest. A failure in `build`/`test`
+   publishes nothing (delete the tag, fix, re-tag); once uploaded, PyPI never accepts the same
+   version again, so fix forward with X.Y.Z+1.
 
 ## Git
 - **Author every commit as the maintainer:** `Ve (VAHPEM) <ve0912084386@gmail.com>` — set

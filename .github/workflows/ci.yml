@@ -33,6 +33,29 @@ jobs:
           --ignore=tests/test_obf.py --ignore=tests/test_libfuncs.py
           --ignore=tests/test_32bit.py --ignore=tests/test_formats.py
 
+  packaging:
+    # `pip install rust-deobf` must keep working: build both distributions (rust-deobf and
+    # rust-deobf-premium), install the wheels into a fresh venv and run them from outside the
+    # checkout -- --version, list, doctor, recover <committed fixture> --json, a premium tool,
+    # library mode, wheel contents and license metadata (tests/test_packaging.py; its fast static
+    # checks also run in the selftest job, the installed-mode ones only here)
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install build pytest
+      - name: Build wheels + installed-mode tests
+        env:
+          RUST_DEOBF_PACKAGING: "1"
+        run: python -m pytest tests/test_packaging.py -v -rs
+
   benchmark:
     # one job per output format: the build matrix (canary + scatter suites, release and the
     # size/speed fat-LTO profiles) and the emulation-heavy tests are too long for one runner
