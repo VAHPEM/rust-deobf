@@ -425,9 +425,10 @@ def test_vector_chunk_prefix_is_not_a_separate_indicator():
     # a decode cut at a 16-byte chunk, used at that length by another function (`https://telemetr`
     # next to the full URL, PE32 litcrypt size-lto) was kept as a "separate indicator"
     url = "https://telemetry.northwind.example/api/v3/beacon"
-    recs = [{"string": url, "function": 1, "used": True},
-            {"string": url[:16], "function": 2, "used": True},
-            {"string": url[:32], "function": 3, "used": True}]
+    # (each at its own buffer, as in the real run: so not a half-done view of the same buffer)
+    recs = [{"string": url, "function": 1, "used": True, "addr": [0x30000100]},
+            {"string": url[:16], "function": 2, "used": True, "addr": [0x30000050]},
+            {"string": url[:32], "function": 3, "used": True, "addr": [0x30000a20]}]
     kept = {r["string"] for r in R._drop_overlap_artifacts(recs)}
     assert kept == {url}, kept
 
