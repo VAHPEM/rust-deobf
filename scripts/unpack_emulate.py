@@ -160,8 +160,6 @@ class _Unpacker:
         self.follow = follow             # keep running past the first jump into unpacked code
         self.wpages = {}                 # page -> bytearray(4096) bitmap of bytes stored this run
         self.wx_hits = []                # block addresses executed from memory written this run
-        self.ran_before_write = set()    # blocks executed BEFORE their bytes were (re)written
-        self.executed = set()
         self.self_patches = []           # blocks that ran over a few self-patched bytes (not stage-2)
         self.callbacks = []              # unpacked code the stub CALLed and got control back from
         self.first_unpacked = None       # first unpacked block executed (a callback or the OEP)
@@ -254,18 +252,23 @@ class _Unpacker:
         # bookkeeping for 128 MB of tracked writes, bounded however much the stub stores
         if not (0 < size <= 64):
             return
-        for a in range(address, address + size):
+        # page by page (a store spans at most two): one bitmap lookup per page, not per byte
+        a, end = address, address + size
+        wpages = self.wpages
+        while a < end:
             pg = a & ~0xfff
-            bm = self.wpages.get(pg)
+            bm = wpages.get(pg)
             if bm is None:
-                if len(self.wpages) >= _MAX_WRITE_PAGES:
+                if len(wpages) >= _MAX_WRITE_PAGES:
                     self.stopped = "write_cap"
                     uc.emu_stop()
                     return
-                bm = self.wpages[pg] = bytearray(512)
-            o = a & 0xfff
-            bm[o >> 3] |= 1 << (o & 7)
+                bm = wpages[pg] = bytearray(512)
+            stop = min(end, pg + 0x1000)
+            for o in range(a & 0xfff, ((stop - 1) & 0xfff) + 1):
+                bm[o >> 3] |= 1 << (o & 7)
             self.page_epoch[pg] = self.epoch
+            a = stop
         # a pointer GetProcAddress returned, stored to memory = an IAT slot the stub rebuilt
         if size == self.ptr and _DYN <= value < _DYN + 16 * len(self.dyn):
             self.iat[address - BASE] = self.dyn[(value - _DYN) // 16]
@@ -276,8 +279,8 @@ class _Unpacker:
         self.blocks += 1
         if TRAMP <= address < TRAMP + TRAMP_SIZE:
             return              # an emulated import: transparent to stub/stage-2 hand-off tracking
-        if not self._written(address):
-            self.executed.add(address)
+        bm = self.wpages.get(address & ~0xfff)      # (self._written(address), inlined: hot)
+        if not (bm and (bm[(address & 0xfff) >> 3] >> (address & 7)) & 1):
             self.prev_block = (address, size, None)        # original file code
             return
         n = max(1, min(size, 64))
@@ -286,7 +289,6 @@ class _Unpacker:
             # self-modification, not an unpacked stage: note it, keep going
             if len(self.self_patches) < 64:
                 self.self_patches.append(address)
-            self.executed.add(address)
             self.prev_block = (address, size, None)
             return
         # a block mostly made of bytes written during this run = unpacked code
