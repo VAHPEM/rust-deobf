@@ -110,6 +110,8 @@ RET_SENTINEL = 0x7fff0000
 BUDGET = 40000            # instructions per run of one function
 FRAME_BUDGET = 20000      # instructions a direct callee (with everything below it) may use
 INNER_BUDGET = 6000       # ... and any deeper callee: a lock spinning in std is cut off there
+DENSE = 16                # instructions per basic block from which code counts as a cipher's
+#                           straight-line work (Emulator._dense): it gets more budget, bounded
 QUICK = 10000             # instructions per function in the first, sweeping pass
 CTOR_BUDGET = 60000       # instructions per global constructor replayed before the sweep
 _MAX_CTORS = 64           # most constructors to replay (a crafted .init_array can list thousands)
@@ -566,7 +568,8 @@ class Image:
             return
         self._sigs_done = True
         try:
-            sigs = json.loads(_SIGS.read_text()).get("aarch64" if self.arm else "x86_64", [])
+            sigs = json.loads(_SIGS.read_text()).get(
+                "aarch64" if self.arm else "x86" if self.x32 else "x86_64", [])
         except (OSError, ValueError):
             return
         if not sigs:
@@ -1221,6 +1224,13 @@ class Emulator:
         self._blk = {}
         self._thunks = {}
         self._allocs = {}
+        self._tag_cache = {}     # 16-byte tail -> found verbatim in the file (_static_tag_after)
+        self.count = self.nblocks = 0
+        self.run_used = set()
+        # i386 ELF: address of an `int $0x80; ret` sequence in .text (musl's __vsyscall fallback,
+        # glibc's _dl_sysinfo_int80), for the vsyscall pointer at %gs:0x10 (0: none)
+        k = img.code.find(b"\xcd\x80\xc3") if img.x32 and not img.pe else -1
+        self._vsyscall = BASE + img.text_va + k if k >= 0 else 0
         self._primed = None      # writable-memory baseline after constructor priming (or None)
         self._primed_heap = None  # (heap_top, heap bytes, sizes) after priming: a ctor's malloc'd
         #                           block and allocator cursor, so later runs do not reuse its address
@@ -1400,6 +1410,12 @@ class Emulator:
             uc.mem_write(tp, struct.pack("<I", tp & 0xffffffff))
             if self.img.pe:
                 uc.mem_write(tp + 0x18, struct.pack("<I", tp & 0xffffffff))
+            elif self._vsyscall:
+                # i386 Linux libcs make system calls through `call *%gs:0x10` (the vsyscall
+                # pointer, set from AT_SYSINFO at startup, which never ran): point it at the
+                # binary's own `int $0x80; ret` fallback, which _on_intr models. Zero made every
+                # syscall return 0 -- musl's malloc got no memory in a stripped static build
+                uc.mem_write(tp + 0x10, struct.pack("<I", self._vsyscall & 0xffffffff))
         elif self.img.pe:
             # TEB: [0x30] self pointer, [0x58] thread-local storage array -> zeroed blocks
             uc.reg_write(X.UC_X86_REG_GS_BASE, tp)
@@ -1784,19 +1800,45 @@ class Emulator:
             t = b.decode("ascii")
             self.strings.add(t)
             self.used.add(t)
+            self.run_used.add(t)
             self.straddr.setdefault(t, set()).add(ptr)
             # the code says the string ends here. If the next byte holds printable text written
             # *before* the string's own last byte, that text is a stale tail of an older,
             # longer string in the same buffer (not this string still being built)
             w = self.writes
             end = ptr + n
-            if w.written(end) and w.generation(end) < w.generation(end - 1):
+            if w.written(end) and w.generation(end) <= w.generation(end - 1):
                 try:
                     nxt = bytes(self.uc.mem_read(end, 1))[0]
                 except UcError:
                     nxt = 0
-                if 0x20 <= nxt <= 0x7e:
+                if 0x20 <= nxt <= 0x7e and (w.generation(end) < w.generation(end - 1)
+                                            or self._static_tag_after(end)):
                     self.exact.add(t)              # complete: what follows is stale
+
+    def _static_tag_after(self, end):
+        """Are the 16 bytes at `end` an AEAD tag left behind by an in-place decrypt?
+
+        AES-GCM / ChaCha20-Poly1305 `decrypt` copies ciphertext||tag out of .rodata, decrypts the
+        ciphertext in place and truncates the tag off: the plaintext is followed by the 16 tag
+        bytes, written in the same capture generation when the copy and the decrypt run in one
+        callee (obfuse's AES-256-GCM `ObfuseStr`). A tag whose first byte happens to be printable
+        then glues onto the string (`...build-id-20261018` + `)`). Such a tail is recognisable:
+        all 16 bytes were written (a copy into this buffer), they are not text, and they occur
+        verbatim in the file -- copied, not decoded."""
+        w = self.writes
+        if not all(w.written(end + i) for i in range(16)):
+            return False
+        try:
+            tail = bytes(self.uc.mem_read(end, 16))
+        except UcError:
+            return False
+        if all(0x20 <= c <= 0x7e for c in tail):
+            return False                   # text: a string that continues, not a tag
+        hit = self._tag_cache.get(tail)
+        if hit is None:
+            hit = self._tag_cache[tail] = tail in self.img.file_bytes
+        return hit
 
     def _capture_args(self):
         """Strings the code is about to use, at their exact length.
@@ -1905,12 +1947,26 @@ class Emulator:
         return True
 
     def _extend(self, frame):
-        """Give a callee that is still writing text another half budget, up to four times."""
-        if self.count - self.last_text_at < 2000 and frame.get("ext", 0) < 4:
-            frame["ext"] = frame.get("ext", 0) + 1
+        """Give a callee that is still writing text another half budget, up to four times -- or,
+        up to eight times, one running dense straight-line code (_dense: a software cipher)."""
+        k = frame.get("ext", 0)
+        if (self.count - self.last_text_at < 2000 and k < 4) or (k < 8 and self._dense(frame)):
+            frame["ext"] = k + 1
             frame["start"] += INNER_BUDGET // 2
             return True
         return False
+
+    def _dense(self, frame=None):
+        """Has the code since `frame`'s call (or the whole run) been dense straight-line code:
+        DENSE+ instructions per basic block on average? Bitsliced/unrolled ciphers are (the `aes`
+        crate's software AES-256 + GHASH on AArch64, ~26k instructions per string: its callees
+        13-56 per block, the whole run 24); a lock spinning in std or a loop over a fake length
+        runs short blocks (callees that overran the budget on the benchmark: 11 or fewer)."""
+        if frame is None:
+            c, b = self.count, self.nblocks
+        else:
+            c, b = self.count - frame["c0"], self.nblocks - frame["b0"]
+        return b > 0 and c >= DENSE * b
 
     def _import_thunk(self, address):
         """Is `address` a jump stub to an import (`jmp [rip+slot]` / adrp+ldr+br x16)? Returns
@@ -2029,6 +2085,7 @@ class Emulator:
                 # ("regs", the caller's saved registers, are read only if the callee is entered:
                 # nothing between here and that decision writes a register)
                 self.call = {"ret": pa + pn, "start": self.count,
+                             "c0": self.count, "b0": self.nblocks,
                              "sp": sp if self.arm else sp + self.ptr}
                 if self._enter_or_skip(address):
                     return
@@ -2122,6 +2179,7 @@ class Emulator:
             info = self._block_info(address, size)
         n, kind, val, la, ln = info
         self.count += n
+        self.nblocks += 1
         if kind in _CALL_KINDS:
             self.prev = ("call", val, la, ln, not self.frames)
         elif kind == "ret" or kind == "jcc":
@@ -2158,6 +2216,8 @@ class Emulator:
             self.used = set()
         self.frames = []
         self.count = 0
+        self.nblocks = 0                    # basic blocks run (dense straight-line code: _dense)
+        self.run_used = set()               # strings passed on at their length in THIS run
         self.plan = plan or {}
         self.forced = set()
         self.branches = set()
@@ -2167,6 +2227,7 @@ class Emulator:
         self.lo, self.hi = func_va, func_va + size
         pc = BASE + func_va
         extend = 3 if budget >= BUDGET else 0
+        dense_extend = 6 if budget >= BUDGET else 0
         for _ in range(64):
             if timeout_us and (time.monotonic() - t_run) * 1e6 > timeout_us:
                 break                      # wall-clock bound (priming only): stop re-entering
@@ -2177,9 +2238,20 @@ class Emulator:
                     # out of instructions while still writing text (a cipher decrypting one
                     # string after another, e.g. ChaCha20 at opt-level="z" with nothing
                     # inlined): carry on, a few times
-                    if extend and self.count >= budget - 64 and \
-                            self.count - self.last_text_at < BUDGET // 4:
-                        extend -= 1
+                    # (or still deciphering: a software cipher writes no text for 26k-40k
+                    # instructions between two strings -- AES-256-GCM without AES instructions.
+                    # Seen as dense straight-line code (unrolled), or, rolled up at opt-level
+                    # "z", as a run that passed 2+ strings on at their length and wrote its last
+                    # text within twice their average spacing: decoding one after another)
+                    recent = self.count - self.last_text_at < BUDGET // 4
+                    k = len(self.run_used)
+                    pace = k >= 2 and self.count - self.last_text_at <= 2 * self.count // k
+                    if self.count >= budget - 64 and ((extend and recent) or
+                                                      (dense_extend and (self._dense() or pace))):
+                        if extend and recent:
+                            extend -= 1
+                        else:
+                            dense_extend -= 1
                         budget += BUDGET // 2
                         self._capture()
                         self.prev = None           # resumed mid-block: no pending terminator
@@ -2787,6 +2859,10 @@ def _drop_overlap_artifacts(records):
         # whole (`...config-endpoint` + `canary::bravo::...`): two strings side by side
         elif p in used and len(tail) >= 4 and tail in texts and q not in used:
             stale.add(q)
+        # ... and what follows is P's own beginning (`...data.bin` + `canary::char`): an earlier,
+        # partial copy of P in the same buffer (obfstr on i386), not more of P
+        elif p in used and len(tail) >= 4 and p.startswith(tail) and q not in used:
+            stale.add(q)
         # a tail that is a piece of another string (not of S itself); a tail of a few characters
         # is a buffer still being decoded byte by byte (stale tails are cut by write age in
         # _Writes._split)
@@ -2850,6 +2926,15 @@ def _drop_overlap_artifacts(records):
             if len(head) == 8 and head in n[1:] and not n.startswith(head):
                 garbled.add(f)
                 break
+        else:
+            # the mirror image: junk, then a piece from inside a natural string (`wy~v=yu=` +
+            # `uild-id-`, an MBA-XOR decode a forced path ran on half-set state)
+            for k in range(len(f) - 1, 7, -1):
+                tail, junk = f[-k:], f[:-k]
+                if len(junk) <= 8 and any(c in _JUNK for c in junk) and \
+                        any(n != f and tail in n[1:] for n in holders(tail) if n in natural or n in used):
+                    garbled.add(f)
+                    break
     # padded: a string the code used, glued to pieces of other recovered strings
     # (`https://telemetr` + `--skip-update-check`): the run, not a string
     padded = set()
@@ -2872,6 +2957,26 @@ def _drop_overlap_artifacts(records):
             # (inside, not at the start: a used prefix of x is the decode seen half-way through;
             # a short view needs less: `ture-fla` + `eett`)
             if (m >= 12 and 0 < len(x) - m <= 3) or (m >= 8 and len(x) <= 12 and 0 < len(x) - m <= 4):
+                garbled.add(x)
+                break
+            # one cipher block: the END of a used string, then keystream bytes that happen to be
+            # printable -- an AEAD's partial last block decrypted in a 16-byte scratch
+            # (`metry-off` + `9]bk1` from `...feature-flag-telemetry-off`, AES-256-GCM, size-lto)
+            if len(x) <= 16 and any(y.endswith(x[:k]) for k in range(6, min(len(x), len(y)))):
+                garbled.add(x)
+                break
+    # a seam: the end of one string the code used, then the start of another (`bin` +
+    # `canary::delt`): two decodes side by side in scratch, neither of them whole
+    # (heads of up to 64 characters: every suffix of every used string would be quadratic in
+    # their length, and they run to 4 KB)
+    suffixes = {u[-j:] for u in used for j in range(1, min(len(u), 65))}
+    heads6 = {}
+    for u in used:
+        heads6.setdefault(u[:6], []).append(u)
+    for x in texts - used - exact:
+        for k in range(1, min(len(x) - 5, 65)):
+            if x[:k] in suffixes and any(u != x[k:] and u.startswith(x[k:])
+                                         for u in heads6.get(x[k:k + 6], ())):
                 garbled.add(x)
                 break
     # glued: another recovered string with a piece of yet another one in front of it
@@ -2906,8 +3011,12 @@ def _drop_overlap_artifacts(records):
     # a scramble of a surviving string: its pieces stored to scratch in another order or with
     # gaps before the final copy (`C:\Progr` + `Svc\stat` from `C:\ProgramData\NorthwindSvc\
     # state.db`, `a` + `bravo::b`), seen at -O1 and with thin LTO
+    # (on i386 a decode stores 4 bytes at a time: two 4-byte pieces of a used string, out of
+    # order, `hema` + `echo` from `...echo::schema-version-4`)
     scrambled = {x for x in alive - used - exact
-                 if any(len(y) > len(x) and _scramble_of(x, y) for y in alive if y != x)}
+                 if any(len(y) > len(x) and (_scramble_of(x, y) or
+                                             (y in used and len(x) == 8 and x[:4] in y and x[4:] in y))
+                        for y in alive if y != x)}
     # a stutter: a string followed by a repeat of (a piece of) itself (`--skip-update-ch` +
     # `--skip-update-check`), a decode attempt and the decode written side by side
     scrambled |= (stutters & alive) - used - exact
@@ -3037,7 +3146,9 @@ def _degenerate(st):
     """Fake inputs formatted into text: a build-id of zeros, a run of one character, a piece
     appended over and over by a loop running on a fake count (`/usr/share/vimusr/share/vim...`)."""
     if len(st) < 16:
-        return False
+        # a unit of 1-3 characters repeated twice or more (`RvERvE`, `reAreA`): bytes of a
+        # replicated cipher word (random-key AES-GCM state on the stack), not a string
+        return any(len(st) % p == 0 and st == st[:p] * (len(st) // p) for p in (1, 2, 3))
     top = max(st.count(c) for c in set(st))
     if top / len(st) > 0.5 or re.search(r"(.)\1{15}", st) is not None:
         return True

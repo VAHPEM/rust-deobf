@@ -11,10 +11,12 @@ find them in a stripped binary.
 For each runtime function it takes the first bytes of the function in an *unstripped* build and
 masks everything that depends on where things were linked: on AArch64 the whole word of
 `adrp`/`adr`/`b`/`bl`/`cbz`/`tbz`/`b.cond`/literal `ldr`; on x86-64 the displacement and
-immediate bytes of RIP-relative and relative-branch instructions. A signature is kept only if it
+immediate bytes of RIP-relative and relative-branch instructions; on i386 also every 4-byte
+displacement and immediate (absolute addresses, GOT offsets). A signature is kept only if it
 matches exactly one function start in every build it was generated from.
 
     python scripts/gen_runtime_sigs.py build/*elf-arm64*nostrip   # writes scripts/data/runtime_sigs.json
+    python scripts/gen_runtime_sigs.py <i686-unknown-linux-musl unstripped builds>   # the "x86" table
     python scripts/gen_runtime_sigs.py --selftest
 
 The signatures describe the musl that rustc bundles (self-contained CRT); a toolchain that bundles
@@ -79,6 +81,14 @@ def mask(code: bytes, va: int, arch: str) -> str:
             start = ins.disp_offset if rip and ins.disp_offset else ins.imm_offset or 1
             for k in range(o + start, min(o + ins.size, len(out))):
                 out[k] = ".."
+        elif arch == "x86":
+            # i386 has no RIP-relative form: static code names data by absolute address and PIC
+            # code by an offset from the GOT (`lea x@GOTOFF(%ebx)`) -- both 4-byte fields that
+            # move with the link layout. Mask every 4-byte displacement and immediate.
+            for off, size in ((ins.disp_offset, ins.disp_size), (ins.imm_offset, ins.imm_size)):
+                if off and size == 4:
+                    for k in range(o + off, min(o + off + 4, len(out))):
+                        out[k] = ".."
     return "".join(out)
 
 
@@ -178,6 +188,9 @@ def _selftest():
     # x86-64: `lea rax, [rip+0x10]` disp masked, `call rel32` imm masked, `ret` kept
     pat = mask(bytes.fromhex("488d0510000000e800000000c3"), 0x1000, "x86_64")
     assert pat == "488d05........e8........c3", pat
+    # i386: `mov eax, [0x804a010]` absolute disp and `push 0x804a020` imm masked, `ret` kept
+    pat = mask(bytes.fromhex("a110a00408" "6820a00408" "c3"), 0x1000, "x86")
+    assert pat == "a1........68........c3", pat
     assert matches("48..c3", bytes.fromhex("4899c3ff")) and not matches("48..c3", bytes.fromhex("4899c2"))
     print("selftest OK: position-dependent bytes masked, patterns match with wildcards")
 

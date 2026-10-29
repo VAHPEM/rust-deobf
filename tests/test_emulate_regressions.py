@@ -223,3 +223,106 @@ def test_strlen_stub_near_end_of_mapping():
     emu.uc.mem_write(end - 0x20, b"A" * 0x20)        # no terminator before the mapping ends
     emu.uc.reg_write(emu.ARGS[0], end - 0x20)
     assert emu._stub("strlen") == 0x20
+
+
+def test_aead_tag_after_in_place_decrypt_is_cut():
+    # obfuse's AES-256-GCM ObfuseStr: ciphertext||tag is copied out of .rodata and decrypted in
+    # place in one callee, so the 16 tag bytes after the plaintext carry the same write age. A tag
+    # starting with a printable byte glued onto the string (`...build-id-20261018` + `)`), and the
+    # (pointer, length) the code passed could not mark the string complete. The tail is a tag when
+    # all 16 bytes were written, are not text, and occur verbatim in the file.
+    img, emu = _emu("ct64")
+    emu._reset()
+    plain = b"canary::bravo::build-id-20261018"
+    tag = b")" + bytes(range(0x80, 0x8f))                 # 16 bytes, the first one printable
+    img.file_bytes = img.file_bytes + b"\x00" + tag        # ... as it sits in .rodata
+
+    def attempt(p, tail, gens=1):
+        emu.writes = R._Writes()
+        emu.strings, emu.used, emu.exact, emu.straddr = set(), set(), set(), {}
+        emu.uc.mem_write(p, plain + tail)
+        emu.writes.add(p + len(plain), len(tail))           # the copy ...
+        if gens == 2:
+            emu.writes.capture(emu.uc, set())               # (a capture between copy and decrypt)
+        emu.writes.add(p, len(plain))                       # ... then the decrypt, same age or newer
+        emu._try_str(p, len(plain))
+        return plain.decode() in emu.used, plain.decode() in emu.exact
+
+    assert attempt(R.HEAP + 0x200, tag) == (True, True)
+    assert attempt(R.HEAP + 0x200, tag, gens=2) == (True, True)    # the older-tail rule, as before
+    # not in the file: decoded bytes, not a copied tag -> no claim
+    assert attempt(R.HEAP + 0x300, b")" + bytes(range(0x90, 0x9f))) == (True, False)
+    # a printable tail is text that may continue the string, even if the file holds it
+    text = b"-and-more-text-x"
+    img.file_bytes += text
+    assert attempt(R.HEAP + 0x400, text) == (True, False)
+
+
+def test_random_key_cipher_state_is_not_reported():
+    # obfuse rebuilt with fresh random keys: AES-GCM / MBA-XOR scratch occasionally reads as text.
+    # A replicated cipher word (`RvERvE`) is degenerate; a 16-byte block holding the END of a used
+    # string plus keystream (`metry-off9]bk1`), and a forced-path junk head glued to a piece from
+    # inside a natural string (`wy~v=yu=uild-id-`), are views, not strings.
+    assert R._degenerate("RvERvE") and R._degenerate("reAreA") and R._degenerate("zzzzzz")
+    assert not R._degenerate("abcabd") and not R._degenerate("a.example")
+    delta = "canary::delta::feature-flag-telemetry-off"
+    bravo = "canary::bravo::build-id-20261018"
+    recs = [{"string": delta, "function": 1, "used": True},
+            {"string": bravo, "function": 1, "used": True},
+            {"string": "metry-off9]bk1", "function": 1},
+            {"string": "wy~v=yu=uild-id-", "function": 2, "forced": True},
+            # a separate string that only shares a few characters, kept
+            {"string": "feature-x.example", "function": 3}]
+    kept = {r["string"] for r in R._drop_overlap_artifacts(recs)}
+    assert kept == {delta, bravo, "feature-x.example"}, kept
+
+
+def test_software_cipher_gets_bounded_extra_budget():
+    # the `aes` crate's software AES-256-GCM (AArch64, no AES instructions): ~26k instructions per
+    # string, its callees 13-56 instructions per basic block. A callee that dense keeps going (up
+    # to 8 half-budgets); a sparse one (a spinning lock: short blocks) is still cut off at 4, and
+    # only while it writes text.
+    img, emu = _emu("ct64")
+    emu._reset()
+    emu.count, emu.nblocks, emu.last_text_at = 50000, 1000, -R.BUDGET
+    dense = {"c0": 10000, "b0": 0, "start": 10000}            # 40000 instructions in 1000 blocks
+    sparse = {"c0": 10000, "b0": 0, "start": 10000}
+    assert emu._dense(dense) and emu._dense()                  # 40 per block; the run: 50
+    assert [emu._extend(dense) for _ in range(9)] == [True] * 8 + [False]
+    emu.nblocks = 10000                                        # 4 per block
+    assert not emu._dense(sparse) and not emu._dense()
+    assert not emu._extend(sparse)                             # no recent text either
+    emu.last_text_at = emu.count - 100
+    assert [emu._extend(sparse) for _ in range(5)] == [True] * 4 + [False]
+
+
+def test_i386_vsyscall_pointer_points_at_int80_ret():
+    # i386 libcs make system calls through `call *%gs:0x10`; zero there made every syscall of a
+    # static musl build return 0 (no memory for malloc). It now points at the binary's own
+    # `int $0x80; ret` (musl's __vsyscall fallback), which _on_intr models.
+    img, emu = _emu("ct32")
+    tp = R.TLS + R.TLS_SIZE // 2
+    emu._reset()
+    assert emu._vsyscall == 0                              # dynamic glibc: no such sequence
+    assert struct.unpack("<I", emu.uc.mem_read(tp + 0x10, 4))[0] == 0
+    img.code = b"\x90\xcd\x80\xc3" + img.code[4:]
+    emu2 = R.Emulator(img)
+    emu2._reset()
+    assert emu2._vsyscall == img.text_va + 1
+    assert struct.unpack("<I", emu2.uc.mem_read(tp + 0x10, 4))[0] == img.text_va + 1
+
+
+def test_i386_decode_views_are_dropped():
+    # obfstr on i386 musl: the decoded string followed by an earlier partial copy of its own
+    # start (`...data.bin` + `canary::char`) cost the string itself; a seam of two decodes
+    # (`bin` + `canary::delt`) and two 4-byte stores out of order (`hema` + `echo`) were reported.
+    charlie = "canary::charlie::/opt/app/resources/data.bin"
+    delta = "canary::delta::feature-flag-telemetry-off"
+    echo = "canary::echo::schema-version-4"
+    recs = [{"string": s, "function": 1, "used": True, "addr": [0x100]} for s in (charlie, delta, echo)]
+    recs += [{"string": charlie + "canary::char", "function": 1, "addr": [0x100]},
+             {"string": "bincanary::delt", "function": 1, "addr": [0x200]},
+             {"string": "hemaecho", "function": 1, "addr": [0x300]},
+             {"string": "nw-agent.example", "function": 2}]       # unrelated: kept
+    kept = {r["string"] for r in R._drop_overlap_artifacts(recs)}
+    assert kept == {charlie, delta, echo, "nw-agent.example"}, kept
