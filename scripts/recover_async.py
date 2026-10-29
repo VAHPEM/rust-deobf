@@ -53,8 +53,10 @@ can also hold nested machines (field inside self) or a coroutine inlined into a 
 
 x86-64 (ELF SysV: self in rdi/rsi; PE Win64: rcx/rdx), AArch64 (x0/x1) and i386 (cdecl: self on
 the stack, tracked through push/pop/`and esp`; LLVM fastcc: ecx/edx; PIC tables `[pic + idx*4 - d]`
-with the PC base from `call $+5; pop`, and mingw's absolute tables in .text), ELF + PE (RVAs; a
-stripped PE32 gets its function starts by recursive descent + code pointers). Static only.
+with the PC base from `call $+5; pop`, and mingw's absolute tables in .text); ELF, PE (RVAs; a
+stripped PE32 gets its function starts by recursive descent + code pointers) and Mach-O
+(LC_FUNCTION_STARTS). Measured on rustc 1.70 (inline `panic("...")`, message pointer sometimes
+hoisted above the dispatch), 1.85 and 1.97 (panic_const helpers). Static only.
 """
 from __future__ import annotations
 
@@ -219,6 +221,13 @@ class _Bin:
             st = gen_runtime_sigs.function_starts(img.binary)
         except Exception:
             st = set()
+        if img.macho:
+            # a stripped Mach-O keeps LC_FUNCTION_STARTS (offsets from __TEXT): every function
+            try:
+                seg = img.binary.get_segment("__TEXT")
+                st = set(st) | {seg.virtual_address + o for o in img.binary.function_starts.functions}
+            except Exception:
+                pass
         self.starts = sorted(a for a in st if self.lo <= a < self.hi)
         from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_MODE_64, CS_MODE_32, CS_MODE_LITTLE_ENDIAN
         if len(self.starts) < 8 or (self.pe and self.x32):
@@ -534,7 +543,7 @@ def _const_of(b: _Bin, ins):
 # 2. the dispatch interpreter
 # ----------------------------------------------------------------------------------------------
 class _Run:
-    __slots__ = ("target", "jt", "table", "reads", "branches", "path")
+    __slots__ = ("target", "jt", "table", "reads", "branches", "path", "regs")
 
     def __init__(self):
         self.target = None      # where control lands for this state value
@@ -543,6 +552,7 @@ class _Run:
         self.reads = []         # table entry VAs read
         self.branches = 0
         self.path = []          # instructions the dispatch executed (its CFG edges are "dispatch")
+        self.regs = {}          # register values when it stopped
 
 
 def _x86_op_val(b, ins, op, regs, smem, v, run):
@@ -685,6 +695,8 @@ def _run_x86(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
                     val = None                       # an unrelated load interleaved by the scheduler
                     tainted = True
                 dst = _xc(ins.reg_name(ops[0].reg))
+                if ops[1].type == X86_OP_IMM:
+                    tainted = True      # argument set-up (`mov esi, len`): body, not dispatch
                 if val is not None and m in ("movsx", "movsxd"):
                     val = _sx(val, ops[1].size * 8) & _mask(64)
                 if val is None:
@@ -698,6 +710,7 @@ def _run_x86(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
             if m == "lea":
                 dst = _xc(ins.reg_name(ops[0].reg))
                 mm = ops[1].mem
+                tainted = True          # a table base (then an indirect jump) or body set-up
                 from capstone.x86 import X86_REG_RIP
                 if mm.base == X86_REG_RIP:
                     regs[dst] = ins.address + ins.size + mm.disp
@@ -801,6 +814,7 @@ def _run_x86(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
             raise _Stop()
         except _Stop:
             run.target = seg
+            run.regs = regs
             return run
     return run      # step budget exhausted: unresolved (target None)
 
@@ -953,11 +967,14 @@ def _run_a64(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
                 continue
             if m in ("adr", "adrp"):
                 regs[_ac(parts[0])] = _num(parts[1].lstrip("#"))
+                tainted = True
                 pc = nxt
                 continue
             if m == "mov" and len(parts) == 2:
                 dst = _ac(parts[0])
                 val = _a64_operand(regs, parts[1])
+                if _A64_IMM.match(parts[1]):
+                    tainted = True
                 if val is None:
                     regs.pop(dst, None)
                 else:
@@ -1064,6 +1081,7 @@ def _run_a64(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
             raise _Stop()
         except _Stop:
             run.target = seg
+            run.regs = regs
             return run
     return run
 
@@ -1225,10 +1243,15 @@ def _classify(b: _Bin, anchors, target, lo, hi):
         return None, None
     events, consts = _walk(b, target, lo, hi)
     kind = None
+    has_call = any(e[0] == "call" for e in events)
     for e in events:
         if e[0] == "ref" and e[2] in anchors["refs"]:
-            kind = anchors["refs"][e[2]]
-            break
+            # older rustc's `panic("...")`: the message must actually reach a call -- a message
+            # pointer hoisted into an inner dispatch ahead of its jump table is not a panic arm
+            if has_call:
+                kind = anchors["refs"][e[2]]
+                break
+            continue
         if e[0] == "call":
             t = e[2].get("target")
             for k in ("returned", "panicked"):
@@ -1425,11 +1448,12 @@ def _pc_thunk_reg(bn, target):
     return None
 
 
-def _slot_clear(f, slot, size):
-    """A write to the stack slot (root, off) of `size` bytes: forget every spill it overlaps."""
+def _slot_clear(f, slot, size, ptr=8):
+    """A write to the stack slot (root, off) of `size` bytes: forget every spill it overlaps
+    (a remembered spill is at most pointer-sized)."""
     root, off = slot
     for k in [k for k in f if isinstance(k, tuple) and k[0] == "m" and k[1] == root
-              and off - 8 < k[2] < off + size]:
+              and off - ptr < k[2] < off + size]:
         del f[k]
 
 
@@ -1560,7 +1584,7 @@ def _transfer_a64(bn, ins, f, on_access, m):
         if is_st and slot is not None:
             # a spill: remember what an 8-byte register store put in the frame
             for k, r in enumerate(regs_):
-                _slot_clear(f, (slot[0], slot[1] + k * wid), wid)
+                _slot_clear(f, (slot[0], slot[1] + k * wid), wid, bn.ptr)
                 sf = ("c", 0) if _ac(r) == "xzr" else f.get(_ac(r))
                 if wid == 8 and sf is not None and m in ("str", "stur", "stp"):
                     f[_mk(slot, k * wid)] = sf
@@ -1569,8 +1593,8 @@ def _transfer_a64(bn, ins, f, on_access, m):
                 f.pop(_ac(r), None)
             if base is not None and m in ("ldr", "ldur", "ldp") and regs_[0].startswith("x"):
                 for k, r in enumerate(regs_):
-                    if _ac(r) == base:
-                        continue
+                    if _ac(r) == base and wb:
+                        continue       # the writeback and the load both target it: unknown
                     sv = f.get(_mk(slot, 8 * k)) if slot is not None else None
                     d = sv if sv is not None else _deref(bf, disp + 8 * k)
                     if d is not None:
@@ -1688,7 +1712,7 @@ def _transfer_x86(bn, ins, f, on_access, m):
             bc = _xc(ins.reg_name(op.mem.base))
             slot = _stack_slot(spf if bc == "rsp" else f.get(bc), op.mem.disp)
             if slot is not None:
-                _slot_clear(f, slot, max(op.size, 1))
+                _slot_clear(f, slot, max(op.size, 1), ptrw)
                 if m == "mov" and op.size == ptrw and len(ops) == 2:
                     src = ops[1]
                     sv = None
@@ -1699,6 +1723,10 @@ def _transfer_x86(bn, ins, f, on_access, m):
                         sv = ("c", src.imm & _mask(8 * ptrw))
                     if sv is not None:
                         f[_mk(slot)] = sv
+                elif m == "mov" and len(ops) == 2 and ops[1].type == X86_OP_IMM:
+                    # a narrow constant parked in the frame (`mov byte [ebp-0x10], 3`): reloaded
+                    # by movzx and stored as the next state
+                    f[_mk(slot)] = ("cp", ops[1].imm & _mask(8 * op.size), 8 * op.size)
     if x32:
         if m == "and" and ops and ops[0].type == X86_OP_REG and _xc(ins.reg_name(ops[0].reg)) == "rsp":
             f["rsp"] = ("p", "spa", 0)   # realigned: a fresh stack root (args stay at [ebp+..])
@@ -1767,6 +1795,15 @@ def _transfer_x86(bn, ins, f, on_access, m):
                 f[dst] = d
         else:
             f.pop(dst, None)
+        return
+    if m == "movzx" and len(ops) == 2 and ops[1].type == X86_OP_MEM and ops[1].size < ptrw \
+            and ops[1].mem.base and not ops[1].mem.index:
+        bc = _xc(ins.reg_name(ops[1].mem.base))
+        slot = _stack_slot(spf if bc == "rsp" else f.get(bc), ops[1].mem.disp)
+        sv = f.get(_mk(slot)) if slot is not None else None
+        f.pop(dst, None)
+        if sv and sv[0] == "cp" and sv[2] == 8 * ops[1].size:
+            f[dst] = ("c", sv[1])
         return
     if m == "lea" and len(ops) == 2:
         mm = ops[1].mem
@@ -1968,11 +2005,23 @@ def _try_dispatch(b, anchors, load_va, lo, hi, cls_cache, seed=None):
         if t not in cls_cache:
             cls_cache[t] = _classify(b, anchors, t, lo, hi)
         return cls_cache[t]
+    def kind(r):
+        k, loc = cls(r.target)
+        if k is None and anchors["refs"] and r.target is not None:
+            # older rustc: `core::panicking::panic(msg, ..)` with the message pointer loaded
+            # before the dispatch (LLVM hoists it out of a tail-merged arm): the run holds it
+            held = {anchors["refs"][v] for v in r.regs.values() if v in anchors["refs"]}
+            ev, _c = _walk(b, r.target, lo, hi)
+            if len(held) == 1 and any(e[0] == "call" for e in ev) and not any(
+                    e[0] == "ref" and e[2] in anchors["refs"] for e in ev):
+                k = held.pop()
+                cls_cache[r.target] = (k, loc)
+        return k
     r1 = _dispatch_run(b, load_va, 1, lo, hi, seed)
-    if cls(r1.target)[0] != "returned":
+    if kind(r1) != "returned":
         return None
     r2 = _dispatch_run(b, load_va, 2, lo, hi, seed)
-    if cls(r2.target)[0] != "panicked":
+    if kind(r2) != "panicked":
         return None
     r0 = _dispatch_run(b, load_va, 0, lo, hi, seed)
     if r0.target is None or cls(r0.target)[0] is not None:
@@ -2174,6 +2223,22 @@ def analyze_function(b: _Bin, anchors, lo, hi):
             by.setdefault(find(i), []).append(ss[i])
         for part in by.values():
             comps.append((field, part, len(by) > 1))
+    # a register-state dispatch with the same targets as a memory-state one is the same
+    # coroutine: the first poll still holds the fresh state in a register, a resumed poll reloads
+    # it from the field (older rustc) -- fold it into the memory machine
+    merged = []
+    for c in comps:
+        if c[0][0] == "reg":
+            def live(sites_):           # Unresumed + resume targets (not the shareable arms)
+                return {t for s_ in sites_ for v, t in s_["targets"].items() if v == 0 or v >= 3}
+            tg = live(c[1])
+            host = next((d for d in comps if d[0][0] != "reg" and d is not c and tg & live(d[1])),
+                        None)
+            if host is not None:
+                host[1].extend(c[1])
+                continue
+        merged.append(c)
+    comps = merged
     entry_order = _entry_order(b, lo, hi, {s["va"] for s in sites})
     machines = []
     all_sites = {s["va"] for s in sites}

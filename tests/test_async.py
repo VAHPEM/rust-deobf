@@ -111,12 +111,44 @@ def _aarch64_target():
     return _target("aarch64-unknown-linux-musl")
 
 
-def _build(tmp_path, target=None, program=None):
+def _toolchain(tc):
+    try:
+        out = subprocess.check_output(["rustup", "toolchain", "list"], text=True)
+        return any(ln.split()[0].startswith(tc) for ln in out.splitlines() if ln.strip())
+    except Exception:
+        return False
+
+
+TBD = """--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1311
+exports:
+  - targets:         [ arm64-macos ]
+    symbols:         [ _dyld_stub_binder ]
+...
+"""
+
+
+def _build(tmp_path, target=None, program=None, toolchain=None):
     src = tmp_path / "hand.rs"
     src.write_text((program or PROGRAM).lstrip("\n"))
     out = tmp_path / ("hand_" + (target or "host"))
-    cmd = ["rustc", "--edition", "2021", "-O", "-C", "strip=symbols", str(src), "-o", str(out)]
-    if target:
+    rustc = ["rustc"] + ([f"+{toolchain}"] if toolchain else [])
+    cmd = rustc + ["--edition", "2021", "-O", "-C", "strip=symbols", str(src), "-o", str(out)]
+    if target == "aarch64-apple-darwin":
+        # no macOS SDK here: link with ld64.lld against stub libSystem/libc/libm, imports left
+        # to dynamic lookup -- a real Mach-O executable for static analysis (not runnable)
+        stub = tmp_path / "stub"
+        stub.mkdir(exist_ok=True)
+        for n in ("c", "m", "System"):
+            (stub / f"lib{n}.tbd").write_text(TBD)
+        cmd = rustc + ["--edition", "2021", "-O", str(src), "-o", str(out), "--target", target,
+                       "-C", "linker=rust-lld", "-C", "linker-flavor=ld64.lld",
+                       "-C", f"link-arg=-L{stub}", "-C", "link-arg=-undefined",
+                       "-C", "link-arg=dynamic_lookup"]
+    elif target:
         cmd += ["--target", target, "-C", "linker=rust-lld", "-C", "link-self-contained=yes"]
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path)
     if r.returncode != 0:
@@ -293,6 +325,40 @@ def test_hand_executor_i386(tmp_path):
     # top awaits the boxed future through the dyn Future vtable (slot 3 = 0xc on i386)
     dyn = [st["inner"] for st in armless[0]["states"].values() if st.get("inner", {}).get("kind") == "dyn"]
     assert dyn and dyn[0]["slot_offset"] == 12 and dyn[0].get("machine") == boxed["id"], dyn
+
+
+def _check_by_location(res):
+    """Every machine names its async fn through its resume panic's &Location: one per coroutine
+    of the source, each with exactly the source's number of awaits."""
+    ms = [m for m in res["machines"] if m["source"]]
+    assert {m["source"]["line"] for m in ms} == set(AWAITS), sorted({m["source"]["line"] for m in ms})
+    for m in ms:
+        assert m["suspend_points"] == AWAITS[m["source"]["line"]], (m["source"], m["suspend_points"])
+        assert m["validated"], m["notes"]
+
+
+@pytest.mark.skipif(not (shutil.which("rustc") and _target("aarch64-apple-darwin")),
+                    reason="aarch64-apple-darwin target not installed")
+def test_hand_executor_macho(tmp_path):
+    """Mach-O arm64, symbols stripped: function starts come from LC_FUNCTION_STARTS."""
+    exe = _build(tmp_path, "aarch64-apple-darwin")
+    if shutil.which("llvm-strip"):
+        subprocess.run(["llvm-strip", str(exe)], check=False)
+    res = RA.recover(exe)
+    assert res["format"] == "MACHO" and res["arch"] == "aarch64"
+    _check_by_location(res)
+    assert len(res["machines"]) == 9 and len(res["poll_functions"]) == 2
+
+
+@pytest.mark.skipif(not shutil.which("rustup"), reason="rustup not available")
+@pytest.mark.parametrize("toolchain", ["1.70.0", "1.85.0"])
+def test_hand_executor_older_rustc(tmp_path, toolchain):
+    """Older rustc: 1.70 panics with `core::panicking::panic("`async fn` resumed after ...")`
+    (the message pointer is sometimes hoisted above the dispatch), 1.85 already uses the
+    panic_const helpers."""
+    if not _toolchain(toolchain):
+        pytest.skip(f"toolchain {toolchain} not installed")
+    _check_by_location(RA.recover(_build(tmp_path, toolchain=toolchain)))
 
 
 def test_no_async_no_machines(tmp_path):
