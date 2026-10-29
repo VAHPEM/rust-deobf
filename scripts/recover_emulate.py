@@ -1490,10 +1490,22 @@ class Emulator:
         dirty |= self.touched
         self.touched = set()
         z = _ZERO_PAGE
+        code_pages = []
         for pg in dirty:
             try:
                 uc.mem_write(pg << 12, self._orig.get(pg, z))
             except UcError:
+                continue
+            if self.img.executable((pg << 12) - BASE):
+                code_pages.append(pg)
+        # a host-side write does not invalidate Unicorn's translated blocks: a run that wrote into
+        # code (a forced path storing through a wild pointer) left blocks translated from the
+        # garbage, and later runs executed them although the bytes were restored (PE32
+        # obfuse_aes: `main` 5/5 -> 0/5 after exploring the decrypt routine)
+        for pg in code_pages:
+            try:
+                uc.ctl_remove_cache(pg << 12, (pg + 1) << 12)
+            except Exception:
                 pass
         for va, blob in self._writable_sections():
             try:
