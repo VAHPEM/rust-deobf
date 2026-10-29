@@ -80,7 +80,8 @@ def test_scatter_indicator_tags(fmt, ext, profile):
 @pytest.mark.parametrize("profile", ["size-lto", "speed-lto"])
 @pytest.mark.parametrize("fmt,ext", FORMATS)
 @pytest.mark.parametrize("crate", ["xor_custom", "add_custom", "sub_custom", "litcrypt", "litcrypt2",
-                                   "obfstr", "tight_xor", "cryptify_default"])
+                                   "obfstr", "tight_xor", "cryptify_default",
+                                   "obfuse", "obfuse_aes", "obfuse_xor", "obfany"])
 def test_canaries_under_lto_profiles(crate, fmt, ext, profile):
     # the original canary programs, rebuilt the way release malware is built
     res = run(binary(crate, fmt, ext, profile))

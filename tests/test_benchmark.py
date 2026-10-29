@@ -60,6 +60,26 @@ def test_obfstr_exact_on_x86(fmt, ext, strip):
     assert sorted(r["recovered_texts"]) == sorted(CANARIES), r["recovered_texts"]
 
 
+# 2026 crates. obfuse (default = polymorphic inline XOR/ADD/SUB/ROT layers in a flattened state
+# machine, random keys every build), obfuse_aes (AES-256-GCM ObfuseStr), obfuse_xor (XOR through
+# MBA expressions), obfany (obfstr fork: obfstr!/obfwide!/obfnum!/obfstmt!). No static decoder to
+# read in any of them; the pipeline (emulation) must return the five canaries exactly -- for
+# obfuse_aes that includes cutting the GCM tag left after the in-place decrypt.
+EMULATED_2026 = ["obfuse", "obfuse_aes", "obfuse_xor", "obfany"]
+
+
+@pytest.mark.parametrize("strip", ["nostrip", "strip"])
+@pytest.mark.parametrize("fmt,ext", FORMATS)
+@pytest.mark.parametrize("crate", EMULATED_2026)
+def test_2026_crates_by_emulation(crate, fmt, ext, strip):
+    import recover
+    res = recover.run(binary(crate, fmt, ext, strip), stackstrings=False, literals=False,
+                      time_budget=300)
+    got = {x["string"] for x in res["decoded"]}
+    assert set(CANARIES) <= got, sorted(set(CANARIES) - got)
+    assert not got - set(CANARIES), sorted(got - set(CANARIES))
+
+
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])
 @pytest.mark.parametrize("fmt,ext", FORMATS)
 def test_cryptify_default_key(fmt, ext, strip):
@@ -129,7 +149,7 @@ def test_rust_literals(fmt, ext):
 
 
 @pytest.mark.parametrize("fmt,ext", FORMATS)
-@pytest.mark.parametrize("crate", STATIC + ["obfstr", "cryptify_default", "muddy"])
+@pytest.mark.parametrize("crate", STATIC + ["obfstr", "cryptify_default", "muddy"] + EMULATED_2026)
 def test_literals_do_not_leak_obfuscated_canaries(crate, fmt, ext):
     import recover_rust_strings
     r = recover_rust_strings.recover(binary(crate, fmt, ext, "strip"), min_len=4)

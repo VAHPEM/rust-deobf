@@ -1,0 +1,25 @@
+[package]
+name = "obfuse_aes"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+obfuse = { version = "1", default-features = false, features = ["aes-256-gcm"] }
+
+[profile.release]
+strip = false
+opt-level = 3
+
+[profile.size-lto]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.speed-lto]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

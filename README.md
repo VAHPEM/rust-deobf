@@ -441,6 +441,10 @@ external review tested got **79/360**. Every cell is a test in `tests/test_scatt
 | cryptify (default key) | XOR, crate-default key | 0/5 | 0/5 | **5/5** | **5/5** | **5/5** |
 | cryptify (custom key) | key only in the build/run environment | 0/5 | 0/5 | —¹ | —¹ | **5/5**¹ |
 | muddy | ChaCha20-Poly1305 (AEAD) | 0/5 | 0/5 | — | **5/5** | **5/5** |
+| obfuse² (default features) | 2–4 random XOR/ADD/SUB/ROT layers per string, runtime-derived keys, flattened state machine | 0/5 | n/m | — | **5/5** | n/m |
+| obfuse_aes² | AES-256-GCM (AES-NI / soft, picked by CPUID) | 0/5 | n/m | — | **5/5** | n/m |
+| obfuse_xor² | XOR through MBA expressions | 0/5 | n/m | — | **5/5** | n/m |
+| obfany² | XorShift keystream XOR, `read_volatile`; `obfstr!`/`obfwide!`/`obfnum!`/`obfstmt!` | 0/5 | n/m | — | **5/5** | n/m |
 
 Release builds, ELF and PE x86-64 and AArch64, stripped and not; `size-lto`/`speed-lto` builds
 of every crate are tested too. Static = reads the decoder's key and the call sites without
@@ -450,6 +454,16 @@ isolated VM.
 <sub>¹ cryptify reads `CRYPTIFY_KEY` again at run time: with a custom key the sample only
 decrypts when run with that variable set, and the key is not in the binary. `recover_cryptify`
 detects the crate and says so.</sub>
+
+<sub>² The 2026 crates (obfuse 1.0.1, obfany 0.1.5): 5/5 exact (no extra string) measured on ELF
+x86-64 release/size-lto/speed-lto, ELF AArch64 (musl) release/size-lto and i686 musl (static,
+stripped) release -- stripped and not, except i686 (stripped); PE is built and tested by CI's `pe` job but not measured yet,
+and FLOSS / dynamic recovery (`n/m`) not run on them. obfuse's default features name
+`aes-256-gcm`, but with `polymorphic` on (the default) the macro never calls the AEAD -- the default
+binary holds no AES instruction; `obfuse_aes` is the crate's real AES-256-GCM path (AES-NI on
+x86-64; on AArch64 the `aes` crate's software AES, ~26k emulated instructions per string). obfuse
+draws fresh random keys on every build: four rebuilds of obfuse and obfuse_aes recovered 5/5 each (the stray cipher-state strings
+two of them also showed are filtered since).</sub>
 
 </details>
 

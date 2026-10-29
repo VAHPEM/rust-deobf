@@ -273,6 +273,28 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   current block; `uc_reg_write_batch` including the PC does not (runs silently diverge). Batch the
   other registers, write the PC alone, last.
 - **VALIDATION.md** uses numbered round sections; append the next `§N` rather than editing old ones.
+- **Benchmark crates** (`bench_src/gen_projects.py` → `manifest.json`; `build_all.sh` builds every
+  `bench_src/*/`): hand-rolled xor/add/sub/tight_xor, obfstr, litcrypt, litcrypt2, cryptify
+  (custom + default key), muddy, and the 2026 crates **obfuse** (default), **obfuse_aes**,
+  **obfuse_xor**, **obfany**. obfuse's *default* features list `aes-256-gcm`, but with
+  `polymorphic` on (default) the macro never uses the AEAD: each literal gets inline
+  XOR/ADD/SUB/ROT layers in a flattened state machine, with **fresh random keys every build** (no
+  `seed`) -- so a result can differ between rebuilds; measure several. The real AES-256-GCM path is
+  `obfuse_aes` (`default-features = false`).
+- **AEAD in-place decrypt leaves the 16-byte tag after the plaintext** with the same write age when
+  copy + decrypt run in one callee; `Emulator._static_tag_after` lets a (ptr, len) the code passed
+  mark the string complete when that tail is non-text and found verbatim in the file. Without it
+  any printable first tag byte (95 of 256 values) glued on (`...20261018)`) and cost the string.
+- **Instruction budgets bind on software ciphers**: the `aes` crate on AArch64 has no AES
+  instructions by default (soft fixsliced AES + GHASH, ~26k instructions per string). Callees get
+  more budget only while running dense straight-line code (`Emulator._dense`, `DENSE` = 16
+  instructions/block; normal callees that overrun are <= 11) and a run only while dense or still
+  decoding strings at a steady pace (`run_used`) -- all bounded. Don't raise the global budgets.
+- **i386 Linux**: libc system calls go through `call *%gs:0x10`; the emulator points it at the
+  binary's own `int $0x80; ret` (`Emulator._vsyscall`). Stripped static musl builds need the
+  `"x86"` table in `scripts/data/runtime_sigs.json` (from `gen_runtime_sigs.py` on unstripped
+  `i686-unknown-linux-musl` builds) or malloc runs for real and returns NULL.
+  `tests/test_32bit.py` builds that shape itself (rust-lld; no i686 C library needed).
 
 ## Maintenance: a new rustc release does NOT mean a rewrite
 Rust ships a stable release every 6 weeks, but that is a *release* cadence, not an *architecture*

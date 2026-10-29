@@ -163,6 +163,58 @@ VARIANTS["muddy"] = {
     "build_rs": None, "env": None,
 }
 
+# 7. obfuse (2026). Default features = aes-256-gcm + polymorphic + control-flow-flatten. With
+#    `polymorphic` on (the default) the macro does NOT use the AEAD: each literal gets its own
+#    inline closure that undoes 2-4 random XOR/ADD/SUB/ROL/ROR layers whose 32-byte keys are
+#    derived at run time from 4-8 constants, inside a flattened state machine with opaque
+#    predicates; decrypted lazily into a OnceLock. No seed: a fresh random layer stack per build,
+#    as the crate is used in the field.
+VARIANTS["obfuse"] = {
+    "deps": ['obfuse = "1"'],
+    "header": "use obfuse::obfuse;",
+    "body": main_body(lambda c: f'obfuse!("{esc(c)}").as_str()'),
+    "build_rs": None, "env": None,
+}
+# 7b. obfuse without `polymorphic`: the real AES-256-GCM path (ObfuseStr: ciphertext+tag in
+#     .rodata, key and nonce as immediates, the `aes` crate's AES-NI/soft backend picked by CPUID)
+VARIANTS["obfuse_aes"] = {
+    "deps": ['obfuse = { version = "1", default-features = false, features = ["aes-256-gcm"] }'],
+    "header": "use obfuse::obfuse;",
+    "body": main_body(lambda c: f'obfuse!("{esc(c)}").as_str()'),
+    "build_rs": None, "env": None,
+}
+# 7c. obfuse `xor` mode: XOR with a 32-byte key through Mixed Boolean-Arithmetic (MBA) expressions
+VARIANTS["obfuse_xor"] = {
+    "deps": ['obfuse = { version = "1", default-features = false, features = ["xor"] }'],
+    "header": "use obfuse::obfuse;",
+    "body": main_body(lambda c: f'obfuse!("{esc(c)}").as_str()'),
+    "build_rs": None, "env": None,
+}
+
+# 8. obfany (2026 fork of obfstr 0.4): XorShift keystream seeded per call site (file/line/column,
+#    OBFANY_SEED), read_volatile against constant folding, the ciphertext reference hidden behind
+#    xref!. Strings via obfstr! and obfwide! (UTF-16), plus obfnum! and obfstmt! (statement
+#    shuffling) around two of the prints.
+VARIANTS["obfany"] = {
+    "deps": ['obfany = "0.1"'],
+    "header": "use obfany::{obfnum, obfstmt, obfstr, obfwide};",
+    "body": "\n".join([
+        "fn main() {",
+        f'    println!("{{}}", obfstr!("{esc(CANARIES[0])}"));',
+        f'    println!("{{}}", obfstr!("{esc(CANARIES[1])}"));',
+        f'    println!("{{}}", String::from_utf16_lossy(obfwide!("{esc(CANARIES[2])}")));',
+        "    let mut schema: u32 = 0;",
+        "    obfstmt! {",
+        f'        println!("{{}}", obfstr!("{esc(CANARIES[3])}"));',
+        "        schema = obfnum!(u32, 4);",
+        f'        println!("{{}}", obfstr!("{esc(CANARIES[4])}"));',
+        "    }",
+        '    println!("{}", schema);',
+        "}",
+    ]),
+    "build_rs": None, "env": None,
+}
+
 
 # 4b. litcrypt2 (maintained fork of litcrypt, same lc! XOR idiom)
 _lit2 = ["use_litcrypt!();", "fn main() {"] + [f'    println!("{{}}", lc!("{esc(c)}"));' for c in CANARIES] + ["}"]
@@ -335,7 +387,8 @@ for name, v in VARIANTS.items():
         "cipher": {"plaintext":"none","xor_custom":"xor","add_custom":"add","sub_custom":"sub",
                    "obfstr":"xor","litcrypt":"xor","litcrypt2":"xor",
                    "cryptify":"xor-ish","cryptify_default":"xor-ish","tight_xor":"xor",
-                   "muddy":"chacha20poly1305"}.get(name.replace("scatter_", "").replace("cryptify", "cryptify_default") if name.startswith("scatter_") else name, "?"),
+                   "muddy":"chacha20poly1305", "obfuse":"polymorphic-xor-add-sub-rot",
+                   "obfuse_aes":"aes-256-gcm", "obfuse_xor":"xor-mba", "obfany":"xor"}.get(name.replace("scatter_", "").replace("cryptify", "cryptify_default") if name.startswith("scatter_") else name, "?"),
     }
 # What each scatter program really holds at run time. litcrypt (v1) strips one character from
 # each end of the literal's *source text*, so a raw string r"C:\x" becomes `"C:\x` -- a crate
