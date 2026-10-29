@@ -93,6 +93,8 @@ _TLS_VAR_CAP = 0x4000
 TRAMP = 0x7e000000        # one 16-byte `ret` trampoline per import
 TRAMP_SIZE = 0x100000
 BRK = 0x60000000          # program break for brk()
+_HEAP_END, _SCRATCH_END, _TLS_END, _BRK_END = (HEAP + HEAP_SIZE, SCRATCH + SCRATCH_SIZE,
+                                                TLS + TLS_SIZE, BRK + 0x1000000)
 # zero-filled buffers _reset writes every run (built once, not per run)
 _ZERO_PAGE = bytes(0x1000)
 _ZERO_STACK = bytes(STACK_SIZE)
@@ -973,30 +975,46 @@ class _Writes:
                     cache[p] = None
             return cache[p]
 
-        def byte(x):
-            pg = page(x >> 12)
-            return None if pg is None else pg[x & 0xfff]
-
+        pages = self.pages
         for a, b in merged:
+            # extend through neighbouring bytes that were written AND are printable (a written
+            # check -- self.written() -- before each byte is read, as before; inlined: hot)
             s, e = a, b
-            while a - s < 4096 and self.written(s - 1):
-                c = byte(s - 1)
-                if c is None or not 0x20 <= c <= 0x7e:
+            pn, pb = -1, None
+            while a - s < 4096:
+                x = s - 1
+                g = pages.get(x >> 12)
+                if not g or not g[x & 0xfff]:
                     break
-                s -= 1
-            while e - b < 4096 and self.written(e):
-                c = byte(e)
-                if c is None or not 0x20 <= c <= 0x7e:
+                if x >> 12 != pn:
+                    pn = x >> 12
+                    pb = page(pn)
+                if pb is None or not 0x20 <= pb[x & 0xfff] <= 0x7e:
+                    break
+                s = x
+            while e - b < 4096:
+                g = pages.get(e >> 12)
+                if not g or not g[e & 0xfff]:
+                    break
+                if e >> 12 != pn:
+                    pn = e >> 12
+                    pb = page(pn)
+                if pb is None or not 0x20 <= pb[e & 0xfff] <= 0x7e:
                     break
                 e += 1
-            buf = bytearray()
-            x = s
-            while x < e:
-                pg = page(x >> 12)
-                n = min(e - x, 4096 - (x & 0xfff))
-                buf += pg[x & 0xfff:(x & 0xfff) + n] if pg is not None else b"\x00" * n
-                x += n
-            for m in _PRINTABLE_RUN.finditer(bytes(buf)):
+            if s >> 12 == (e - 1) >> 12:            # one page: slice it, no buffer to build
+                pb = page(s >> 12)
+                data = pb[s & 0xfff:(s & 0xfff) + (e - s)] if pb is not None else bytes(e - s)
+            else:
+                buf = bytearray()
+                x = s
+                while x < e:
+                    pg = page(x >> 12)
+                    n = min(e - x, 4096 - (x & 0xfff))
+                    buf += pg[x & 0xfff:(x & 0xfff) + n] if pg is not None else b"\x00" * n
+                    x += n
+                data = bytes(buf)
+            for m in _PRINTABLE_RUN.finditer(data):
                 for piece, addr in self._split(s + m.start(), m.group()):
                     out.add(piece)
                     if addrs is not None:
@@ -1750,6 +1768,7 @@ class Emulator:
         self.writes.capture(self.uc, self.strings, self.straddr)
 
     def _plausible(self, p):
+        # (the same test is inlined in _capture_args: keep the two in step)
         return (self.STACK <= p < self.STACK + STACK_SIZE or HEAP <= p < HEAP + HEAP_SIZE
                 or SCRATCH <= p < SCRATCH + SCRATCH_SIZE or TLS <= p < TLS + TLS_SIZE
                 or BRK <= p < BRK + 0x1000000)
@@ -1820,6 +1839,7 @@ class Emulator:
         read = uc.mem_read
         seen, budget = set(), 48
         stack = [(r, 3) for r in reversed(regs) if plausible(r)]
+        s0, s1 = self.STACK, self.STACK + STACK_SIZE
         while stack and budget > 0:
             p, depth = stack.pop()
             if p in seen:
@@ -1830,11 +1850,14 @@ class Emulator:
                 q = unpack(read(p, pw * words))
             except UcError:
                 continue
-            for k in range(words - 1):
-                if 6 <= q[k + 1] <= 4096:
-                    try_str(q[k], q[k + 1])
+            for a, b in zip(q, q[1:]):
+                if 6 <= b <= 4096:
+                    try_str(a, b)
             if depth > 1:
-                stack.extend((v, depth - 1) for v in reversed(q) if v not in seen and plausible(v))
+                # (_plausible inlined: this test runs for every word of every block walked)
+                stack.extend((v, depth - 1) for v in reversed(q) if v not in seen and (
+                    s0 <= v < s1 or HEAP <= v < _HEAP_END or SCRATCH <= v < _SCRATCH_END
+                    or TLS <= v < _TLS_END or BRK <= v < _BRK_END))
 
     def _on_return(self):
         if self.frames:
@@ -1863,6 +1886,7 @@ class Emulator:
             # tracking a frame for it would leak one every time and desync the frame stack.
             return False
         if TRAMP <= address < TRAMP + TRAMP_SIZE:
+            call["regs"] = self.uc.reg_read_batch(self.SAVED)
             self.frames.append(call)            # popped by the trampoline's `ret`
             return False
         if img.executable(address) and (len(self.frames) < MAX_DEPTH or self._import_thunk(address)
@@ -1870,11 +1894,14 @@ class Emulator:
             # (past the depth limit, still take a jump stub to an import or a modelled runtime
             # function: without code inlined, `alloc` is 8+ calls below a decoder, and an
             # allocation returning 0 ends in handle_alloc_error)
+            call["regs"] = self.uc.reg_read_batch(self.SAVED)
             self.frames.append(call)
             return False
-        # too deep, or a call through a pointer the image never set (0, garbage): return 0
+        # too deep, or a call through a pointer the image never set (0, garbage): return 0.
+        # The callee has not run an instruction, so the caller's saved registers still hold what
+        # they did at the call: only SP, the return value and PC need writing.
         self._capture()
-        self._unwind(call)
+        self._unwind(call, saved=False)
         return True
 
     def _extend(self, frame):
@@ -1946,10 +1973,11 @@ class Emulator:
         self._allocs[key] = hit
         return hit
 
-    def _unwind(self, frame):
-        """Return 0 from `frame`'s callee: restore its caller's saved registers, SP and PC."""
+    def _unwind(self, frame, saved=True):
+        """Return 0 from `frame`'s callee: restore its caller's saved registers (unless the callee
+        never ran: saved=False), SP and PC."""
         uc = self.uc
-        regs = list(zip(self.SAVED, frame["regs"]))
+        regs = list(zip(self.SAVED, frame["regs"])) if saved else []
         regs += [(self.SP, frame["sp"]), (self.RET, 0)]
         batch = getattr(uc, "reg_write_batch", None)
         if batch is not None:                   # one call, same order as the writes below
@@ -1998,9 +2026,10 @@ class Emulator:
                     self._capture()            # buffers handed to a callee are complete now
                     self._capture_args()
                 sp = uc.reg_read(self.SP)
+                # ("regs", the caller's saved registers, are read only if the callee is entered:
+                # nothing between here and that decision writes a register)
                 self.call = {"ret": pa + pn, "start": self.count,
-                             "sp": sp if self.arm else sp + self.ptr,
-                             "regs": uc.reg_read_batch(self.SAVED)}
+                             "sp": sp if self.arm else sp + self.ptr}
                 if self._enter_or_skip(address):
                     return
             elif kind == "ret":

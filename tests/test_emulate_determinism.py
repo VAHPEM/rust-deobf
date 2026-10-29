@@ -24,13 +24,13 @@ def _results(img, funcs, perturb, monkeypatch):
     if perturb:
         orig_ab, orig_un = R.Emulator._abandon, R.Emulator._unwind
 
-        def ab(self, *a):
-            r = orig_ab(self, *a)
+        def ab(self, *a, **k):
+            r = orig_ab(self, *a, **k)
             hold.append({"ret": 0, "start": 0, "sp": 0, "regs": []})   # takes the freed slot
             return r
 
-        def un(self, *a):
-            r = orig_un(self, *a)
+        def un(self, *a, **k):
+            r = orig_un(self, *a, **k)
             hold.append({"ret": 0, "start": 0, "sp": 0, "regs": []})
             return r
         monkeypatch.setattr(R.Emulator, "_abandon", ab)
