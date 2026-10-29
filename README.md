@@ -456,14 +456,14 @@ decrypts when run with that variable set, and the key is not in the binary. `rec
 detects the crate and says so.</sub>
 
 <sub>² The 2026 crates (obfuse 1.0.1, obfany 0.1.5): 5/5 exact (no extra string) measured on ELF
-x86-64 release/size-lto/speed-lto, ELF AArch64 (musl) release/size-lto and i686 musl (static,
-stripped) release -- stripped and not, except i686 (stripped); PE is built and tested by CI's `pe` job but not measured yet,
+x86-64 and ELF AArch64 (musl) release (stripped and not), size-lto and speed-lto (stripped), and on
+a stripped static i686 musl release build; PE is built and tested by CI's `pe` job but not measured yet,
 and FLOSS / dynamic recovery (`n/m`) not run on them. obfuse's default features name
 `aes-256-gcm`, but with `polymorphic` on (the default) the macro never calls the AEAD -- the default
 binary holds no AES instruction; `obfuse_aes` is the crate's real AES-256-GCM path (AES-NI on
 x86-64; on AArch64 the `aes` crate's software AES, ~26k emulated instructions per string). obfuse
-draws fresh random keys on every build: four rebuilds of obfuse and obfuse_aes recovered 5/5 each (the stray cipher-state strings
-two of them also showed are filtered since).</sub>
+draws fresh random keys on every build: four rebuilds of obfuse and obfuse_aes recovered 5/5
+each (the stray cipher-state strings two of them also showed are filtered since).</sub>
 
 </details>
 
