@@ -51,8 +51,10 @@ can also hold nested machines (field inside self) or a coroutine inlined into a 
     python3 scripts/recover_async.py path/to/binary --json
     python3 scripts/recover_async.py --selftest
 
-x86-64 (ELF SysV: self in rdi/rsi; PE Win64: rcx/rdx) and AArch64 (x0/x1), ELF + PE (RVAs).
-32-bit x86 is reported as unsupported. Static only: nothing is executed.
+x86-64 (ELF SysV: self in rdi/rsi; PE Win64: rcx/rdx), AArch64 (x0/x1) and i386 (cdecl: self on
+the stack, tracked through push/pop/`and esp`; LLVM fastcc: ecx/edx; PIC tables `[pic + idx*4 - d]`
+with the PC base from `call $+5; pop`, and mingw's absolute tables in .text), ELF + PE (RVAs; a
+stripped PE32 gets its function starts by recursive descent + code pointers). Static only.
 """
 from __future__ import annotations
 
@@ -218,8 +220,47 @@ class _Bin:
         except Exception:
             st = set()
         self.starts = sorted(a for a in st if self.lo <= a < self.hi)
+        from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_MODE_64, CS_MODE_32, CS_MODE_LITTLE_ENDIAN
+        if len(self.starts) < 8 or (self.pe and self.x32):
+            # no metadata function starts (a stripped PE32 has neither .pdata nor symbols):
+            # recursive descent from the entry point, as recover_cfg does
+            try:
+                import recover_cfg
+                ep = img.binary.entrypoint - (img.imagebase if img.pe else 0)
+                more = set(recover_cfg._seed_starts(img, self.starts, ep))
+            except Exception:
+                more = set(self.starts)
+            # ... plus every direct call target and every code address held in data or relocated
+            # immediates (vtable slots, fn pointers): poll functions are reached through those
+            for v in img.patches.values():
+                v &= _mask(8 * self.ptr)
+                if not (self.lo < v < self.hi):
+                    continue
+                if self.arm:
+                    more.add(v)
+                    continue
+                # an absolute jump table's relocated case labels are code addresses too: keep a
+                # pointer only where a function can start (16-aligned after padding / a return)
+                if v % 16 == 0 and self.code[v - self.lo - 1] in (0xCC, 0x90, 0xC3, 0x0B, 0x00):
+                    more.add(v)
+            if not self.arm:
+                from capstone import Cs as _Cs
+                lite = _Cs(CS_ARCH_X86, CS_MODE_32 if self.x32 else CS_MODE_64)
+                for addr, size, mn, ops in lite.disasm_lite(self.code, self.lo):
+                    if mn == "call" and ops.startswith("0x") and int(ops, 16) != addr + size:
+                        more.add(int(ops, 16))          # (not `call $+5`, the i386 PC fetch)
+            self.starts = sorted(a for a in more if self.lo <= a < self.hi)
+        self.got = None
+        if self.x32 and not self.pe:     # i386 PIC addresses data as [ebx + d], ebx = the GOT
+            for nm in (".got.plt", ".got"):
+                sec = next((t for t in self.secs if t[3] == nm), None)
+                if sec:
+                    self.got = sec[0]
+                    break
         if self.arm:
             self.args, self.abi = ("x0", "x1", "x2", "x3"), "aapcs64"
+        elif self.x32:
+            self.args, self.abi = (), "cdecl"     # arguments on the stack: [esp+4], [esp+8], ...
         elif self.pe:
             self.args, self.abi = ("rcx", "rdx", "r8", "r9"), "win64"
         else:
@@ -310,8 +351,8 @@ _LEA_RIP = re.compile(rb"[\x48\x4c]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]", re.S
 
 
 def _code_refs(b: _Bin, targets: set):
-    """Code addresses that materialize one of `targets`: x86-64 `lea r, [rip+d]` / AArch64 `adr`
-    and `adrp`+`add`. Byte/word scans (fast); every hit is re-decoded before use by the callers."""
+    """[(code VA, target)] where code materializes one of `targets`: x86-64 `lea r, [rip+d]`,
+    AArch64 `adr` / `adrp`+`add`, i386 absolute or GOT-relative immediates. Byte/word scans."""
     out = []
     code, lo = b.code, b.lo
     if not targets:
@@ -324,7 +365,7 @@ def _code_refs(b: _Bin, targets: set):
             if (w & 0x9f000000) == 0x10000000:                       # adr
                 imm = (((w >> 5) & 0x7ffff) << 2) | ((w >> 29) & 3)
                 if (pc + _sx(imm, 21)) in targets:
-                    out.append(pc)
+                    out.append((pc, pc + _sx(imm, 21)))
             elif (w & 0x9f000000) == 0x90000000:                     # adrp ; add rd, rd, #lo12
                 imm = (((w >> 5) & 0x7ffff) << 2) | ((w >> 29) & 3)
                 page = (pc & ~0xfff) + (_sx(imm, 21) << 12)
@@ -333,7 +374,7 @@ def _code_refs(b: _Bin, targets: set):
                     w2 = words[j]
                     if (w2 & 0xffc00000) == 0x91000000 and ((w2 >> 5) & 31) == rd:
                         if page + ((w2 >> 10) & 0xfff) in targets:
-                            out.append(lo + 4 * j)
+                            out.append((lo + 4 * j, page + ((w2 >> 10) & 0xfff)))
                         break
     elif not b.x32:
         for m in _LEA_RIP.finditer(code):
@@ -342,7 +383,24 @@ def _code_refs(b: _Bin, targets: set):
                 continue
             d = struct.unpack_from("<i", code, o + 3)[0]
             if lo + o + 7 + d in targets:
-                out.append(lo + o)
+                out.append((lo + o, lo + o + 7 + d))
+    else:
+        # i386: an absolute address (non-PIC / PE, relocated) or a GOT-relative displacement
+        # (PIC `lea r, [ebx + d]`) appears as a 4-byte immediate somewhere in the instruction
+        for t in targets:
+            pats = []
+            if b.pe:
+                pats.append(t + b.img.imagebase)
+            else:
+                pats.append(t)
+                if b.got is not None:
+                    pats.append(t - b.got)
+            for pv in pats:
+                pat = (pv & _mask(32)).to_bytes(4, "little")
+                o = code.find(pat)
+                while o != -1:
+                    out.append((lo + o, t))
+                    o = code.find(pat, o + 1)
     return out
 
 
@@ -369,7 +427,10 @@ def _call_sites(b: _Bin, fns: set):
             if t in fns:
                 out.append(lo + o)
         elif op == 0xff and code[o + 1] in (0x15, 0x25) and o + 6 <= len(code):
-            slot = lo + o + 6 + struct.unpack_from("<i", code, o + 2)[0]
+            if b.x32:        # `call [abs32]`: an absolute slot address (PE: an IAT entry)
+                slot = struct.unpack_from("<I", code, o + 2)[0] - (b.img.imagebase if b.pe else 0)
+            else:
+                slot = lo + o + 6 + struct.unpack_from("<i", code, o + 2)[0]
             if slot not in slots:
                 slots[slot] = b.read_ptr(slot)
             if slots[slot] in fns:
@@ -411,11 +472,7 @@ def find_anchors(b: _Bin) -> dict:
     kind_of = dict(by_va)
     kind_of.update(slot_kind)
     res["refs"] = kind_of
-    for site in _code_refs(b, set(kind_of)):
-        ins = b.insn(site)
-        if ins is None:
-            continue
-        tgt = _const_of(b, ins)
+    for site, tgt in _code_refs(b, set(kind_of)):
         kind = kind_of.get(tgt)
         if kind is None:
             continue
@@ -443,8 +500,30 @@ def _const_of(b: _Bin, ins):
                         page = _const_of(b, p)
                         return None if page is None else page + int(m.group(3), 0)
         return None
+    from capstone.x86 import X86_OP_MEM, X86_OP_IMM, X86_REG_RIP
+    if b.x32:
+        # PIC `lea r, [ebx + d]` (ebx = GOT), or an absolute data address (non-PIC / PE) in a
+        # `lea r, [abs]`, `mov r, imm32` or `push imm32`
+        c = None
+        ops = ins.operands
+        if ins.mnemonic == "lea" and len(ops) == 2 and ops[1].type == X86_OP_MEM and not ops[1].mem.index:
+            mem = ops[1].mem
+            if mem.base and _xc(ins.reg_name(mem.base)) in ("rbx", "rsi", "rdi") and b.got is not None \
+                    and abs(mem.disp) >= 0x100:
+                # the PIC base is conventionally ebx, but LLVM keeps it in any callee-saved
+                # register; a small displacement is a field access, not a GOT-relative address
+                c = (b.got + mem.disp) & _mask(32)
+            elif not mem.base:
+                c = mem.disp & _mask(32)
+                if b.pe:
+                    c -= b.img.imagebase
+        elif ins.mnemonic in ("mov", "push") and ops and ops[-1].type == X86_OP_IMM \
+                and (ins.mnemonic == "push" or ops[0].size == 4):
+            c = ops[-1].imm & _mask(32)
+            if b.pe:
+                c -= b.img.imagebase
+        return c if c is not None and b.is_data(c) else None
     if ins.mnemonic == "lea":
-        from capstone.x86 import X86_OP_MEM, X86_REG_RIP
         op = ins.operands[1]
         if op.type == X86_OP_MEM and op.mem.base == X86_REG_RIP and not op.mem.index:
             return ins.address + ins.size + op.mem.disp
@@ -488,27 +567,42 @@ def _x86_op_val(b, ins, op, regs, smem, v, run):
                _xc(ins.reg_name(mem.index)) if mem.index else None, mem.scale, mem.disp)
         if smem is not None and key == smem[0] and not mem.segment:
             return v & _mask(min(bits, smem[1]))
+        disp = mem.disp
         if mem.base == X86_REG_RIP:
             base = ins.address + ins.size
         elif mem.base:
             base = regs.get(_xc(ins.reg_name(mem.base)))
+            if base is None and b.x32 and b.got is not None and mem.index and mem.scale == 4:
+                # i386 PIC jump table `[reg + idx*4 - d]`: the base register holds the GOT (set
+                # by a `call; pop; add` far from here); a wrong guess fails the panic-arm check
+                base = regs[_xc(ins.reg_name(mem.base))] = b.got
         else:
             base = 0
+            if b.x32 and b.pe:               # `[table + idx*4]`: an absolute (relocated) VA
+                disp = (disp & _mask(32)) - b.img.imagebase
         idx = 0
         if mem.index:
             idx = regs.get(_xc(ins.reg_name(mem.index)))
         if base is None or idx is None or mem.segment:
             raise _Stop()
-        addr = (base + idx * mem.scale + mem.disp) & _mask(64)
-        if not b.is_data(addr):
+        addr = (base + idx * mem.scale + disp) & _mask(32 if b.x32 else 64)
+        # (mingw's i686 tables sit in .text itself, so any mapped section may hold a table)
+        if not (b.is_data(addr) or (b.x32 and b.lo <= addr < b.hi)):
             raise _Stop()
-        raw = b.read(addr, op.size)
-        if raw is None:
-            raise _Stop()
+        if b.x32 and op.size == 4 and addr in b.img.patches:
+            val = b.img.patches[addr] & _mask(32)   # an absolute table entry, relocated (RVA)
+        else:
+            raw = b.read(addr, op.size)
+            if raw is None:
+                raise _Stop()
+            val = int.from_bytes(raw, "little")
+            if b.x32 and b.pe and op.size == 4 and mem.scale == 4 and val >= b.img.imagebase \
+                    and b.lo <= val - b.img.imagebase < b.hi:
+                val -= b.img.imagebase           # unrelocated absolute code address
         if run.table is None:
             run.table = addr
         run.reads.append(addr)
-        return int.from_bytes(raw, "little")
+        return val
     return None
 
 
@@ -533,6 +627,7 @@ def _run_x86(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
     pc = load_va
     steps = 0
     first = True
+    pushed = None
     tainted = False         # an unrelated load ran: a plain jump now is body control flow
     while steps < _RUN_STEPS:
         steps += 1
@@ -563,13 +658,23 @@ def _run_x86(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
             if m in ("nop", "endbr64", "endbr32") or m.startswith("nop"):
                 pc = nxt
                 continue
+            if b.x32 and m == "call" and ops and ops[0].type == X86_OP_IMM and ops[0].imm == nxt:
+                pushed = nxt                    # `call $+5 ; pop reg`: the i386 PC fetch, which
+                pc = nxt                        # LLVM schedules into the dispatch sequence
+                continue
+            if b.x32 and m == "pop" and pushed is not None and ops and ops[0].type == X86_OP_REG:
+                regs[_xc(ins.reg_name(ops[0].reg))] = pushed
+                pushed = None
+                pc = nxt
+                continue
             if m in ("mov", "movzx", "movsx", "movsxd", "movabs"):
                 if ops[0].type != X86_OP_REG:
                     # a spill to the stack may be scheduled into the dispatch; any other store
                     # means the body has started
                     if ops[0].type == X86_OP_MEM and ops[0].mem.base and \
-                            _xc(ins.reg_name(ops[0].mem.base)) in ("rsp", "rbp") and smem is not None \
-                            and smem[0] is not None and smem[0][0] not in ("rsp", "rbp"):
+                            _xc(ins.reg_name(ops[0].mem.base)) in ("rsp", "rbp") \
+                            and not (smem is not None and smem[0] is not None
+                                     and smem[0][0] in ("rsp", "rbp")):
                         tainted = True
                         pc = nxt
                         continue
@@ -624,6 +729,11 @@ def _run_x86(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
                 bits = ops[0].size * 8
                 a = _x86_op_val(b, ins, ops[0], regs, smem, v, run)
                 c = _x86_op_val(b, ins, ops[1], regs, smem, v, run) if len(ops) > 1 else None
+                if m == "add" and c is None and a is not None and run.reads and "__pic" in regs \
+                        and len(ops) == 2 and ops[1].type == X86_OP_REG:
+                    # i386 `add entry, pic`: a relative table entry plus the function's PC base
+                    # (`call $+5; pop reg` earlier, out of this run's sight)
+                    c = regs[_xc(ins.reg_name(ops[1].reg))] = regs["__pic"]
                 if m == "xor" and len(ops) == 2 and ops[1].type == X86_OP_REG and ops[1].reg == ops[0].reg:
                     a = c = 0
                 r = None
@@ -677,7 +787,12 @@ def _run_x86(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
                         raise _Stop()
                     pc = seg = op.imm
                     continue
-                t = _x86_op_val(b, ins, op, regs, smem, v, run) if op.type == X86_OP_REG else None
+                if op.type == X86_OP_REG:
+                    t = _x86_op_val(b, ins, op, regs, smem, v, run)
+                elif op.type == X86_OP_MEM and b.x32:
+                    t = _x86_op_val(b, ins, op, regs, smem, v, run)   # i386 `jmp [table + idx*4]`
+                else:
+                    t = None
                 if t is None:
                     raise _Stop()
                 run.jt = True
@@ -1310,16 +1425,23 @@ def _pc_thunk_reg(bn, target):
     return None
 
 
-def _slot_clear(f, off, size):
-    """A write to the stack slot [sp+off, +size): forget every spilled value it overlaps."""
-    for k in [k for k in f if isinstance(k, tuple) and k[0] == "m" and off - 8 < k[1] < off + size]:
+def _slot_clear(f, slot, size):
+    """A write to the stack slot (root, off) of `size` bytes: forget every spill it overlaps."""
+    root, off = slot
+    for k in [k for k in f if isinstance(k, tuple) and k[0] == "m" and k[1] == root
+              and off - 8 < k[2] < off + size]:
         del f[k]
 
 
+def _mk(slot, k=0):
+    return ("m", slot[0], slot[1] + k)
+
+
 def _stack_slot(bf, disp):
-    """Entry-relative stack offset of [base+disp] when the base is a plain stack pointer."""
-    if bf and bf[0] == "p" and bf[1] == "sp":
-        return bf[2] + disp
+    """(stack root, offset) of [base+disp] when the base is a plain stack pointer: "sp" is the
+    entry stack pointer, "spa" the realigned one after an i386 `and esp, -N`."""
+    if bf and bf[0] == "p" and bf[1] in ("sp", "spa"):
+        return (bf[1], bf[2] + disp)
     return None
 
 
@@ -1438,10 +1560,10 @@ def _transfer_a64(bn, ins, f, on_access, m):
         if is_st and slot is not None:
             # a spill: remember what an 8-byte register store put in the frame
             for k, r in enumerate(regs_):
-                _slot_clear(f, slot + k * wid, wid)
+                _slot_clear(f, (slot[0], slot[1] + k * wid), wid)
                 sf = ("c", 0) if _ac(r) == "xzr" else f.get(_ac(r))
                 if wid == 8 and sf is not None and m in ("str", "stur", "stp"):
-                    f[("m", slot + k * wid)] = sf
+                    f[_mk(slot, k * wid)] = sf
         if is_ld:
             for r in regs_:
                 f.pop(_ac(r), None)
@@ -1449,7 +1571,7 @@ def _transfer_a64(bn, ins, f, on_access, m):
                 for k, r in enumerate(regs_):
                     if _ac(r) == base:
                         continue
-                    sv = f.get(("m", slot + 8 * k)) if slot is not None else None
+                    sv = f.get(_mk(slot, 8 * k)) if slot is not None else None
                     d = sv if sv is not None else _deref(bf, disp + 8 * k)
                     if d is not None:
                         f[_ac(r)] = d
@@ -1510,13 +1632,13 @@ def _transfer_x86(bn, ins, f, on_access, m):
         if x32:
             thunk = _pc_thunk_reg(bn, tgt)
             spf = f.get("rsp")
-            for r in _X86_CALLER_SAVED["cdecl"]:
-                f.pop(r, None)
-            if tgt == nxt:                       # `call $+5 ; pop reg`: the PIC base
+            if tgt == nxt:                       # `call $+5 ; pop reg`: the PIC base, not a call
                 f["__pushed"] = ("c", nxt)
                 if spf:
                     f["rsp"] = _shift(spf, -4, 32) or spf
                 return
+            for r in _X86_CALLER_SAVED["cdecl"]:
+                f.pop(r, None)
             if thunk:
                 f[thunk] = ("c", nxt)
             pop = _callee_pop(bn, tgt_pop) if tgt_pop is not None else None
@@ -1576,8 +1698,11 @@ def _transfer_x86(bn, ins, f, on_access, m):
                     elif src.type == X86_OP_IMM:
                         sv = ("c", src.imm & _mask(8 * ptrw))
                     if sv is not None:
-                        f[("m", slot)] = sv
+                        f[_mk(slot)] = sv
     if x32:
+        if m == "and" and ops and ops[0].type == X86_OP_REG and _xc(ins.reg_name(ops[0].reg)) == "rsp":
+            f["rsp"] = ("p", "spa", 0)   # realigned: a fresh stack root (args stay at [ebp+..])
+            return
         if m == "push":
             if spf:
                 f["rsp"] = _shift(spf, -4, 32)
@@ -1633,7 +1758,7 @@ def _transfer_x86(bn, ins, f, on_access, m):
             bc = _xc(ins.reg_name(src.mem.base))
             bf = spf if bc == "rsp" else f.get(bc)
             slot = _stack_slot(bf, src.mem.disp)
-            d = f.get(("m", slot)) if slot is not None else None
+            d = f.get(_mk(slot)) if slot is not None else None
             if d is None:
                 d = _deref(bf, src.mem.disp, x32)
             if d is None:
@@ -1830,6 +1955,14 @@ def _dataflow(bn: _Bin, insns, lo, hi, extra_edges, entry_facts, on_access, cut=
 # ----------------------------------------------------------------------------------------------
 # per-function analysis
 # ----------------------------------------------------------------------------------------------
+def _is_trap(b, va):
+    ins = b.insn(va) if va is not None else None
+    return ins is not None and ins.mnemonic in ("ud2", "int3", "hlt", "brk", "udf")
+
+
+_SELF_ROOTS = ("arg0", "arg1", "ecx", "edx")    # where `self` can arrive (edx/ecx: i386 fastcc)
+
+
 def _try_dispatch(b, anchors, load_va, lo, hi, cls_cache, seed=None):
     def cls(t):
         if t not in cls_cache:
@@ -1866,7 +1999,7 @@ def _enumerate_states(b, anchors, load_va, width, runs, lo, hi, boundaries, cls_
             break                     # ran past this table into the next datum
         if t not in cls_cache:
             cls_cache[t] = _classify(b, anchors, t, lo, hi)
-        if cls_cache[t][0] is not None:
+        if cls_cache[t][0] is not None or _is_trap(b, t):
             break
         targets[v] = t
         seen.add(t)
@@ -1886,25 +2019,58 @@ def analyze_function(b: _Bin, anchors, lo, hi):
         c = _const_of(b, i)
         if c is not None and b.is_data(c):
             boundaries.add(c)
+        elif b.x32:
+            # i386 tables are read as [pic + idx*4 + d] (ELF PIC: pic = GOT) or [idx*4 + abs]
+            # (PE: an absolute, relocated address -- mingw puts them in .text): each names a table
+            for op in i.operands:
+                if op.type != 3 or not op.mem.index or op.mem.scale != 4:
+                    continue
+                t = None
+                if not op.mem.base:
+                    t = (op.mem.disp & _mask(32)) - (b.img.imagebase if b.pe else 0)
+                elif b.got is not None and _xc(i.reg_name(op.mem.base)) not in ("rsp", "rbp"):
+                    t = (b.got + op.mem.disp) & _mask(32)
+                if t is not None and (b.is_data(t) or b.lo <= t < b.hi):
+                    boundaries.add(t)
     sites = []
     entry = {r: ("p", f"arg{k}", 0) for k, r in enumerate(b.args)}
     if b.x32:
-        entry = {"rsp": ("p", "sp", 0)}          # cdecl: the arguments are on the stack
+        # cdecl puts the arguments on the stack; LLVM's fastcc (internal functions) passes the
+        # first two in ecx / edx -- both are tracked, as distinct roots
+        entry = {"rsp": ("p", "sp", 0), "rcx": ("p", "ecx", 0), "rdx": ("p", "edx", 0)}
     loads = [(i, w) for i in insns for w in [_is_state_load(b, i)] if w]
     if not loads:
         return []
     edges = {}           # indirect jump VA -> targets the dispatch runs resolved (CFG edges)
     done = set()
+    pic = set()
+    if b.x32:            # the function's PC base(s): the address after each `call $+5`
+        for i in insns:
+            if i.mnemonic == "call" and i.operands and i.operands[0].type == 2 \
+                    and i.operands[0].imm == i.address + i.size:
+                pic.add(i.address + i.size)
     # rounds: a dispatch reached only through another machine's jump table gets its constants
     # (a table base hoisted out of the executor loop) once that table's edges are in the CFG
     for _round in range(3):
         pre = _dataflow(b, insns, lo, hi, edges, entry, None)
+        # a register that holds one and the same constant wherever it is known (the PIC base,
+        # a table base set once before the executor loop) seeds loads in blocks the CFG does not
+        # reach yet (behind an unresolved jump table)
+        seen_c = {}
+        for fa in pre.values():
+            for r, fv in fa.items():
+                if isinstance(r, str):
+                    seen_c.setdefault(r, set()).add(fv[1] if fv[0] == "c" else None)
+        glob = {r: next(iter(v)) for r, v in seen_c.items() if len(v) == 1 and None not in v}
         new = 0
         for i, w in loads:
             if i.address in done:
                 continue
             f0 = pre.get(i.address) or {}
-            seed = {r: fv[1] for r, fv in f0.items() if isinstance(r, str) and fv[0] == "c"}
+            seed = dict(glob)
+            seed.update({r: fv[1] for r, fv in f0.items() if isinstance(r, str) and fv[0] == "c"})
+            if len(pic) == 1:
+                seed["__pic"] = next(iter(pic))
             runs = _try_dispatch(b, anchors, i.address, lo, hi, cls_cache, seed)
             if runs is None:
                 continue
@@ -1922,6 +2088,34 @@ def analyze_function(b: _Bin, anchors, lo, hi):
                     edges.setdefault(jv, set()).update(targets.values())
         if not new or not edges:
             break
+    if sites:
+        # a coroutine whose state LLVM promoted to a register (inlined into the executor's loop)
+        # can lose its Returned/Panicked arms altogether: the register provably never holds 1 or
+        # 2, so both land on one `ud2`. Accepted only next to validated machines, for register
+        # dispatches whose other states are real code
+        pre = _dataflow(b, insns, lo, hi, edges, entry, None)
+        for i, w in loads:
+            if i.address in done or _load_base(b, i)[0] is not None:
+                continue
+            f0 = pre.get(i.address) or {}
+            seed = {r: fv[1] for r, fv in f0.items() if isinstance(r, str) and fv[0] == "c"}
+            r1 = _dispatch_run(b, i.address, 1, lo, hi, seed)
+            r2 = _dispatch_run(b, i.address, 2, lo, hi, seed)
+            r0 = _dispatch_run(b, i.address, 0, lo, hi, seed)
+            if r1.target is None or r1.target != r2.target or not _is_trap(b, r1.target) \
+                    or r0.target is None or _is_trap(b, r0.target) or not (r0.jt or r0.branches):
+                continue
+            targets, kind, table = _enumerate_states(b, anchors, i.address, w, (r0, r1, r2), lo, hi,
+                                                     boundaries, cls_cache, insn_set, seed)
+            if len(targets) <= 3:
+                continue
+            done.add(i.address)
+            sites.append({"va": i.address, "width": w, "kind": kind, "table": table,
+                          "targets": targets, "location": None, "seed": seed, "unreachable_arms": True})
+            if kind == "jump_table":
+                jv = _indirect_jump_after(b, i.address, lo, hi)
+                if jv is not None:
+                    edges.setdefault(jv, set()).update(targets.values())
     if not sites:
         return []
     # dataflow: where is each state field, and who writes it
@@ -1937,7 +2131,7 @@ def analyze_function(b: _Bin, anchors, lo, hi):
         base, disp = _load_base(b, ins)
         bf = _sp_fact(b, f) if base in ("rsp", "sp") else f.get(base)
         if base is None:
-            s["field"] = ("reg", disp, s["va"])         # a register: one machine per dispatch site
+            s["field"] = ("reg", disp)     # a register: sites sharing targets merge below
         elif bf and bf[0] == "p":
             s["field"] = (bf[1], bf[2] + disp)
         else:
@@ -1947,7 +2141,7 @@ def analyze_function(b: _Bin, anchors, lo, hi):
     for fa in at.values():
         for k, v in fa.items():
             if isinstance(k, tuple) and k[0] == "m":
-                spills.setdefault(k[1], set()).add(v)
+                spills.setdefault((k[1], k[2]), set()).add(v)
     # memory slot -> constants stored there (pointer-sized), for per-call-site dyn resolution
     slot_consts = {}
     for _a, kind, ptrs, w, vals, may in accesses:
@@ -1999,6 +2193,8 @@ def analyze_function(b: _Bin, anchors, lo, hi):
         notes = []
         if split:
             notes.append("state field shared with another inlined copy (disjoint resume targets)")
+        if any(x.get("unreachable_arms") for x in ss):
+            notes.append("Returned/Panicked arms optimized away (both states reach a trap)")
         if field[0] == "reg":
             computed = True             # a promoted state: its write-backs are register moves
             notes.append(f"state kept in register {field[1]} (coroutine inlined into a loop)")
@@ -2046,12 +2242,12 @@ def analyze_function(b: _Bin, anchors, lo, hi):
         })
     # primary = the machine reached first from the entry whose field hangs off an argument
     machines.sort(key=lambda mm: (mm["first_seen"], mm["sites"][0]["va"]))
-    prim = next((mm for mm in machines if mm["root"] in ("arg0", "arg1")
+    prim = next((mm for mm in machines if mm["root"] in _SELF_ROOTS
                  and mm["first_seen"] < (1 << 30)), None)
     if prim is None:
         # the entry walk (fall-through first) can miss a dispatch behind a taken branch: fall back
         # to the argument-relative machine dispatched earliest in the code
-        argm = [mm for mm in machines if mm["root"] in ("arg0", "arg1")]
+        argm = [mm for mm in machines if mm["root"] in _SELF_ROOTS]
         if argm:
             prim = min(argm, key=lambda mm: mm["sites"][0]["va"])
     max_off = {}
@@ -2059,7 +2255,7 @@ def analyze_function(b: _Bin, anchors, lo, hi):
         if may:
             continue
         root, off = ptrs[0]
-        if root in ("arg0", "arg1") and off >= 0:
+        if root in _SELF_ROOTS and off >= 0:
             max_off[root] = max(max_off.get(root, 0), off + w)
     fresh_at = []
 
@@ -2115,8 +2311,8 @@ def _dyn_candidates(b, via, at, at_fresh, spills, slot_consts):
         facts = [fact]
         for r, k in (_ptrs(fact) or ()):
             slot = _deref_slot(r)
-            if k == 0 and slot and slot[0] == "sp":
-                facts += list(spills.get(slot[1], ()))
+            if k == 0 and slot and slot[0] in ("sp", "spa"):
+                facts += list(spills.get(slot, ()))
                 out |= slot_consts.get(slot, set())
         for fc in facts:
             if _consts(fc):
@@ -2257,14 +2453,9 @@ def _vtables_for_polls(b: _Bin, polls: set) -> dict:
 
 def recover(path) -> dict:
     b = _Bin(path)
-    res = {"path": str(path), "format": b.fmt, "arch": b.arch, "supported": not b.x32,
+    res = {"path": str(path), "format": b.fmt, "arch": b.arch, "supported": True,
            "anchors": {}, "runtime": None, "machines": [], "poll_functions": [], "nesting": [],
            "counts": {}}
-    if b.x32:
-        res["note"] = "32-bit x86 is not supported by this tier"
-        res["counts"] = {"candidates": 0, "skipped_oversized": 0, "machines": 0, "poll_functions": 0,
-                         "host_functions": 0, "suspend_points": 0}
-        return res
     anchors = find_anchors(b)
     res["anchors"] = {"strings": {k: v for k, v in anchors["strings"].items()},
                       "functions": {k: sorted(v) for k, v in anchors["funcs"].items()},
@@ -2370,10 +2561,11 @@ def recover(path) -> dict:
                                              else inner.get("name"))})
             states[str(v)] = st
         root = mm["root"]
-        base = {"arg0": "self" if mm["role"] == "poll" else "arg0", "sp": "stack",
+        base = {"arg0": "self" if mm["role"] == "poll" else "arg0", "sp": "stack", "spa": "stack",
                 "reg": "register"}.get(root, f"[{root}]" if root.startswith("*") else
-                                       (root if root.startswith("arg") else "unknown"))
-        if mm["role"] == "poll" and root == "arg1":
+                                       (root if root.startswith("arg") or root in ("ecx", "edx")
+                                        else "unknown"))
+        if mm["role"] == "poll" and root in _SELF_ROOTS:
             base = "self"
         vt = vt_by_poll.get(mm["function"]) if mm["role"] == "poll" else None
         if vt:
@@ -2381,7 +2573,8 @@ def recover(path) -> dict:
         loc = _location(b, mm["location_va"]) if mm["location_va"] else None
         out.append({
             "id": mid, "function": mm["function"], "role": mm["role"],
-            "self_register": b.args[int(root[3:])] if mm["role"] == "poll" else None,
+            "self_register": (None if mm["role"] != "poll" else root if root in ("ecx", "edx") else
+                              f"[esp+{4 * (int(root[3:]) + 1):#x}]" if b.x32 else b.args[int(root[3:])]),
             "state_field": {"base": base, "root": root, "offset": mm["offset"], "width": mm["width"],
                             "register": mm["register"]},
             "dispatch": [{"va": s["va"], "kind": s["kind"], "table": s["table"],

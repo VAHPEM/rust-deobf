@@ -99,12 +99,16 @@ AWAITS = {_line("async fn leaf"): 1, _line("async fn middle"): 2, _line("async f
           _line("let d = async {"): 1}
 
 
-def _aarch64_target():
+def _target(name):
     try:
         out = subprocess.check_output(["rustup", "target", "list", "--installed"], text=True)
-        return "aarch64-unknown-linux-musl" in out
+        return name in out.split()
     except Exception:
         return False
+
+
+def _aarch64_target():
+    return _target("aarch64-unknown-linux-musl")
 
 
 def _build(tmp_path, target=None, program=None):
@@ -264,6 +268,31 @@ def test_dyn_await_resolved_per_call_site(tmp_path, target):
     assert all(i["kind"] == "dyn" and i["dyn_future_poll"] for i in got), got
     assert [i.get("machine") for i in got] == [first_m["id"], second_m["id"], first_m["id"]], got
     assert first_m["size"]["vtable"] and second_m["size"]["vtable"]
+
+
+@pytest.mark.skipif(not (shutil.which("rustc") and _target("i686-unknown-linux-musl")),
+                    reason="i686-unknown-linux-musl target not installed")
+def test_hand_executor_i386(tmp_path):
+    """i386: cdecl stack arguments (self at [esp+8] behind the sret pointer), GOT-relative PIC
+    jump tables (`[pic + idx*4 - d]`, the PC base fetched by `call $+5; pop`), fastcc self in
+    ecx. LLVM inlines more here: middle into boxed, and `top`'s register-promoted dispatch loses
+    its Returned/Panicked arms (both reach one `ud2`)."""
+    res = RA.recover(_build(tmp_path, "i686-unknown-linux-musl"))
+    assert res["supported"] and res["arch"] == "x86"
+    ms = res["machines"]
+    armless = [m for m in ms if not m["source"]]
+    assert len(armless) == 1 and armless[0]["suspend_points"] == AWAITS[_line("async fn top")]
+    assert armless[0]["states"]["1"]["target"] == armless[0]["states"]["2"]["target"]
+    sourced = [m for m in ms if m["source"]]
+    assert {m["source"]["line"] for m in sourced} == set(AWAITS) - {_line("async fn top")}
+    for m in sourced:
+        assert m["suspend_points"] == AWAITS[m["source"]["line"]], (m["source"], m["suspend_points"])
+        assert m["validated"], m["notes"]
+    boxed = next(m for m in ms if m["role"] == "poll")
+    assert boxed["source"]["line"] == _line("Box::pin(async move") and boxed["self_register"] == "[esp+0x8]"
+    # top awaits the boxed future through the dyn Future vtable (slot 3 = 0xc on i386)
+    dyn = [st["inner"] for st in armless[0]["states"].values() if st.get("inner", {}).get("kind") == "dyn"]
+    assert dyn and dyn[0]["slot_offset"] == 12 and dyn[0].get("machine") == boxed["id"], dyn
 
 
 def test_no_async_no_machines(tmp_path):
