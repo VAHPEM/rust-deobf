@@ -7,7 +7,14 @@
 # static call-site records name the decoder ("decoder") and the call site ("call"): those are
 # grouped under the decoder function and each call site gets a pre-comment with its plaintext. Decoded
 # strings are the triage headline; surfacing them in the decompiler is where an analyst reads
-# them. Observational: it changes only comments, bookmarks and default names.
+# them. With recover_idioms.py output merged in as "idioms" (ghidra_run.sh does this), it also
+# marks Rust idioms: a pre comment with the recovered format string at every println!/format!/
+# panic! site, "safety check (cold path)" pre comments at bounds/overflow/unwrap panic calls plus a
+# bookmark (category "rust-deobf: safety-check") and an EOL note on the guarding branch, drop /
+# dealloc EOL notes, default-name renames of identified panic / fmt / drop helpers (rd_panic_*,
+# rd_fmt_*, rd_rust_dealloc, rd_drop_glue*), and a "returns Option/Result?" plate line on
+# functions with enum-like returns. Observational: it changes only comments, bookmarks and
+# default names (no code is modified or removed).
 #
 # Run headless. This is a PyGhidra (Python 3) script: since Ghidra 11.3 dropped Jython,
 # plain `analyzeHeadless ... -postScript *.py` fails with "Ghidra was not started with
@@ -336,10 +343,165 @@ def _apply_vtables(data):
     print("ghidra_annotate: vtables annotated %d, vtable methods named %d" % (applied, named))
 
 
+# ------------------------------------------------------------------------------------------------
+# Rust idioms (recover_idioms.py): fmt macro sites, panic / safety-check paths, drop calls,
+# identified helpers and enum-like returns. `_idiom_plan` is pure (no Ghidra) and unit-tested;
+# `_apply_idioms` only executes its actions. Observational: comments, bookmarks, default names.
+# ------------------------------------------------------------------------------------------------
+IDIOM_BM_SAFETY = "rust-deobf: safety-check"
+IDIOM_BM_FMT = "rust-deobf: fmt"
+IDIOM_BM_RET = "rust-deobf: enum-return"
+_HELPER_NAME = {"panic": "rd_panic_%s", "fmt_sink": "rd_fmt_%s", "dealloc": "rd_rust_dealloc",
+                "drop_glue": "rd_drop_glue"}
+
+
+def _idiom_plan(idioms):
+    """Pure: the annotations for a recover_idioms result, as a list of actions
+      ("pre", addr, text)            pre comment at an instruction (fmt / panic / drop call site)
+      ("eol", addr, text)            end-of-line comment (the guard branch of a safety check)
+      ("plate_add", addr, text)      a line appended to the function's plate comment
+      ("bookmark", addr, category, text)
+      ("rename", addr, name)         only applied when the function still has a default name
+    Addresses are the binary's own (PE: RVAs), resolved later like every other record."""
+    acts = []
+    if not isinstance(idioms, dict):
+        return acts
+    for r in idioms.get("fmt_sites") or []:
+        site = _va(r.get("site"))
+        if site is None:
+            continue
+        text = '%s("%s")' % (r.get("macro") or "format_args!", r.get("format", ""))
+        if r.get("location"):
+            text += "  @ " + r["location"]
+        acts.append(("pre", site, "rust-deobf: " + text))
+        acts.append(("bookmark", site, IDIOM_BM_FMT, text[:200]))
+    for r in idioms.get("panic_sites") or []:
+        site = _va(r.get("site"))
+        if site is None:
+            continue
+        what = r.get("label") or r.get("kind") or "panic"
+        loc = ("  @ " + r["location"]) if r.get("location") else ""
+        msg = ('  "%s"' % r["message"][:120]) if r.get("message") else ""
+        if r.get("safety_check"):
+            acts.append(("pre", site, "rust-deobf: safety check (cold path): %s%s%s" % (what, loc, msg)))
+        else:
+            acts.append(("pre", site, "rust-deobf: panic path (cold): %s%s%s" % (what, loc, msg)))
+        guard = _va(r.get("guard"))
+        anchor = guard if guard is not None else site
+        if guard is not None:
+            acts.append(("eol", guard, "rust-deobf: cold branch -> %s (%s)" % (what, hex(site))))
+        acts.append(("bookmark", anchor, IDIOM_BM_SAFETY, "%s%s" % (what, loc)))
+    for r in idioms.get("drop_sites") or []:
+        site = _va(r.get("site"))
+        if site is None:
+            continue
+        acts.append(("eol", site, "rust-deobf: %s" % ("dealloc" if r.get("kind") == "dealloc" else "drop")))
+    # helper renames: one name per (role, kind); a kind that occurs more than once gets its
+    # address as a suffix so every name stays unique
+    names = []
+    for h in idioms.get("helpers") or []:
+        va = _va(h.get("va"))
+        tmpl = _HELPER_NAME.get(h.get("role"))
+        if va is None or tmpl is None:
+            continue
+        kind = _SANE.sub("_", str(h.get("kind") or "unknown")).strip("_") or "unknown"
+        names.append((va, tmpl % kind if "%s" in tmpl else tmpl, h))
+    counts = {}
+    for _va_, nm, _h in names:
+        counts[nm] = counts.get(nm, 0) + 1
+    for va, nm, h in names:
+        if counts[nm] > 1:
+            nm = "%s_%x" % (nm, va)
+        acts.append(("rename", va, nm))
+        acts.append(("plate_add", va, "rust-deobf: %s helper (%s, via %s)"
+                     % (h.get("role"), h.get("kind"), h.get("via"))))
+    for e in idioms.get("enum_returns") or []:
+        va = _va(e.get("va"))
+        if va is None:
+            continue
+        line = "rust-deobf: %s [%s, confidence %s]" % (
+            e.get("note") or "returns enum-like value (Option/Result?)", e.get("shape"), e.get("confidence"))
+        ev = e.get("evidence") or []
+        if ev:
+            line += "\n  " + "\n  ".join(str(x) for x in ev[:3])
+        acts.append(("plate_add", va, line))
+        acts.append(("bookmark", va, IDIOM_BM_RET, "%s (%s)" % (e.get("shape"), e.get("confidence"))))
+    return acts
+
+
+def _merge_plate(existing, line):
+    """Pure: append `line` to a plate comment unless it is already there."""
+    if not existing:
+        return line
+    if line in existing:
+        return existing
+    return existing + "\n" + line
+
+
+def _apply_idioms(idioms):
+    acts = _idiom_plan(idioms)
+    if not acts:
+        return
+    listing = currentProgram.getListing()
+    btm = currentProgram.getBookmarkManager()
+    done = {"pre": 0, "eol": 0, "plate_add": 0, "bookmark": 0, "rename": 0}
+    pre_text = {}
+    for act in acts:
+        kind = act[0]
+        try:
+            if kind in ("pre", "eol"):
+                a = _resolve_addr(act[1])
+                if a is None:
+                    continue
+                key = (str(a), kind)
+                ctype = CodeUnit.PRE_COMMENT if kind == "pre" else CodeUnit.EOL_COMMENT
+                if key not in pre_text:
+                    # keep what is already there (e.g. a "rust-deobf decodes:" call-site comment)
+                    try:
+                        pre_text[key] = listing.getComment(ctype, a)
+                    except Exception:
+                        pre_text[key] = None
+                # several facts at one address (a fmt site that is also a panic site): one comment
+                pre_text[key] = _merge_plate(pre_text.get(key), act[2])
+                listing.setComment(a, ctype, pre_text[key])
+            elif kind == "bookmark":
+                a = _resolve_addr(act[1])
+                if a is None:
+                    continue
+                btm.setBookmark(a, "Analysis", act[2], act[3])
+            elif kind in ("plate_add", "rename"):
+                r = _resolve(act[1])
+                if r is None:
+                    continue
+                entry, func = r
+                if kind == "plate_add":
+                    try:
+                        old = listing.getComment(CodeUnit.PLATE_COMMENT, entry)
+                    except Exception:
+                        old = None
+                    listing.setComment(entry, CodeUnit.PLATE_COMMENT, _merge_plate(old, act[2]))
+                else:
+                    if func is None:
+                        continue
+                    nm = func.getName()
+                    if not (nm.startswith("FUN_") or nm.startswith("SUB_")):
+                        continue
+                    func.setName(act[2], SourceType.ANALYSIS)
+            else:
+                continue
+            done[kind] += 1
+        except Exception as e:
+            print("idiom annotation failed (%s at %s): %s" % (kind, act[1], e))
+    print("ghidra_annotate: idioms -> %d pre, %d eol, %d plate lines, %d bookmarks, %d renames"
+          % (done["pre"], done["eol"], done["plate_add"], done["bookmark"], done["rename"]))
+
+
 def main():
     data = _load()
     if not data:
         return
+    if "fmt_sites" in data and "idioms" not in data:
+        data = {"idioms": data}            # recover_idioms.py --json output passed directly
     by_func, calls = _group(data.get("decoded", []))
 
     listing = currentProgram.getListing()
@@ -422,6 +584,8 @@ def main():
 
     # recovered trait-object vtables (recover_types, merged into the JSON by ghidra_run.sh)
     _apply_vtables(data)
+    # Rust idioms (recover_idioms, merged into the JSON by ghidra_run.sh as "idioms")
+    _apply_idioms(data.get("idioms"))
 
 
 main()

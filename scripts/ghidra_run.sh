@@ -3,8 +3,10 @@
 #
 # Surfaces rust-deobf's decoded strings inside the Ghidra decompiler: a plate comment and a
 # bookmark on every function that decoded something, and a rename of still-default FUN_/SUB_
-# functions after the strongest indicator they revealed. Observational only (comments,
-# bookmarks, default names). Never executes the target — recover.py uses static + emulation.
+# functions after the strongest indicator they revealed. Also merges recover_types (vtables) and
+# recover_idioms (format strings at println!/format!/panic! sites, safety-check panic paths,
+# drop calls, helper names, enum-like returns) into the annotation JSON. Observational only
+# (comments, bookmarks, default names). Never executes the target — recover.py uses static + emulation.
 #
 # Usage:
 #   scripts/ghidra_run.sh <binary> [recovered.json] [project_dir]
@@ -77,6 +79,21 @@ with open(j) as f: data = json.load(f)
 with open(t) as f: types = json.load(f)
 data["vtables"] = types.get("vtables", [])
 data["ghidra_types"] = types.get("ghidra_types", [])
+with open(j, "w") as f: json.dump(data, f)
+PY
+  fi
+  # Rust idioms (fmt macro strings, safety-check panic paths, drop calls, enum-like returns):
+  # merged as "idioms" so ghidra_annotate comments / bookmarks them (best-effort; never fatal)
+  IDIOMS="$(mktemp "${TMPDIR:-/tmp}/rd-idioms.XXXXXX")"
+  trap 'rm -f "$JSON" "$TYPES" "$IDIOMS"' EXIT
+  if python3 "$REPO/scripts/recover_idioms.py" --json -- "$BIN" > "$IDIOMS" 2>/dev/null; then
+    python3 - "$JSON" "$IDIOMS" <<'PY' || true
+import json, sys
+j, t = sys.argv[1], sys.argv[2]
+with open(j) as f: data = json.load(f)
+with open(t) as f: idioms = json.load(f)
+if isinstance(idioms, dict) and "error" not in idioms:
+    data["idioms"] = idioms
 with open(j, "w") as f: json.dump(data, f)
 PY
   fi

@@ -18,7 +18,8 @@ def _install_stubs(monkeypatch):
               "ghidra.program.model.address"):
         monkeypatch.setitem(sys.modules, m, types.ModuleType(m))
     sys.modules["ghidra.program.model.symbol"].SourceType = types.SimpleNamespace(ANALYSIS="A")
-    sys.modules["ghidra.program.model.listing"].CodeUnit = types.SimpleNamespace(PLATE_COMMENT=3, PRE_COMMENT=1)
+    sys.modules["ghidra.program.model.listing"].CodeUnit = types.SimpleNamespace(
+        PLATE_COMMENT=3, PRE_COMMENT=1, EOL_COMMENT=0)
 
     # minimal stubs for the vtable-datatype path. Widths mimic Ghidra on a Windows x64 (LLP64)
     # data organization: C `ulong` is 4 bytes there -- the bug was building the usize fields from it
@@ -66,7 +67,7 @@ def _load_helpers(monkeypatch):
 def _run(tmp_path, monkeypatch, data, ptr_size=8, existing=()):
     """`existing`: defined code units already in the listing, [(start, end, kind, type, category)]."""
     made = _install_stubs(monkeypatch)
-    comments, renames, created, cleared = {}, {}, [], []
+    comments, renames, created, cleared, bookmarks = {}, {}, [], [], []
     units = list(existing)
 
     class Addr:
@@ -109,6 +110,7 @@ def _run(tmp_path, monkeypatch, data, ptr_size=8, existing=()):
                 units[:] = [u for u in units if not (u[0] <= b.v and u[1] >= a.v)]
             return types.SimpleNamespace(
                 setComment=lambda a, k, t: comments.__setitem__((a.v, k), t),
+                getComment=lambda k, a: comments.get((a.v, k)),
                 getInstructionContaining=lambda a: next(iter(overlapping(a.v, a.v, "instruction")), None),
                 getInstructions=lambda aset, fwd: _It(u for u in overlapping(*aset, "instruction")
                                                       if u[0] >= aset[0]),
@@ -118,7 +120,8 @@ def _run(tmp_path, monkeypatch, data, ptr_size=8, existing=()):
                                                      if u[0] > aset[0]),
                 clearCodeUnits=clear,
                 createData=lambda a, dt: created.append((a.v, dt.name, list(dt.fields))))
-        def getBookmarkManager(s): return types.SimpleNamespace(setBookmark=lambda *a: None)
+        def getBookmarkManager(s):
+            return types.SimpleNamespace(setBookmark=lambda a, typ, cat, txt: bookmarks.append((a.v, cat, txt)))
         def getMemory(s): return types.SimpleNamespace(contains=lambda a: 0x400000 <= a.v < 0x410000)
         def getDataTypeManager(s):
             return DTM
@@ -129,6 +132,7 @@ def _run(tmp_path, monkeypatch, data, ptr_size=8, existing=()):
     exec(SCRIPT.read_text(), g)
     _run.created = created
     _run.cleared = cleared
+    _run.bookmarks = bookmarks
     _run.made = made
     return comments, renames
 
@@ -333,5 +337,89 @@ def test_ghidra_run_handles_dash_leading_binary_name(tmp_path):
     rec = json.loads(seen_json.read_text())
     assert rec["format"] == "PE"                     # recover.py analyzed the '-' file
     assert "vtables" in rec and "ghidra_types" in rec   # recover_types.py ran and was merged
+    assert "fmt_sites" in rec["idioms"]                 # recover_idioms.py ran and was merged
     args = log.read_text().splitlines()
     assert args[args.index("-import") + 1] == "./-sample.exe"
+
+
+# --------------------------------------------------------------------------------------------
+# Rust idioms (recover_idioms.py): pure plan + application through the stubbed API
+# --------------------------------------------------------------------------------------------
+IDIOMS = {
+    "fmt_sites": [{"site": 0x1100, "macro": "println!", "format": "hello {} you are {}", "sink": "print"},
+                  {"site": 0x2100, "macro": "panic!", "format": "too many: {}", "location": "src/main.rs:9:5"}],
+    "panic_sites": [{"site": 0x2100, "kind": "panic", "label": "panic!", "safety_check": False,
+                     "location": "src/main.rs:9:5"},
+                    {"site": 0x1200, "kind": "bounds_check", "label": "index out of bounds",
+                     "safety_check": True, "location": "src/main.rs:4:7", "guard": 0x11f0,
+                     "guard_branch": "ja"}],
+    "drop_sites": [{"site": 0x1300, "kind": "dealloc"}, {"site": 0x1310, "kind": "drop_glue"}],
+    "helpers": [{"va": 0x3000, "role": "panic", "kind": "bounds_check", "via": "anchor"},
+                {"va": 0x3100, "role": "dealloc", "kind": "dealloc", "via": "anchor"},
+                {"va": 0x2000, "role": "drop_glue", "kind": "drop_glue", "via": "inferred"},
+                {"va": 0x3300, "role": "drop_glue", "kind": "drop_glue", "via": "inferred"}],
+    "enum_returns": [{"va": 0x1000, "shape": "tag+payload", "confidence": "high",
+                      "note": "returns enum-like value (Option/Result?)",
+                      "evidence": ["2/2 caller(s) test the returned tag (rax) then use the payload (rdx)"]}],
+}
+
+
+def test_idiom_plan_is_pure_and_complete(monkeypatch):
+    plan = _load_helpers(monkeypatch)["_idiom_plan"](IDIOMS)
+    pre = {a[1]: a[2] for a in plan if a[0] == "pre"}
+    assert 'println!("hello {} you are {}")' in pre[0x1100]
+    assert "safety check (cold path): index out of bounds  @ src/main.rs:4:7" in pre[0x1200]
+    assert "panic path (cold): panic!" in [a[2] for a in plan if a[0] == "pre" and a[1] == 0x2100][1]
+    eol = {a[1]: a[2] for a in plan if a[0] == "eol"}
+    assert eol[0x11f0].startswith("rust-deobf: cold branch -> index out of bounds")
+    assert eol[0x1300] == "rust-deobf: dealloc" and eol[0x1310] == "rust-deobf: drop"
+    bms = [(a[1], a[2]) for a in plan if a[0] == "bookmark"]
+    assert (0x11f0, "rust-deobf: safety-check") in bms          # on the guard, not the call
+    assert (0x2100, "rust-deobf: safety-check") in bms          # no guard: on the call site
+    renames = {a[1]: a[2] for a in plan if a[0] == "rename"}
+    # unique names: a kind that occurs twice gets the address as a suffix
+    assert renames == {0x3000: "rd_panic_bounds_check", 0x3100: "rd_rust_dealloc",
+                       0x2000: "rd_drop_glue_2000", 0x3300: "rd_drop_glue_3300"}
+    plate = [a[2] for a in plan if a[0] == "plate_add" and a[1] == 0x1000]
+    assert plate and "returns enum-like value (Option/Result?) [tag+payload, confidence high]" in plate[0]
+    # malformed input never raises
+    g = _load_helpers(monkeypatch)
+    assert g["_idiom_plan"](None) == [] and g["_idiom_plan"]({"fmt_sites": [{"site": "zz"}]}) == []
+    assert g["_merge_plate"]("a", "b") == "a\nb" and g["_merge_plate"]("a\nb", "b") == "a\nb"
+
+
+def test_idioms_applied_without_clobbering_string_plates(tmp_path, monkeypatch):
+    """The decoded-strings plate on 0x401000 survives the idiom plate line appended to it; only
+    default-named functions are renamed; addresses resolve through the image base (RVAs)."""
+    data = {"decoded": [{"string": "https://c2.example/gate", "function": 0x401000,
+                         "method": "emulation", "tags": ["url"]}],
+            "idioms": IDIOMS}
+    comments, renames = _run(tmp_path, monkeypatch, data)
+    plate = comments[(0x401000, 3)]
+    assert "1 decoded string(s)" in plate and "returns enum-like value" in plate
+    assert 'println!("hello {} you are {}")' in comments[(0x401100, 1)]
+    # one address with a fmt site AND a panic site: both lines in one pre comment
+    both = comments[(0x402100, 1)]
+    assert 'panic!("too many: {}")' in both and "panic path (cold)" in both
+    assert comments[(0x4011f0, 0)].startswith("rust-deobf: cold branch")
+    assert ("rust-deobf: safety-check") in {c for _a, c, _t in _run.bookmarks}
+    # 0x401000 was renamed after its decoded string first; the helper rename only touches
+    # still-default names (0x403000 -> rd_panic_bounds_check; 0x402000 drop glue)
+    assert renames[0x401000].startswith("rd_url_")
+    assert renames[0x403000] == "rd_panic_bounds_check" and renames[0x402000] == "rd_drop_glue_2000"
+
+
+def test_idiom_comment_merges_with_decoder_call_site_comment(tmp_path, monkeypatch):
+    """A call site that both decodes a string and is a fmt site keeps both lines."""
+    data = {"decoded": [{"string": "abcdefgh", "decoder": 0x401000, "call": 0x401100,
+                         "method": "static", "tags": []}],
+            "idioms": {"fmt_sites": [{"site": 0x1100, "macro": "println!", "format": "x={}"}]}}
+    comments, _ = _run(tmp_path, monkeypatch, data)
+    pre = comments[(0x401100, 1)]
+    assert "rust-deobf decodes: abcdefgh" in pre and 'println!("x={}")' in pre
+
+
+def test_idioms_json_passed_directly(tmp_path, monkeypatch):
+    """`ghidra_annotate.py idioms.json` with recover_idioms --json output (no recover.py keys)."""
+    comments, _ = _run(tmp_path, monkeypatch, dict(IDIOMS))
+    assert 'println!("hello {} you are {}")' in comments[(0x401100, 1)]
