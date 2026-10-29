@@ -137,13 +137,14 @@ def _build(tmp_path, target=None, program=None, toolchain=None):
     out = tmp_path / ("hand_" + (target or "host"))
     rustc = ["rustc"] + ([f"+{toolchain}"] if toolchain else [])
     cmd = rustc + ["--edition", "2021", "-O", "-C", "strip=symbols", str(src), "-o", str(out)]
-    if target == "aarch64-apple-darwin":
+    if target and target.endswith("-apple-darwin"):
         # no macOS SDK here: link with ld64.lld against stub libSystem/libc/libm, imports left
         # to dynamic lookup -- a real Mach-O executable for static analysis (not runnable)
         stub = tmp_path / "stub"
         stub.mkdir(exist_ok=True)
+        tbd = TBD if target.startswith("aarch64") else TBD.replace("arm64-macos", "x86_64-macos")
         for n in ("c", "m", "System"):
-            (stub / f"lib{n}.tbd").write_text(TBD)
+            (stub / f"lib{n}.tbd").write_text(tbd)
         cmd = rustc + ["--edition", "2021", "-O", str(src), "-o", str(out), "--target", target,
                        "-C", "linker=rust-lld", "-C", "linker-flavor=ld64.lld",
                        "-C", f"link-arg=-L{stub}", "-C", "link-arg=-undefined",
@@ -173,6 +174,12 @@ def _check(res, arch):
         assert m["validated"], m["notes"]
         assert {"0", "1", "2"} <= set(m["states"])
         assert m["states"]["1"]["name"] == "Returned" and m["states"]["2"]["name"] == "Panicked"
+    # every state write-back is pinned to a concrete value (set): no machine stays "computed".
+    # boxed's own poll writes its next state through a setcc/select, not a `mov imm`, so this
+    # only holds once value sets through those are followed.
+    assert all(m["writes_check"] in ("confirmed", "computed") for m in ms)
+    assert all(m["writes_check"] == "confirmed" for m in ms), \
+        [(m["id"], m["writes_check"]) for m in ms if m["writes_check"] != "confirmed"]
     # leaf is inlined four times (twice into middle, into looper and into the async block), the
     # rest once; middle's two copies share one state field but no resume target -> two machines
     count = {ln: sum(m["source"]["line"] == ln for m in ms) for ln in AWAITS}
@@ -337,15 +344,19 @@ def _check_by_location(res):
         assert m["validated"], m["notes"]
 
 
-@pytest.mark.skipif(not (shutil.which("rustc") and _target("aarch64-apple-darwin")),
-                    reason="aarch64-apple-darwin target not installed")
-def test_hand_executor_macho(tmp_path):
-    """Mach-O arm64, symbols stripped: function starts come from LC_FUNCTION_STARTS."""
-    exe = _build(tmp_path, "aarch64-apple-darwin")
+@pytest.mark.parametrize("target,arch", [("aarch64-apple-darwin", "aarch64"),
+                                         ("x86_64-apple-darwin", "x86_64")])
+@pytest.mark.skipif(not shutil.which("rustc"), reason="rustc not available")
+def test_hand_executor_macho(tmp_path, target, arch):
+    """Mach-O, symbols stripped: function starts come from LC_FUNCTION_STARTS. The x86-64 variant
+    also exercises Apple's jump tables, which sit inside the code section (not a data section)."""
+    if not _target(target):
+        pytest.skip(f"{target} target not installed")
+    exe = _build(tmp_path, target)
     if shutil.which("llvm-strip"):
         subprocess.run(["llvm-strip", str(exe)], check=False)
     res = RA.recover(exe)
-    assert res["format"] == "MACHO" and res["arch"] == "aarch64"
+    assert res["format"] == "MACHO" and res["arch"] == arch
     _check_by_location(res)
     assert len(res["machines"]) == 9 and len(res["poll_functions"]) == 2
 

@@ -202,7 +202,7 @@ class _Bin:
         self.path = Path(path)
         img = recover_emulate.Image(path)
         self.img = img
-        self.arm, self.pe, self.x32 = img.arm, img.pe, img.x32
+        self.arm, self.pe, self.x32, self.macho = img.arm, img.pe, img.x32, img.macho
         self.fmt = img.fmt
         self.arch = "aarch64" if img.arm else ("x86" if img.x32 else "x86_64")
         self.code, self.lo, self.hi = img.code, img.text_va, img.text_end
@@ -596,8 +596,8 @@ def _x86_op_val(b, ins, op, regs, smem, v, run):
         if base is None or idx is None or mem.segment:
             raise _Stop()
         addr = (base + idx * mem.scale + disp) & _mask(32 if b.x32 else 64)
-        # (mingw's i686 tables sit in .text itself, so any mapped section may hold a table)
-        if not (b.is_data(addr) or (b.x32 and b.lo <= addr < b.hi)):
+        # (mingw's i686 and Apple's x86-64 tables sit in the code section itself)
+        if not (b.is_data(addr) or ((b.x32 or b.macho) and b.lo <= addr < b.hi)):
             raise _Stop()
         if b.x32 and op.size == 4 and addr in b.img.patches:
             val = b.img.patches[addr] & _mask(32)   # an absolute table entry, relocated (RVA)
@@ -1388,15 +1388,91 @@ def _deref_slot(root):
     return (m.group(1), int(m.group(2), 16)) if m else None
 
 
+def _cvals(fact, bits=64):
+    """The possible values of a constant(-set) fact in its low `bits` bits, or None. A partial
+    fact ("cp"/"cps": only the low w bits known) answers only for bits <= w."""
+    if not fact:
+        return None
+    m = _mask(bits)
+    if fact[0] == "c":
+        return {fact[1] & m}
+    if fact[0] == "cs":
+        return {v & m for v in fact[1]}
+    if fact[0] in ("cp", "cps") and bits <= fact[2]:
+        return {v & m for v in ((fact[1],) if fact[0] == "cp" else fact[1])}
+    return None
+
+
+def _cwidth(fact):
+    return fact[2] if fact and fact[0] in ("cp", "cps") else 64
+
+
+def _mkvals(vals, bits):
+    """A constant-set fact for `vals` known in the low `bits` bits (64 = the whole register)."""
+    if vals is None or not vals or len(vals) > _MAX_ALT_CONST:
+        return None
+    if bits >= 64:
+        return _mkconst(vals)
+    vals = {v & _mask(bits) for v in vals}
+    if len(vals) == 1:
+        return ("cp", next(iter(vals)), bits)
+    return ("cps", frozenset(vals), bits)
+
+
+def _fvals(bn, fact, bits):
+    """Value set of a fact in its low `bits` bits: a constant set, or what the callee returns
+    for a call-result fact (its return summary), else None."""
+    v = _cvals(fact, bits)
+    if v is None and fact and fact[0] == "r":
+        rv = _ret_summary(bn, fact[1], fact[2])
+        v = {x & _mask(bits) for x in rv} if rv else None
+    return v
+
+
+def _binop(op, a, b, bits):
+    m = _mask(bits)
+    if op == "add":
+        return (a + b) & m
+    if op == "sub":
+        return (a - b) & m
+    if op == "and":
+        return a & b
+    if op in ("or", "orr"):
+        return a | b
+    if op in ("xor", "eor"):
+        return a ^ b
+    if op in ("shl", "lsl"):
+        return (a << (b & (bits - 1))) & m
+    if op in ("shr", "lsr"):
+        return (a & m) >> (b & (bits - 1))
+    return None
+
+
+def _setop(op, av, bv, bits, same=False):
+    """Element-wise `op` over two value sets (correlated when both operands are one register)."""
+    if av is None or bv is None:
+        return None
+    if same:
+        out = {_binop(op, a, a, bits) for a in av}
+    elif len(av) * len(bv) > 4 * _MAX_ALT_CONST:
+        return None
+    else:
+        out = {_binop(op, a, b, bits) for a in av for b in bv}
+    return None if None in out else out
+
+
 def _merge(a, b):
     if a == b:
         return a
     pa, pb = _ptrs(a), _ptrs(b)
     if pa is not None and pb is not None:
         return _mkptr(pa | pb)
-    ca, cb = _consts(a), _consts(b)
+    w = min(_cwidth(a), _cwidth(b))
+    ca, cb = _cvals(a, w), _cvals(b, w)
     if ca is not None and cb is not None:
-        return _mkconst(ca | cb)
+        # values reaching from different paths (`mov cl, 3` here, `mov cl, 4` there, the
+        # zero of `xor eax, eax` on entry): their set, in the bits both sides know
+        return _mkvals(ca | cb, w)
     return None
 
 
@@ -1498,10 +1574,25 @@ def _ret_summary(bn, target, idx):
     at = _dataflow(bn, insns, lo, hi, {}, entry, None)
     vals = set()
     reg = _ret_regs(bn)[idx]
+    pos = {i.address: k for k, i in enumerate(insns)}
     for i in insns:
         if i.mnemonic in ("ret", "retn"):
-            fact = at.get(i.address, {}).get(reg)
-            c = _consts(fact)
+            c = _consts(at.get(i.address, {}).get(reg))
+            if c is None:
+                # a return block the CFG reaches only through a jump table: evaluate the
+                # straight-line code just before the `ret` on its own
+                k = pos[i.address]
+                j = k
+                while j > 0 and k - j < 16:
+                    pm = insns[j - 1].mnemonic
+                    if pm.startswith("j") or pm in ("ret", "retn", "call", "b", "br", "bl", "blr") \
+                            or pm.startswith("b.") or pm in ("cbz", "cbnz", "tbz", "tbnz"):
+                        break
+                    j -= 1
+                loc = {}
+                for q in insns[j:k]:
+                    _transfer(bn, q, loc)
+                c = _consts(loc.get(reg))
             if c is None:
                 return None
             vals |= c
@@ -1571,7 +1662,7 @@ def _transfer_a64(bn, ins, f, on_access, m):
                     vals = None
                     if is_st:
                         src = _ac(r)
-                        vals = {0} if src == "xzr" else _consts(f.get(src))
+                        vals = {0} if src == "xzr" else _cvals(f.get(src), 8 * w)
                     _report(on_access, ins, "store" if is_st else "load", bf, disp + k * w, w, vals)
             if wb and base != "sp":
                 nf = _shift(bf, wb)
@@ -1633,11 +1724,50 @@ def _transfer_a64(bn, ins, f, on_access, m):
         k = k if m == "add" else -k
         src = ("p", "sp", 0) if _ac(parts[1]) == "sp" else f.get(_ac(parts[1]))
         nf = _shift(src, k)
+        if nf is None and _fvals(bn, src, _a64_bits(parts[0])):
+            nf = _mkvals({(x + k) & _mask(_a64_bits(parts[0]))
+                          for x in _fvals(bn, src, _a64_bits(parts[0]))}, 64)
         if nf is None:
             f.pop(dst, None)
         else:
             f[dst] = nf
         return
+    # conditional selects: both outcomes as a value set (`mov w8, #3; csinc w8, w8, wzr, ne`
+    # = {3, 1}: Pending -> Suspend, Ready -> Returned)
+    bits = _a64_bits(parts[0])
+    msk = _mask(bits)
+
+    def rv(r):
+        r = r.strip()
+        if _ac(r) == "xzr":
+            return {0}
+        return _fvals(bn, f.get(_ac(r)), bits)
+    res = None
+    if m in ("csel", "csinc", "csinv", "csneg") and len(parts) == 4:
+        a, b2 = rv(parts[1]), rv(parts[2])
+        if a is not None and b2 is not None:
+            alt = {(x + 1) & msk for x in b2} if m == "csinc" else \
+                {(~x) & msk for x in b2} if m == "csinv" else \
+                {(-x) & msk for x in b2} if m == "csneg" else b2
+            res = a | alt
+    elif m in ("cset", "csetm") and len(parts) == 2:
+        res = {0, 1} if m == "cset" else {0, msk}
+    elif m in ("cinc", "cinv", "cneg") and len(parts) == 3:
+        a = rv(parts[1])
+        if a is not None:
+            res = a | {((x + 1) if m == "cinc" else (~x) if m == "cinv" else (-x)) & msk for x in a}
+    elif m in ("add", "sub", "and", "orr", "eor", "lsl", "lsr") and len(parts) == 3:
+        a = rv(parts[1])
+        im = _A64_IMM.match(parts[2])
+        if im:
+            res = _setop(m, a, {_num(im.group(1)) & msk}, bits)
+        else:
+            res = _setop(m, a, rv(parts[2]), bits, same=_ac(parts[1]) == _ac(parts[2]))
+    if res is not None:
+        nf = _mkvals(res, 64)
+        if nf is not None:
+            f[dst] = nf
+            return
     f.pop(dst, None)
 
 
@@ -1698,11 +1828,7 @@ def _transfer_x86(bn, ins, f, on_access, m):
                         if src.type == X86_OP_IMM:
                             vals = {src.imm & _mask(op.size * 8)}
                         elif src.type == X86_OP_REG:
-                            sf = f.get(_xc(ins.reg_name(src.reg)))
-                            if sf and sf[0] == "cp" and op.size * 8 <= sf[2]:
-                                vals = {sf[1] & _mask(op.size * 8)}
-                            elif _consts(sf) is not None:
-                                vals = {v & _mask(op.size * 8) for v in _consts(sf)}
+                            vals = _cvals(f.get(_xc(ins.reg_name(src.reg))), op.size * 8)
                     kind = "store" if store else ("rmw" if i == 0 and m not in ("cmp", "test", "push") else "load")
                     _report(on_access, ins, kind, bf, op.mem.disp, op.size, vals)
     # stack spills: a pointer-sized register/immediate stored to [sp+k] and reloaded later
@@ -1727,6 +1853,10 @@ def _transfer_x86(bn, ins, f, on_access, m):
                     # a narrow constant parked in the frame (`mov byte [ebp-0x10], 3`): reloaded
                     # by movzx and stored as the next state
                     f[_mk(slot)] = ("cp", ops[1].imm & _mask(8 * op.size), 8 * op.size)
+                elif m == "mov" and len(ops) == 2 and ops[1].type == X86_OP_REG:
+                    sv = _mkvals(_cvals(f.get(_xc(ins.reg_name(ops[1].reg))), 8 * op.size), 8 * op.size)
+                    if sv is not None:
+                        f[_mk(slot)] = sv
     if x32:
         if m == "and" and ops and ops[0].type == X86_OP_REG and _xc(ins.reg_name(ops[0].reg)) == "rsp":
             f["rsp"] = ("p", "spa", 0)   # realigned: a fresh stack root (args stay at [ebp+..])
@@ -1777,10 +1907,14 @@ def _transfer_x86(bn, ins, f, on_access, m):
             sf = spf if sc == "rsp" else f.get(sc)
             if sf and ops[0].size == ptrw:
                 f[dst] = sf
-            elif sf and ops[0].size == 4 and _consts(sf) is not None:
-                f[dst] = _mkconst({v & _mask(32) for v in _consts(sf)})
             else:
-                f.pop(dst, None)
+                # a narrower copy keeps the value set it carries (`mov ecx, eax`, `mov cl, al`)
+                vs = _fvals(bn, sf, 8 * ops[0].size)
+                nf = _mkvals(vs, 64 if ops[0].size >= 4 else 8 * ops[0].size)
+                if nf is None:
+                    f.pop(dst, None)
+                else:
+                    f[dst] = nf
         elif src.type == X86_OP_MEM and ops[0].size == ptrw and src.mem.base and not src.mem.index \
                 and src.mem.base != X86_REG_RIP and not src.mem.segment:
             bc = _xc(ins.reg_name(src.mem.base))
@@ -1802,8 +1936,9 @@ def _transfer_x86(bn, ins, f, on_access, m):
         slot = _stack_slot(spf if bc == "rsp" else f.get(bc), ops[1].mem.disp)
         sv = f.get(_mk(slot)) if slot is not None else None
         f.pop(dst, None)
-        if sv and sv[0] == "cp" and sv[2] == 8 * ops[1].size:
-            f[dst] = ("c", sv[1])
+        vals = _cvals(sv, 8 * ops[1].size) if sv and _cwidth(sv) == 8 * ops[1].size else None
+        if vals:
+            f[dst] = _mkconst(vals)          # zero-extended
         return
     if m == "lea" and len(ops) == 2:
         mm = ops[1].mem
@@ -1812,13 +1947,12 @@ def _transfer_x86(bn, ins, f, on_access, m):
         elif mm.base and not mm.index and ops[0].size == ptrw:
             bc = _xc(ins.reg_name(mm.base))
             nf = _shift(spf if bc == "rsp" else f.get(bc), mm.disp, 8 * ptrw)
-            if nf is None:
-                f.pop(dst, None)
-            else:
+            if nf is not None:
                 f[dst] = nf
-        else:
-            f.pop(dst, None)
-        return
+                return
+        # (otherwise fall through: `lea` arithmetic over value sets below, or the generic kill)
+        if mm.base == X86_REG_RIP:
+            return
     if m in ("add", "sub") and len(ops) == 2 and ops[1].type == X86_OP_IMM and ops[0].size == ptrw:
         df = spf if dst == "rsp" else f.get(dst)
         k = ops[1].imm if m == "add" else -ops[1].imm
@@ -1831,6 +1965,56 @@ def _transfer_x86(bn, ins, f, on_access, m):
     if m == "xor" and len(ops) == 2 and ops[1].type == X86_OP_REG and ops[1].reg == ops[0].reg:
         f[dst] = ("c", 0)
         return
+    # value sets through flag selects and small arithmetic: `sete cl; add cl, cl; inc cl`,
+    # `lea ecx, [rax+rax]; inc cl`, `cmovne eax, ecx` -- what a Pending path computes as the next
+    # state without a constant store (each side of the select evaluated to its constant set)
+    bits = ops[0].size * 8
+    wbits = 64 if bits >= 32 else bits           # a 32-bit write zero-extends: the whole register
+    res = None
+    if m.startswith("set") and len(ops) == 1:
+        res = {0, 1}
+    elif m.startswith("cmov") and len(ops) == 2 and ops[1].type == X86_OP_REG:
+        a = _fvals(bn, f.get(dst), bits)
+        b2 = _fvals(bn, f.get(_xc(ins.reg_name(ops[1].reg))), bits)
+        res = (a | b2) if a is not None and b2 is not None else None
+    elif m in ("add", "sub", "and", "or", "xor", "shl", "shr") and len(ops) == 2:
+        a = _fvals(bn, f.get(dst), bits)
+        if ops[1].type == X86_OP_IMM:
+            res = _setop(m, a, {ops[1].imm & _mask(bits)}, bits)
+        elif ops[1].type == X86_OP_REG:
+            sc = _xc(ins.reg_name(ops[1].reg))
+            res = _setop(m, a, _fvals(bn, f.get(sc), bits), bits, same=(sc == dst))
+    elif m in ("inc", "dec", "neg", "not") and len(ops) == 1:
+        a = _fvals(bn, f.get(dst), bits)
+        if a is not None:
+            res = {((x + 1) if m == "inc" else (x - 1) if m == "dec" else (-x) if m == "neg" else ~x)
+                   & _mask(bits) for x in a}
+    elif m == "lea" and len(ops) == 2 and ops[1].mem.base and ops[1].mem.base != X86_REG_RIP:
+        mm = ops[1].mem
+        bc = _xc(ins.reg_name(mm.base))
+        a = _fvals(bn, f.get(bc), 64)
+        if mm.index:
+            ic = _xc(ins.reg_name(mm.index))
+            iv = _fvals(bn, f.get(ic), 64)
+            if a is not None and iv is not None:
+                res = {(x + x * mm.scale + mm.disp) & _mask(bits) for x in a} if ic == bc else \
+                    {(x + y * mm.scale + mm.disp) & _mask(bits) for x in a for y in iv}
+        elif a is not None:
+            res = {(x + mm.disp) & _mask(bits) for x in a}
+    elif m in ("movzx", "mov") and len(ops) == 2 and ops[1].type == X86_OP_REG:
+        res = _fvals(bn, f.get(_xc(ins.reg_name(ops[1].reg))), 8 * ops[1].size)
+        if m == "movzx":
+            wbits = 64
+    if res is not None:
+        old = _cvals(f.get(dst), 64) if wbits < 64 else None
+        if old is not None and len(old) == 1:
+            # a byte write into a register whose upper bits are known (`xor ecx, ecx; setne cl`)
+            o = next(iter(old))
+            res, wbits = {(o & ~_mask(bits)) | (v & _mask(bits)) for v in res}, 64
+        nf = _mkvals(res, wbits)
+        if nf is not None:
+            f[dst] = nf
+            return
     try:
         _r, w = ins.regs_access()
         for r in w:
@@ -2066,8 +2250,8 @@ def analyze_function(b: _Bin, anchors, lo, hi):
     boundaries = set()
     for i in insns:
         c = _const_of(b, i)
-        if c is not None and b.is_data(c):
-            boundaries.add(c)
+        if c is not None and (b.is_data(c) or (b.macho and not b.arm and lo <= c < hi)):
+            boundaries.add(c)            # (an Apple x86-64 table lives inside its function)
         elif b.x32:
             # i386 tables are read as [pic + idx*4 + d] (ELF PIC: pic = GOT) or [idx*4 + abs]
             # (PE: an absolute, relocated address -- mingw puts them in .text): each names a table
@@ -2261,11 +2445,30 @@ def analyze_function(b: _Bin, anchors, lo, hi):
         if any(x.get("unreachable_arms") for x in ss):
             notes.append("Returned/Panicked arms optimized away (both states reach a trap)")
         if field[0] == "reg":
-            computed = True             # a promoted state: its write-backs are register moves
+            # a promoted state: its write-backs are register moves into the dispatch -- the value
+            # set reaching the dispatch (entry 0 + every back edge's next state) is the check
             notes.append(f"state kept in register {field[1]} (coroutine inlined into a loop)")
+            reach = set()
+            for s_ in ss:
+                src = _load_base(b, b.insn(s_["va"]))[1]
+                v_ = _cvals(at.get(s_["va"], {}).get(src), 8 * width)
+                if v_ is None:
+                    reach = None
+                    break
+                reach |= v_
+            # a reaching set that covers every suspend state confirms it; otherwise the
+            # back-edge writes went through arithmetic we could not follow -> computed, not a gap
+            n_now = max(max(s_["targets"]) for s_ in ss) + 1
+            if reach and all(v in reach for v in range(3, n_now)):
+                writes.append({"va": ss[0]["va"], "values": sorted(reach), "may": False,
+                               "reach": True})
+                definite = []       # (a reaching set, not a single definite store)
+            else:
+                computed = True
         n_states = max(targets) + 1
         # writes are the ground truth of which suspend states exist: extend a chain that stopped
         # early on a merged target, and cap a table read that ran past its end
+        mx_all = max((v for x in writes if not x["may"] for v in (x["values"] or ())), default=0)
         if definite and not split:
             mx = max(definite)
             if mx >= n_states and mx < _MAX_STATES:
@@ -2275,15 +2478,18 @@ def analyze_function(b: _Bin, anchors, lo, hi):
                         break
                     targets[v] = r.target
                 notes.append("states extended to the highest written value")
-            elif not computed and mx >= 3 and mx + 1 < n_states and main["kind"] == "jump_table":
+            # (the cap counts every value a store may write -- `csinc`/`setcc` sets included)
+            elif not computed and max(mx, mx_all) >= 3 and max(mx, mx_all) + 1 < n_states \
+                    and main["kind"] == "jump_table":
                 # only an unbounded table read can overshoot; a compare chain cannot, and a
                 # pending write the dataflow missed must not cost a real state
-                for v in range(mx + 1, n_states):
+                for v in range(max(mx, mx_all) + 1, n_states):
                     targets.pop(v, None)
                 notes.append("table entries past the highest written state dropped")
         n_states = max(targets) + 1
         seen_vals = {v for x in writes for v in (x["values"] or ())}
-        contradicted = any(v >= n_states for v in definite)
+        contradicted = any(v >= n_states for v in definite) or any(
+            v >= n_states for x in writes if x.get("reach") for v in x["values"])
         unseen = [v for v in range(3, n_states) if v not in seen_vals]
         if contradicted:
             check = "contradicted"
@@ -2722,7 +2928,7 @@ def _selftest():
         """A synthetic image: code at `lo`, one rodata section; no LIEF."""
         def __init__(self, arm, code, lo, data, data_va, funcs=None):
             from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_MODE_64, CS_MODE_LITTLE_ENDIAN
-            self.arm, self.pe, self.x32, self.ptr = arm, False, False, 8
+            self.arm, self.pe, self.x32, self.ptr, self.macho = arm, False, False, 8, False
             self.code, self.lo, self.hi = code, lo, lo + len(code)
             self.secs = sorted([(lo, code, True, ".text"), (data_va, data, False, ".rodata")])
             self._sec_vas = [t[0] for t in self.secs]
