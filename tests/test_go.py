@@ -146,3 +146,33 @@ def test_go_pe_addresses_are_rvas(tmp_path):
     sym = next((s for s in b.symbols if s.name == "main.main"), None)
     if sym is not None:
         assert mm[0] == text.virtual_address + sym.value
+
+
+def test_text_start_zero_in_a_non_pie_binary(tmp_path):
+    """Go 1.26 writes textStart = 0 in the pclntab header even in a static non-PIE binary (measured,
+    go1.26.8 linux/amd64): function entries came out as offsets 0..0xdf780 instead of VAs from
+    0x401000, so recover_antianalysis' Go-runtime filter matched no instruction. With no relocation
+    to fill it, Go's text start is the text section's."""
+    sys.path.insert(0, str(ROOT / "tests"))
+    from _mkelf import mkelf
+    names = [(i * 0x10, f"runtime.f{i}") for i in range(16)]
+    tab = GO._build_pclntab(names, text_start=0)            # textStart field 0, as Go 1.26 writes
+    elf, text_va, _ = mkelf(tab + b"\x00" * 64)
+    p = tmp_path / "go126.elf"
+    p.write_bytes(elf)
+    g = GO.recover(p)
+    assert g["is_go"] and g["function_count"] == 16
+    assert sorted(int(k, 16) for k in g["functions"]) == [text_va + off for off, _n in names]
+
+
+def test_text_start_zero_kept_when_entries_do_not_fit(tmp_path):
+    # the fallback applies only when every entry lands inside the text section; otherwise the
+    # header's values stand (no guess)
+    sys.path.insert(0, str(ROOT / "tests"))
+    from _mkelf import mkelf
+    names = [(i * 0x1000, f"runtime.f{i}") for i in range(16)]   # 0xf000 > the .text size
+    elf, _text_va, _ = mkelf(GO._build_pclntab(names, text_start=0) + b"\x00" * 64)
+    p = tmp_path / "nofit.elf"
+    p.write_bytes(elf)
+    g = GO.recover(p)
+    assert sorted(int(k, 16) for k in g["functions"]) == [off for off, _n in names]

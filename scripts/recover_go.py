@@ -186,6 +186,25 @@ def _text_start_reloc(b, va):
     return None
 
 
+def _text_section_start(b, pe, imagebase):
+    """(start, end) of Go's text when the pclntab header does not say: the `runtime.text` symbol if
+    present, else the text section (Go's linker puts runtime.text at its start). Absolute addresses,
+    as the pclntab stores them (PE: imagebase + RVA). None when there is no text section."""
+    sec = next((x for x in b.sections if x.name in (".text", "__text")), None)
+    if sec is None or not sec.size:
+        return None
+    lo = sec.virtual_address + (imagebase if pe else 0)
+    hi = lo + sec.size
+    if not pe:
+        try:
+            for sym in b.symbols:
+                if sym.name in ("runtime.text", "_runtime.text") and lo <= sym.value < hi:
+                    return sym.value, hi
+        except Exception:
+            pass
+    return lo, hi
+
+
 def recover(path) -> dict:
     """{is_go, go_version, pclntab_va, function_count, functions{addr: name}, ...}. Addresses follow
     the toolkit convention: RVAs for PE (add `imagebase` to rebase), VAs for ELF / Mach-O."""
@@ -201,14 +220,24 @@ def recover(path) -> dict:
     try:
         va, raw, named = find_pclntab(b)
         parsed = parse_pclntab(raw) if raw is not None else None
-        if parsed and not pe and parsed["magic"] in (hex(_V118), hex(_V120)):
-            # an external-linked PIE stores textStart as 0 in the file (a RELATIVE relocation
-            # fills it at load); take the relocation's addend so entries are real VAs
+        if parsed and parsed["magic"] in (hex(_V118), hex(_V120)):
             ptr = parsed["ptr_size"]
             if struct.unpack_from("<Q" if ptr == 8 else "<I", raw, 8 + 2 * ptr)[0] == 0:
-                ts = _text_start_reloc(b, va + 8 + 2 * ptr)
+                # textStart is 0 in the file. An external-linked PIE relies on a RELATIVE
+                # relocation to fill it at load: take its addend. Go 1.26 writes 0 even in a
+                # static non-PIE binary (measured, go1.26.8 linux/amd64: entries came out as
+                # 0..0xdf780 instead of 0x401000..): then Go's text is the text section.
+                ts = None if pe else _text_start_reloc(b, va + 8 + 2 * ptr)
                 if ts:
                     parsed = parse_pclntab(raw, text_start=ts)
+                else:
+                    span = _text_section_start(b, pe, imagebase)
+                    if span:
+                        cand = parse_pclntab(raw, text_start=span[0])
+                        fns = cand.get("functions") if cand else None
+                        # only when every entry then lies inside that text
+                        if fns and all(span[0] <= k < span[1] for k in fns):
+                            parsed = cand
     except Exception:
         va, raw, named, parsed = None, None, False, None
     funcs = parsed["functions"] if parsed else {}
