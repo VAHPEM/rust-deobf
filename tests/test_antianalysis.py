@@ -86,6 +86,22 @@ def test_blob_matching_context():
     assert not A._blob_hits(b"\x00syscall.ptrace\x00", "ptrace", True)            # Go std stub
     assert A._blob_hits(b"\x00syscall.ptrace\x00", "ptrace", False)
     assert A._blob_hits(b"\x00main.ptrace\x00", "ptrace", True)                   # the sample's own
+
+
+def test_aligned_pointer_bytes_are_not_text():
+    # CI run #118, test_benign_go_not_flagged[True] (Go 1.23, cgo, x86-64): .rodata held the pointer
+    # 0x4d764b at an 8-aligned offset, bytes `KvM\0\0\0\0\0` -- read case-insensitively as `kvm`
+    # and reported as sandbox/vm. The bytes around it, as measured (offset 0x106888):
+    table = (b"\x10" + b"\x00" * 7 + b"\x00\x81M" + b"\x00" * 5 + b"JN" + b"\x00" * 6
+             + b"\x14" + b"\x00" * 7 + b"KvM" + b"\x00" * 5 + b"JN" + b"\x00" * 6).lower()
+    assert table.index(b"kvm") % 8 == 0
+    assert not A._blob_hits(table, "kvm", True)          # word defaults to 8
+    # text stays text: unaligned, or followed by more bytes in the same word, or a long key
+    assert A._blob_hits(b"\x00/dev/kvm\x00", "kvm", True)
+    assert A._blob_hits(b"\x00" * 8 + b"kvm\x00qemu\x00", "kvm", True)
+    assert A._blob_hits(b"\x00" * 8 + b"vmware\x00\x00", "vmware", True)
+    # 32-bit: a 4-aligned C string `kvm\0` is indistinguishable from an integer -- left as text
+    assert A._blob_hits(b"\x00" * 4 + b"kvm\x00", "kvm", False, 4)
     assert A._name_hits(["isdebuggerpresent"], "isdebuggerpresent")
     assert A._name_hits(["outputdebugstringw"], "outputdebugstring")
     assert A._name_hits(["clock_gettime@glibc_2.17"], "clock_gettime")

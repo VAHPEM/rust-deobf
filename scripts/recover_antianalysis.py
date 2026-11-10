@@ -103,11 +103,12 @@ def _count_insns(img, skip=None):
     return counts
 
 
-def _blob_hits(blob: bytes, key: str, go: bool) -> bool:
+def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8) -> bool:
     """Does `key` occur in the (lower-cased) file bytes as a string of its own -- not inside a longer
     identifier (`httptrace`, `runtime.ptraceState`), not as 4 chance bytes in compressed / random data
-    (neighbours must be NUL, printable or the buffer edge), and, in a Go binary, not as a Go
-    standard-library symbol (`syscall.ptrace`)?"""
+    (neighbours must be NUL, printable or the buffer edge), not as the low bytes of an aligned
+    integer / pointer, and, in a Go binary, not as a Go standard-library symbol (`syscall.ptrace`)?
+    `word` is the binary's pointer size (the alignment of such integers; file offsets keep it)."""
     k = key.encode()
     i = blob.find(k)
     seen = 0
@@ -124,6 +125,14 @@ def _blob_hits(blob: bytes, key: str, go: bool) -> bool:
         for c in (left, right):
             if c != 0 and not (0x20 <= c < 0x7f) and c not in (0x09, 0x0a, 0x0d):
                 ok = False
+        # a short key filling the low bytes of a naturally aligned little-endian word whose other
+        # bytes -- at least half the word -- are all zero is a number, not text. Measured (Go 1.23
+        # cgo, x86-64): `KvM` at file offset 0x106888 in .rodata = the pointer 0x4d764b in a table,
+        # matched case-insensitively. (Half a word: on 32-bit a 4-aligned C string `kvm\0` would
+        # look the same, so the rule only applies to keys of at most word/2 bytes.)
+        if ok and len(k) <= word // 2 and i % word == 0 and i + word <= len(blob) \
+                and not blob[hi:i + word].strip(b"\0"):
+            ok = False
         if ok and go and left == 0x2e:                    # `pkg.key` -- whose package?
             j = lo
             while j > 0 and blob[j - 1] in _TOKEN:
@@ -211,11 +220,12 @@ def evasion(path) -> dict:
     if is_go:
         names = [n for n in names if not _go_std(n)]
     blob = Path(path).read_bytes().lower()
+    word = 4 if img.x32 else 8
     found_apis = {}
     for cat, keys in _EVASION_APIS.items():
         api = cat in ("anti-debug", "timing")
         hits = sorted({k.strip() for k in keys
-                       if (api and _name_hits(names, k)) or _blob_hits(blob, k, is_go)})
+                       if (api and _name_hits(names, k)) or _blob_hits(blob, k, is_go, word)})
         if hits:
             found_apis[cat] = hits
 
