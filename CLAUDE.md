@@ -147,6 +147,10 @@ Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `hel
 `measure_fp.py`, `measure_rust_meta.py`, `run_floss.py`, `parse_gallery.py`, `disasm.py`,
 `bench_emu.py` (emulation-engine benchmark: Unicorn vs optional icicle-emu, and Unicorn hook layouts, on
 equal checked work — `--workload loop|hooks|unpack|setup|funcs`, `--json`; re-run it before any engine decision).
+`lab_matrix.py` (runs `check.sh full` on the real lab -- local, ARM64 Kali, Windows 11 ARM64 under x64
+Python -- from one snapshot of the working tree, Kali/Windows as dualvm background jobs with a
+tree-killing timeout; prints a VALIDATION-style table or `--json`; a target it cannot run is NOT
+MEASURED with the reason, never inferred from another; needs the checkout + dualvm, `SOURCE_ONLY`).
 
 ### Packaging — `pip install rust-deobf` (see "Releasing" below)
 The import package `rust_deobf` **is** `scripts/` (setuptools `package-dir`), so the clone workflow

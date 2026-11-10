@@ -31,6 +31,7 @@ SOURCE_ONLY = {
     "gen_rust_versions",  # regenerates data/rust_versions.json in place (maintainer tool)
     "redblue_loop",       # RustCloak regression loop (needs the RustCloak build)
     "fuzz_recover",       # fuzzes our own parsers, seeds from tests/fixtures, writes build/
+    "lab_matrix",         # ships the git working tree to the lab VMs and runs check.sh there
 }
 
 
