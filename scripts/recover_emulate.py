@@ -110,6 +110,7 @@ RET_SENTINEL = 0x7fff0000
 BUDGET = 40000            # instructions per run of one function
 FRAME_BUDGET = 20000      # instructions a direct callee (with everything below it) may use
 INNER_BUDGET = 6000       # ... and any deeper callee: a lock spinning in std is cut off there
+DENSE_EXT = 16            # half-INNER_BUDGET extensions a dense callee may get (<= 54k insns)
 DENSE = 16                # instructions per basic block from which code counts as a cipher's
 #                           straight-line work (Emulator._dense): it gets more budget, bounded
 QUICK = 10000             # instructions per function in the first, sweeping pass
@@ -2113,9 +2114,14 @@ class Emulator:
 
     def _extend(self, frame):
         """Give a callee that is still writing text another half budget, up to four times -- or,
-        up to eight times, one running dense straight-line code (_dense: a software cipher)."""
+        up to DENSE_EXT times, one running dense straight-line code (_dense: a software cipher).
+        DENSE_EXT was 8 (30k instructions): enough for AArch64's software AES-256-GCM (~26k per
+        string), not for x86-64 / i386 ones -- Unicorn's CPUID reports no AES-NI/PCLMUL, so the
+        `aes` crate runs its software path. Measured (obfuse_aes, rustc 1.99.1): x86-64 elf/pe
+        callees need up to 12 extensions (~42k), i386 pe32 up to 11; cut at 8 they returned 0,
+        the GCM tag check failed and the program panicked (`ObfuseStr decryption failed`)."""
         k = frame.get("ext", 0)
-        if (self.count - self.last_text_at < 2000 and k < 4) or (k < 8 and self._dense(frame)):
+        if (self.count - self.last_text_at < 2000 and k < 4) or (k < DENSE_EXT and self._dense(frame)):
             frame["ext"] = k + 1
             frame["start"] += INNER_BUDGET // 2
             return True

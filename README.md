@@ -481,8 +481,9 @@ detects the crate and says so.</sub>
 <sub>² The 2026 crates (obfuse 1.0.1, obfany 0.1.5): 5/5 exact (no extra string) measured on ELF
 x86-64 and ELF AArch64 (musl) release (stripped and not), size-lto and speed-lto (stripped), and on
 a stripped static i686 musl release build, PE x86-64 and 32-bit PE (i686-pc-windows-gnu) release
-(stripped and not), and i686 glibc (`tests/test_32bit.py`) -- **except obfuse_aes on 32-bit PE:
-3/5** (delta and echo missing; a known gap). size-lto/speed-lto were measured on ELF only; FLOSS /
+(stripped and not), and i686 glibc (`tests/test_32bit.py`). obfuse_aes on 32-bit PE was 3/5 until
+VALIDATION §73 (a software-AES callee cut off by the emulator's budget); 5/5 since, measured on
+rustc 1.99.1 builds. size-lto/speed-lto were measured on ELF only; FLOSS /
 dynamic recovery (`n/m`) not run on them. obfuse's default features name
 `aes-256-gcm`, but with `polymorphic` on (the default) the macro never calls the AEAD -- the default
 binary holds no AES instruction; `obfuse_aes` is the crate's real AES-256-GCM path (AES-NI on
@@ -806,7 +807,8 @@ This is research code, not a finished product. The ones that matter most:
 - **Precision is good, not perfect**: 29 false positives on a 21-binary C/C++, Go and Rust corpus.
 - **32-bit PE** is emulated since the 2026-10 round: stdcall imports pop their arguments, function
   starts come from `.eh_frame`, and the canary benchmark (release, stripped and not) recovers every
-  string on i686-pc-windows-gnu builds (`build_all.sh FORMATS=pe32`) except obfuse_aes (3/5); the
+  string on i686-pc-windows-gnu builds (`build_all.sh FORMATS=pe32`), obfuse_aes included since
+  VALIDATION §73 (measured on rustc 1.99.1 builds); the
   scatter suites / LTO profiles are not measured there yet. Library-function identification on
   32-bit PE is measured per-binary only (`gen_sigdb`), not with the bundled DB.
 - **Runtime-keyed configs** (custom-key cryptify, KrustyLoader's cfb-mode config) need dynamic

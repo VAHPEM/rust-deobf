@@ -280,21 +280,35 @@ def test_random_key_cipher_state_is_not_reported():
 def test_software_cipher_gets_bounded_extra_budget():
     # the `aes` crate's software AES-256-GCM (AArch64, no AES instructions): ~26k instructions per
     # string, its callees 13-56 instructions per basic block. A callee that dense keeps going (up
-    # to 8 half-budgets); a sparse one (a spinning lock: short blocks) is still cut off at 4, and
-    # only while it writes text.
+    # to DENSE_EXT half-budgets: 16 since x86-64 / i386 software AES-256-GCM callees were measured
+    # to need up to 12); a sparse one (a spinning lock: short blocks) is still cut off at 4, and
+    # only while it writes text. The bound is pinned: raising it again must change this test.
     img, emu = _emu("ct64")
     emu._reset()
     emu.count, emu.nblocks, emu.last_text_at = 50000, 1000, -R.BUDGET
     dense = {"c0": 10000, "b0": 0, "start": 10000}            # 40000 instructions in 1000 blocks
     sparse = {"c0": 10000, "b0": 0, "start": 10000}
     assert emu._dense(dense) and emu._dense()                  # 40 per block; the run: 50
-    assert [emu._extend(dense) for _ in range(9)] == [True] * 8 + [False]
+    assert R.DENSE_EXT == 16
+    assert [emu._extend(dense) for _ in range(17)] == [True] * 16 + [False]
     emu.nblocks = 10000                                        # 4 per block
     assert not emu._dense(sparse) and not emu._dense()
     assert not emu._extend(sparse)                             # no recent text either
     emu.last_text_at = emu.count - 100
     assert [emu._extend(sparse) for _ in range(5)] == [True] * 4 + [False]
 
+
+
+def test_dense_callee_gets_the_extensions_x86_software_aes_needs():
+    # obfuse_aes built by rustc 1.99.1: Unicorn reports no AES-NI, so the `aes` crate runs software
+    # AES-256-GCM. Its callees (38 instructions per block) needed up to 12 half-budget extensions on
+    # x86-64 (11 on i386); cut at 8 they returned 0, the GCM tag failed, the program panicked
+    # (`ObfuseStr decryption failed`) and only 2/5 canaries came out (measured on the Kali VM).
+    img, emu = _emu("ct64")
+    emu._reset()
+    emu.count, emu.nblocks, emu.last_text_at = 50000, 1000, -R.BUDGET
+    callee = {"c0": 8000, "b0": 0, "start": 8000}               # 42000 instructions, 42 per block
+    assert all(emu._extend(callee) for _ in range(12))
 
 def test_i386_vsyscall_pointer_points_at_int80_ret():
     # i386 libcs make system calls through `call *%gs:0x10`; zero there made every syscall of a
