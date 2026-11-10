@@ -18,6 +18,9 @@
 # $BUILD_DIR/build_logs/<proj>__<fmt>__<profile>.log (the tail is printed on failure).
 set -u
 ROOT="$(cd "$(dirname "$0")/.."; pwd)"
+# the interpreter for the manifest reads: $PYTHON (as check.sh), else python3, else python -- a
+# python.org install on Windows (Git Bash) has no python3 (measured, 2026-11)
+PY="${PYTHON:-$(command -v python3 || command -v python || echo python3)}"
 SRC="$ROOT/bench_src"; OUT="${BUILD_DIR:-$ROOT/build}"; mkdir -p "$OUT"
 LOGS="$OUT/build_logs"; mkdir -p "$LOGS"
 failures=()
@@ -81,7 +84,7 @@ for proj in $projects; do
   pdir="$SRC/$proj"; [ -f "$pdir/Cargo.toml" ] || continue
   # per-project build env (e.g. litcrypt/cryptify fixed key) and suite
   env_line=""; suite=""
-  read -r env_line suite < <(python3 -c "
+  read -r env_line suite < <("$PY" -c "
 import json,sys;v=json.load(open(sys.argv[1]))['variants'].get(sys.argv[2],{})
 e=v.get('env');print((f'{e[0]}={e[1]}' if e else '-'), v.get('suite','canary'))" "$SRC/manifest.json" "$proj")
   if [ -z "$suite" ]; then fail "$proj (cannot read bench_src/manifest.json)"; continue; fi
