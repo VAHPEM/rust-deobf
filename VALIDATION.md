@@ -2885,3 +2885,68 @@ Found on the way, NOT fixed (separate bugs):
 - `test_2026_crates_by_emulation[obfuse_aes-{elf,pe}-*]` fails on Kali's rustc 1.99.1 builds,
   identically before and after these fixes: only bravo plus a 32-byte cut of alpha is recovered.
   CI's rustc passes it.
+
+## 73. The three follow-ups of §72: Go 1.21/1.22, Go 1.26, obfuse_aes on rustc 1.99.1 (Nov 2026)
+
+All measured on the ARM64 Kali VM, with the same setup as §72. The Go programs were cross-built
+for amd64 in a native arm64 container (Ubuntu `golang-1.21..1.26-go`, `x86_64-linux-gnu-gcc` for
+cgo) and analysed natively. The benchmark was built with rustc 1.99.1 for elf, pe, pe32 and
+elf-arm64.
+
+| issue | before | after |
+|---|---|---|
+| Go 1.21 / 1.22: benign program, cgo and not | `anti-debug` (`ptrace`) | `[]` |
+| Go 1.26: benign program, cgo and not | `cpuid probe`, `timing-check (rdtsc)`, 39 direct syscalls | `[]` |
+| obfuse_aes elf / pe x86-64, strip + nostrip | 2/5 (bravo + alpha cut at 32 bytes) | 5/5 |
+| obfuse_aes pe32 (the xfail), strip + nostrip | 3/5 | 5/5, xfail removed |
+
+1. **Go 1.21 / 1.22 (recover_antianalysis).** Go packs its string data with no separator. The
+   runtime's `... wrong P` sits right before `trace: out of memory`, so the file reads ` Ptrace:`,
+   and the space and colon around it passed the neighbour check. Fix: in a Go binary, a key of an
+   API category (anti-debug, timing) only counts as a name: NUL / buffer edge on both sides, or
+   `pkg.` before it.
+2. **Go 1.26 (recover_go).** The pclntab header's textStart is 0 even in a static non-PIE binary.
+   Every function entry therefore came out as an offset (0..0xdf780) rather than a VA (0x401000..),
+   and the Go-runtime filter matched no instruction. Fix: with no relocation to take, use the
+   `runtime.text` symbol, else the text section's start -- only when every entry then fits.
+3. **obfuse_aes (recover_emulate).** Unicorn's CPUID reports no AES-NI or PCLMUL, so the `aes`
+   crate runs its software path on x86 too. Its dense AES/GHASH callees (38 instructions per block)
+   need up to 12 half-budget extensions on x86-64 and 11 on i386, but the cap was 8 (~30k
+   instructions; AArch64's ~26k fit). A cut callee returned 0, the GCM tag failed, and the program
+   panicked (`ObfuseStr decryption failed`) after two blocks. Fix: `DENSE_EXT` = 16 (bounded:
+   <= 54k instructions per dense callee; sparse callees are still cut at 4).
+
+Positive control for 1 (a cgo program calling libc `ptrace(PTRACE_TRACEME)` and checking
+`TracerPid`):
+- Still flagged `anti-debug` on Go 1.22 and 1.26, and `anti-debug-artifact` on 1.22.
+- `tracerpid` was already missed on Go 1.26 before this change, and still is (a recall gap, not
+  fixed).
+
+Old vs new recover_emulate for 3, over every release benchmark binary (176: elf, pe, pe32,
+elf-arm64):
+- Only the 6 obfuse_aes outputs change, each to exactly the 5 canaries.
+- 0 canaries lost elsewhere; no string added.
+- Total time 2283 s -> 2025 s.
+- `tests/test_benchmark.py`: 4 failed / 159 passed / 2 xfailed -> 165 passed.
+- The pe32 xfail is removed. It was measured on rustc 1.99.1 builds only; CI's toolchain has not
+  run it.
+
+Each fix has a regression test that fails on the old code for that reason:
+- Go 1.21/1.22: end to end through `evasion()` on a synthetic Go-shaped ELF carrying the measured
+  bytes.
+- Go 1.26: a synthetic ELF with textStart 0.
+- obfuse_aes: a dense callee needing 12 extensions. The bound test pins `DENSE_EXT == 16`.
+
+`./scripts/check.sh full` after all of them (tree 013188e, `lab_matrix.py`):
+
+| target | result |
+|---|---|
+| macOS 15.5 ARM64 (local, Python 3.12.5) | 0 failed / 696 passed / 63 skipped |
+| ARM64 Kali (native aarch64, Python 3.14.7) | 0 failed / 726 passed / 33 skipped |
+| Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 669 passed / 90 skipped |
+
+x86-64 Linux (CI) not re-run here.
+
+Also in this round (docs, issue #1): the README installs from git until 0.1.0 is on PyPI (never
+released: no tag, PyPI 404 for both names). CLAUDE.md's Releasing section now has the first-release
+step that was missed: a pending trusted publisher for both names, and the `pypi` environment.

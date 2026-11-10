@@ -307,6 +307,10 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   more budget only while running dense straight-line code (`Emulator._dense`, `DENSE` = 16
   instructions/block; normal callees that overrun are <= 11) and a run only while dense or still
   decoding strings at a steady pace (`run_used`) -- all bounded. Don't raise the global budgets.
+  x86 too: Unicorn's CPUID reports no AES-NI/PCLMUL, so x86-64 / i386 builds also run the
+  software path; their dense callees need up to 12 half-budget extensions (rustc 1.99.1), hence
+  `DENSE_EXT` = 16. A cut cipher callee returns 0 -> GCM tag fails -> the program panics: the
+  symptom is the panic message among the strings plus canaries cut at a 16-byte block (§73).
 - **i386 Linux**: libc system calls go through `call *%gs:0x10`; the emulator points it at the
   binary's own `int $0x80; ret` (`Emulator._vsyscall`). Stripped static musl builds need the
   `"x86"` table in `scripts/data/runtime_sigs.json` (from `gen_runtime_sigs.py` on unstripped
@@ -334,7 +338,9 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `gcc-x86-64-linux-gnu` for cgo, `GOTOOLCHAIN=local`). Rust: cargo native, link/strip through
   the amd64 container (a `cc`/`strip` wrapper running `docker run`, same `$HOME`/`/tmp` mounts).
 - **Go binaries differ by Go version** (measured 1.21-1.26, x86-64): what a Go-aware filter sees
-  changes -- CI's Go is 1.23. Test a Go change on several versions, never on one.
+  changes -- CI's Go is 1.23. Test a Go change on several versions, never on one. Go 1.26 writes
+  pclntab textStart = 0 even in non-PIE binaries (recover_go falls back to the text section);
+  Go packs its strings with no separator, so printable neighbours do not bound a token there.
 - **Case-insensitive file-blob matching sees pointers as text:** `KvM\0\0\0\0\0` (pointer 0x4d764b)
   read as `kvm`. A short key in the low bytes of an aligned, otherwise-zero word is a number.
 - **UPX's x86-64 ELF stub ends in an escape hatch** (`syscall; pop rdx; ret` written right after
