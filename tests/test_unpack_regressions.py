@@ -116,6 +116,43 @@ def test_x86_32_in_place_unpacker(tmp_path):
     assert res["unpacked_detected"] is True and res["oep"] == tgt
 
 
+def _hatch_stub(prog_bytes, hatch_bytes):
+    """x86-64: store the 'unpacked program' at TEXT+0x200 and a hatch at TEXT+0x300, push the
+    program's address and a dummy for `pop rdx`, rax = munmap, jump into the hatch -- the shape
+    of UPX's static x86-64 ELF stub (measured: hatch `0f 05 5a c3` right after the text segment)."""
+    _, tva, _ = mkelf(b"\x00" * 0x400)
+    prog, hatch = tva + 0x200, tva + 0x300
+
+    def store(va, chunk):                               # mov dword ptr [va], imm32
+        return b"\xc7\x04\x25" + struct.pack("<I", va) + chunk.ljust(4, b"\x90")
+
+    code = b"".join(store(prog + i, prog_bytes[i:i + 4]) for i in range(0, len(prog_bytes), 4))
+    code += b"".join(store(hatch + i, hatch_bytes[i:i + 4]) for i in range(0, len(hatch_bytes), 4))
+    code += b"\x68" + struct.pack("<I", prog) + b"\x6a\x00"          # push prog; push 0
+    code += b"\xb8\x0b\x00\x00\x00\x31\xff\x31\xf6"                  # eax = munmap; edi = esi = 0
+    jmp_at = tva + len(code)
+    code += b"\xe9" + struct.pack("<i", hatch - (jmp_at + 5))        # jmp hatch
+    return mkelf(code.ljust(0x400, b"\x00"))[0], prog, hatch
+
+
+def test_upx_escape_hatch_is_not_the_oep(tmp_path):
+    # CI run #118 / VALIDATION: UPX on a static glibc x86-64 ELF reported the hatch (syscall; pop
+    # rdx; ret, written right after the text segment) as the OEP; the real entry is where its ret goes
+    elf, prog, hatch = _hatch_stub(b"\x90\x90\x90\xeb\xfe", b"\x0f\x05\x5a\xc3")
+    res = U.recover(_write(tmp_path, "hatch.elf", elf))
+    assert res["stopped"] == "oep" and res["oep"] == prog, (res["stopped"], res["oep"], res["handoffs"])
+    assert res["hatches"] == [hatch]
+    assert res["handoffs"] == [{"va": prog, "in_image": True}]
+
+
+def test_unpacked_entry_starting_with_syscall_is_still_the_oep(tmp_path):
+    # the hatch shape needs the return: unpacked code that makes a system call and goes on (no ret
+    # after the pops) is the program itself
+    elf, prog, hatch = _hatch_stub(b"\x90\x90\x90\xeb\xfe", b"\x0f\x05\x5a\xeb\xfe")
+    res = U.recover(_write(tmp_path, "nohatch.elf", elf))
+    assert res["stopped"] == "oep" and res["oep"] == hatch and res["hatches"] == []
+
+
 def test_write_tracking_memory_is_bounded(tmp_path, monkeypatch):
     # a stub that keeps storing across fresh pages is stopped at the page cap, not left to grow
     monkeypatch.setattr(U, "_MAX_WRITE_PAGES", 64)

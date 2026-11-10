@@ -167,6 +167,8 @@ class _Unpacker:
         self.epoch = 0                   # stage counter: 0 = the stub, +1 at every hand-off
         self.page_epoch = {}             # page -> stage that last wrote it
         self.handoffs = []               # [{va, in_image}] every jump into freshly produced code
+        self.hatches = []                # UPX escape hatches passed through (not hand-offs)
+        self._hatch_span = None          # (lo, hi) of the last hatch: its later blocks are hatch too
         self.oep = None
         self.stopped = "ret"             # ret|oep|exit|budget|timeout|unmapped|write_cap|error|import:<n>
         self.blocks = 0
@@ -309,6 +311,20 @@ class _Unpacker:
                 self.callbacks.append(address)
             return
         in_image = any(lo <= address < hi for lo, hi in self.image_ranges)
+        span = self._hatch_span
+        if span and span[0] <= address < span[1]:
+            self.prev_block = (address, size, None)     # the rest of the hatch (`syscall` ends a block)
+            return
+        hlen = self._is_hatch(address) if in_image else 0
+        if hlen:
+            # the stub's own escape hatch, not the program: its `ret` enters the real entry, which
+            # the CURRENT stage produced -- so no new stage, and the next block counts as a
+            # transition again (prev = stub code)
+            if len(self.hatches) < 16:
+                self.hatches.append(address - BASE)
+            self._hatch_span = (address, address + hlen)
+            self.prev_block = (address, size, None)
+            return
         self.handoffs.append({"va": address - BASE, "in_image": in_image})
         self.epoch += 1
         if in_image:
@@ -329,6 +345,33 @@ class _Unpacker:
         self.fault = address
         uc.emu_stop()
         return False
+
+    def _is_hatch(self, address):
+        """Length of the hatch at `address`, else 0. UPX's ELF "escape hatch": after unpacking, the stub writes a few bytes of code into the
+        slack right after the program's text, jumps there to unmap itself, and the hatch's `ret`
+        enters the real entry point. It is code the stub produced INSIDE the image, so it looked
+        like the OEP. Measured (x86-64 static glibc, UPX 4.2.2): `0f 05 5a c3` = syscall; pop rdx;
+        ret at 0x47e6dd, the end of the text segment; the real entry was 0x401770.
+        Shape: `syscall`, at most 3 `pop`s, `ret` -- a program's entry point never starts with a
+        system call followed by a return. x86-64 only: the AArch64 UPX path reaches the right
+        entry without this (VALIDATION section 61), and no i386 / AArch64 hatch has been measured."""
+        if self.arm or self.x32:
+            return 0
+        try:
+            code = bytes(self.uc.mem_read(address, 12))
+        except UcError:
+            return 0
+        if code[:2] != b"\x0f\x05":                              # syscall
+            return 0
+        i = 2
+        for _ in range(3):
+            if 0x58 <= code[i] <= 0x5f:                         # pop rax..rdi
+                i += 1
+            elif code[i] == 0x41 and 0x58 <= code[i + 1] <= 0x5f:  # pop r8..r15
+                i += 2
+            else:
+                break
+        return i + 1 if code[i] == 0xc3 else 0                  # ret -> the hatch's length
 
     def _called_from(self, ret_site):
         """Was the current block entered by a call whose return address is `ret_site`?"""
@@ -771,6 +814,7 @@ def recover(path, entry=None, follow=False) -> dict:
         "self_patches": [a - BASE for a in up.self_patches],
         "callbacks": [a - BASE for a in up.callbacks],
         "handoffs": up.handoffs,
+        "hatches": up.hatches,
         "_regions": regions,            # kept for --dump; stripped by --json
     }
 
