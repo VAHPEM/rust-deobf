@@ -91,7 +91,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_apihash.py` | resolve hash-obfuscated API imports (Tier 2) |
 | `recover_imports.py` | PE import reconstruction: IAT map + bind indirect call sites to API names; flag runtime resolution (post-unpack) |
 | `recover_crypto.py` | identify crypto primitives by their constants |
-| `recover_cfg.py` | resolved call graph + code-coverage metric (`_import_sites`/`_indirect`); x86/x86-64/AArch64, PLT/`.plt.sec`/IAT stubs + tail calls resolved, recursive-descent start seeding when metadata has none (stripped PE32) |
+| `recover_cfg.py` | resolved call graph + code-coverage metric (`_import_sites`/`_indirect`); x86/x86-64/AArch64, PLT/`.plt.sec`/IAT/Mach-O `__stubs` stubs + tail calls resolved, recursive-descent start seeding when metadata has none (stripped PE32) |
 | `recover_behavior.py` | per-function behavior/capability map from imports |
 | `recover_lang.py` | per-function source-language map (mixed-language binaries) |
 | `detect_vm.py` | flag functions hidden behind a bytecode VM |
@@ -201,6 +201,10 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `spawn`), and an open `NamedTemporaryFile` cannot be reopened.
 - `tests/test_dump_unpacked_dynamic.py` EXECUTES the benign UPX fixture: opt-in only
   (`RUST_DEOBF_DYNAMIC=1`, frida, Windows), run it on the Windows VM.
+- **CI `native` job** runs `check.sh full` on ubuntu-24.04-arm, windows-latest, macos-latest (ARM64)
+  and macos-15-intel; windows-11-arm is a `continue-on-error` canary (green = win_arm64 wheels exist).
+  The real lab: `scripts/lab_matrix.py` (local + Kali + Windows x64 Python, one snapshot, one table).
+  The Windows VM's x64 Python is dualvm's `WIN_PYTHON_EXE`; Git Bash is installed there (2026-11).
 
 ## Gotchas (each cost a debugging round once — don't repeat them)
 - **PE addresses are RVAs** everywhere in this toolkit (LIEF section VAs, function starts, results);
@@ -317,6 +321,12 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `__initenv`) is bound to one, and a store through it -- or a C-runtime model writing through a
   fake pointer -- corrupted the `ret` stubs for every later run. Unicorn's `uc.mem_write` ignores
   page protection AND does not invalidate translated blocks (use `ctl_remove_cache`).
+- **Windows-on-ARM: `platform.machine()` is the HOST CPU** (ARM64 even for an x64 python.exe, Python
+  3.14 measured); the interpreter's architecture is `sysconfig.get_platform()` (`win-amd64`).
+- **macOS arm64 (native tests build Mach-O with the host compiler):** libc++ sets bit 63 of
+  `type_info.__name` for non-unique RTTI (recover_types masks it); a `__stubs` entry loads its GOT
+  slot into x16, not x17 like an ELF PLT (recover_cfg accepts both); the temp dir is `/var` ->
+  `/private/var`, so compare paths only after resolving BOTH sides.
 
 ## Maintenance: a new rustc release does NOT mean a rewrite
 Rust ships a stable release every 6 weeks, but that is a *release* cadence, not an *architecture*

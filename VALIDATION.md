@@ -2781,3 +2781,40 @@ What only the real targets exposed, all fixed:
 - rustc 1.99.1 on the ARM64 VM inlines a bare top-level future into the executor (§64) and, on
   native AArch64, a boxed future into its caller's poll; recover_async still recovers every state
   machine that exists, and the tests now accept the compiler's choice.
+
+## 71. Native-host matrix with `lab_matrix.py`; macOS and Windows fixes (Nov 2026)
+
+`scripts/lab_matrix.py` now runs the fast CI subset (`./scripts/check.sh full`) on the lab from one
+snapshot of the working tree: this Mac directly, ARM64 Kali and the Windows 11 ARM64 VM (x64 Python)
+as dualvm background jobs with a tree-killing timeout. A target it cannot run is reported NOT
+MEASURED with the reason. Tree `457f1f4` + the `build_all.sh` fix below, 2026-11-10:
+
+| target | result |
+|---|---|
+| macOS 15.5 ARM64 (local, Python 3.12.5) | 0 failed / 685 passed / 63 skipped |
+| ARM64 Kali (native aarch64, Python 3.14.7) | 0 failed / 715 passed / 33 skipped |
+| Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 658 passed / 90 skipped |
+
+The Windows row is a re-run after the `build_all.sh` fix; the first run of the same tree had 1
+failed / 657 passed. macOS is a new target for this table: before the fixes below it had 4 failed.
+The CI `native` job (ubuntu-24.04-arm, windows-latest, macos-latest, macos-15-intel, windows-11-arm
+canary) has not run yet.
+
+What the native hosts exposed, all fixed:
+- `cli.py run_script` compared a resolved module path with an unresolved one. macOS's temp dir is
+  `/var` -> `/private/var`, so every module looked shadowed and `cli.py --selftest` failed (2 tests).
+- `recover_types`: libc++ on Apple arm64 sets bit 63 of `type_info.__name` for non-unique RTTI
+  (measured `0x8000000100000675` for `6Animal`), so no C++ vtable was recovered from a macOS build.
+  Bit 63 is now cleared on 64-bit targets.
+- `recover_cfg`: a Mach-O `__stubs` entry loads its GOT slot into x16 (an ELF PLT uses x17), so no
+  import call site was bound and `recover_behavior` reported no capability. Both forms are decoded.
+- `build_all.sh` hard-coded `python3`. A python.org install on Windows has none, so under Git Bash
+  the script failed before cargo ran. It now uses `$PYTHON`, then `python3`, then `python`.
+- Lab harness, not toolkit: dualvm's Windows `job_start` was killed ~1 s after the SSH call
+  returned, and its one-line `%errorlevel%` logged every exit code as 0. It now starts jobs through
+  WMI with a launcher that logs the real exit code (dual-vm-ai-agent). On Windows-on-ARM
+  `platform.machine()` reports ARM64 even for x64 Python, so `lab_matrix` checks the interpreter
+  with `sysconfig.get_platform()`.
+
+Lab changes for this round: Git for Windows (bash) and `pyelftools` / `pyyaml` were installed on
+the Windows VM. Its earlier rows ran pytest directly with check.sh's arguments.
