@@ -151,3 +151,36 @@ def test_real_anti_debug_still_flagged(tmp_path):
     e = A.evasion(out)
     assert "anti-debug" in e["techniques"] and "timing-check (rdtsc)" in e["techniques"], e
     assert e["evasion_apis"]["anti-debug"] == ["ptrace"]
+
+
+def test_go_packed_strings_do_not_make_an_api_name():
+    # Go 1.21 / 1.22 (amd64, the benign program of test_benign_go_not_flagged): the runtime's string
+    # data packs `... wrong P` and `trace: out of memory` with no separator. Bytes as measured:
+    packed = b"treflect.makeFuncStubdodeltimer0: wrong Ptrace: out of memoryinvalid r".lower()
+    assert not A._blob_hits(packed, "ptrace", True, 8, api=True)
+    # a NAME still counts in a Go binary: a C string (cgo .dynstr) or the sample's own symbol
+    assert A._blob_hits(b"\x00ptrace\x00", "ptrace", True, 8, api=True)
+    assert A._blob_hits(b"\x00main.ptrace\x00", "ptrace", True, 8, api=True)
+    assert not A._blob_hits(b"\x00syscall.ptrace\x00", "ptrace", True, 8, api=True)   # Go std
+    # outside Go, and for non-API keys, the neighbour rules are unchanged
+    assert A._blob_hits(packed, "ptrace", False, 8, api=True)
+    assert A._blob_hits(b"open /proc/self/status: x", "/proc/self/status", True, 8, api=False)
+
+
+
+def test_go_binary_with_packed_runtime_strings_not_anti_debug(tmp_path):
+    # end to end through evasion(): a synthetic ELF that recover_go takes for Go (pclntab + version
+    # string) carrying the Go 1.22 runtime bytes as measured. Before the fix: anti-debug (ptrace).
+    import sys
+    sys.path.insert(0, str(ROOT / "tests"))
+    import recover_go as GO
+    from _mkelf import mkelf
+    _, tva, _ = mkelf(b"")
+    tab = GO._build_pclntab([(i * 0x10, f"runtime.f{i}") for i in range(16)], text_start=tva)
+    packed = b"treflect.makeFuncStubdodeltimer0: wrong Ptrace: out of memoryinvalid r"
+    elf, _, _ = mkelf(tab + b"\x00" * 16 + packed + b"\x00go1.22.2\x00" + b"\x00" * 32)
+    p = tmp_path / "go122.elf"
+    p.write_bytes(elf)
+    e = A.evasion(p)
+    assert e["go_runtime_filtered"]
+    assert "anti-debug" not in e["evasion_apis"] and "anti-debug" not in e["techniques"], e

@@ -103,12 +103,16 @@ def _count_insns(img, skip=None):
     return counts
 
 
-def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8) -> bool:
+def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8, api: bool = False) -> bool:
     """Does `key` occur in the (lower-cased) file bytes as a string of its own -- not inside a longer
     identifier (`httptrace`, `runtime.ptraceState`), not as 4 chance bytes in compressed / random data
     (neighbours must be NUL, printable or the buffer edge), not as the low bytes of an aligned
     integer / pointer, and, in a Go binary, not as a Go standard-library symbol (`syscall.ptrace`)?
-    `word` is the binary's pointer size (the alignment of such integers; file offsets keep it)."""
+    `word` is the binary's pointer size (the alignment of such integers; file offsets keep it).
+    `api`: the key is an API name; in a Go binary it must then stand as a NAME (NUL / edge on both
+    sides, or `pkg.` before it) -- Go packs its strings with no separator, so printable neighbours
+    prove nothing there (measured, Go 1.21 / 1.22: `wrong P` + `trace: out of memory` reads as
+    ` Ptrace:`)."""
     k = key.encode()
     i = blob.find(k)
     seen = 0
@@ -133,6 +137,8 @@ def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8) -> bool:
         if ok and len(k) <= word // 2 and i % word == 0 and i + word <= len(blob) \
                 and not blob[hi:i + word].strip(b"\0"):
             ok = False
+        if ok and go and api and not (left in (0, 0x2e) and right == 0):
+            ok = False                                    # Go string table: not a name
         if ok and go and left == 0x2e:                    # `pkg.key` -- whose package?
             j = lo
             while j > 0 and blob[j - 1] in _TOKEN:
@@ -225,7 +231,7 @@ def evasion(path) -> dict:
     for cat, keys in _EVASION_APIS.items():
         api = cat in ("anti-debug", "timing")
         hits = sorted({k.strip() for k in keys
-                       if (api and _name_hits(names, k)) or _blob_hits(blob, k, is_go, word)})
+                       if (api and _name_hits(names, k)) or _blob_hits(blob, k, is_go, word, api)})
         if hits:
             found_apis[cat] = hits
 
