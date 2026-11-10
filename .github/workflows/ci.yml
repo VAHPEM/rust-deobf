@@ -33,6 +33,53 @@ jobs:
           --ignore=tests/test_obf.py --ignore=tests/test_libfuncs.py
           --ignore=tests/test_32bit.py --ignore=tests/test_formats.py
 
+  native:
+    # the same fast subset (`./scripts/check.sh full` -- its ignore list is the one
+    # tests/test_docs_current.py keeps equal to the selftest job's) on native hosts other than
+    # x86-64 Linux, so the toolkit itself is tested where it runs, not only on ubuntu-latest.
+    # No Rust toolchain: nothing here builds the benchmark. Committed benign fixtures only; the
+    # one test that executes a sample stays off (RUST_DEOBF_DYNAMIC is not set).
+    # windows-11-arm is a canary (continue-on-error): unicorn and capstone<6 ship no win_arm64
+    # wheels yet, so it is expected to fail at `pip install`; the day it goes green, they do.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+          - os: windows-latest
+          - os: macos-latest        # ARM64
+          - os: macos-15-intel      # x86-64
+          - os: windows-11-arm
+            canary: true
+            arch: arm64             # native ARM64 Python, not x64 under emulation (that has wheels)
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.canary == true }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash               # check.sh is bash; Git Bash on the Windows runners
+    env:
+      PYTHON: python              # check.sh's interpreter; `python3` is not reliable on Windows
+    steps:
+      # Windows runners default to core.autocrlf=true; with no .gitattributes that checks out
+      # check.sh (and the text fixtures) with CRLF and bash dies on `set -o pipefail\r` -- a
+      # checkout artifact, not a toolkit result. Check out the bytes as committed.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.arch }}   # empty = the runner's native arch
+      - name: Interpreter (the canary must be native ARM64 to mean anything)
+        run: |
+          python -c "import platform, sys; print(sys.version); print(platform.machine())"
+          if [ "${{ matrix.canary }}" = "true" ]; then
+            python -c "import platform, sys; sys.exit(platform.machine() != 'ARM64')"
+          fi
+      - run: python -m pip install -r requirements.txt pytest
+      - name: Fast subset (check.sh full) on a native host
+        run: ./scripts/check.sh full
+
   packaging:
     # `pip install rust-deobf` must keep working: build both distributions (rust-deobf and
     # rust-deobf-premium), install the wheels into a fresh venv and run them from outside the
