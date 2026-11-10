@@ -279,11 +279,23 @@ host), the Anthropic or OpenAI API, or prints the grounded prompt for offline us
 
 ### Install
 
+> **Not on PyPI yet.** Version 0.1.0 has not been published (no release has been tagged), so
+> `pip install rust-deobf` fails today ([issue #1](https://github.com/VAHPEM/rust-deobf/issues/1)).
+> Until it is, install from git:
+
 ```bash
-pipx install rust-deobf                    # isolated CLI install (recommended), or:
-python3 -m pip install rust-deobf          # into the current environment / venv
+python3 -m pip install git+https://github.com/VAHPEM/rust-deobf      # the core, into a venv
+# premium modules: install the premium distribution from its subdirectory
+python3 -m pip install "git+https://github.com/VAHPEM/rust-deobf#subdirectory=premium"
 rust-deobf doctor                          # checks Python, dependencies, platform, optional tools
 ```
+
+- The `[premium]` extra does **not** work from git yet: `pip install "rust-deobf[premium] @ git+…"`
+  resolves `rust-deobf-premium==0.1.0` on PyPI, which does not exist. Use `#subdirectory=premium`
+  as above.
+- pipx takes the same URL for the core (`pipx install git+https://github.com/VAHPEM/rust-deobf`);
+  not tested here.
+- From a clone: see [From source](#from-source-clone-and-run-or-develop) below.
 
 Python 3.10+ on Linux, macOS and Windows (x86-64 and ARM64). One command, `rust-deobf`, runs
 every tool: `rust-deobf list` shows them all, `rust-deobf <tool> --help` its options, and each
@@ -294,6 +306,15 @@ rust-deobf recover path/to/binary          # static + emulation (default), never
 rust-deobf triage  path/to/binary          # one-screen triage card (soc_triage)
 rust-deobf recover path/to/binary --json   # machine-readable, for agents and pipelines
 rust-deobf mcp                             # MCP server over stdio
+```
+
+#### From PyPI (once 0.1.0 is released)
+
+None of this works until the first release is on PyPI; it is kept for that release.
+
+```bash
+pipx install rust-deobf                    # isolated CLI install (recommended), or:
+python3 -m pip install rust-deobf          # into the current environment / venv
 ```
 
 | | pip | pipx |

@@ -131,7 +131,7 @@ def _win_arm64_native() -> bool:
 
 WIN_ARM64_NOTE = ("Windows ARM64 *native* Python cannot run rust-deobf: unicorn and capstone<6 "
                   "publish no win_arm64 wheels. Install the x64 build of Python (it runs under "
-                  "Windows-on-ARM emulation) and `pip install rust-deobf` into it.")
+                  "Windows-on-ARM emulation) and install rust-deobf into it (README: Install).")
 
 
 # ---------------------------------------------------------------------------------------------

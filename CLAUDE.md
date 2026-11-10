@@ -359,6 +359,11 @@ it survives idiom drift and backs up the brittle pattern matchers.
   not recovery.
 
 ## Releasing (PyPI)
+**Status (2026-11-10): never released.** No `v*` tag has been pushed, so `release.yml` has never
+run, and pypi.org returns 404 for `rust-deobf`, `rust_deobf` and `rust-deobf-premium` (issue #1:
+the README's `pip install rust-deobf` failed). Until the first release the README installs from
+git (`git+https://github.com/VAHPEM/rust-deobf`, premium via `#subdirectory=premium`; the
+`[premium]` extra cannot resolve `rust-deobf-premium==X` before it is on PyPI).
 One-time PyPI setup (maintainer): on pypi.org create a **pending trusted publisher** for each of the
 two projects, `rust-deobf` and `rust-deobf-premium` (Account → Publishing → "Add a new pending
 publisher": owner `VAHPEM`, repository `rust-deobf`, workflow `release.yml`, environment `pypi`);
@@ -367,6 +372,10 @@ the first release then creates both projects. In GitHub → Settings → Environ
 Optional dry run: the same publisher on test.pypi.org with `repository-url:
 https://test.pypi.org/legacy/` on the publish step.
 Each release:
+0. **first release only, before tagging** (the step that was missed): on pypi.org a *pending*
+   trusted publisher exists for BOTH distribution names, `rust-deobf` and `rust-deobf-premium` --
+   Trusted Publishing cannot create a new project without one, so the upload fails -- and the
+   GitHub environment `pypi` exists (the workflow's publish job names it);
 1. bump `scripts/_version.py` (SemVer; pre-1.0 a minor bump may change `--json`/flags);
 2. move `CHANGELOG.md`'s `[Unreleased]` items into `## [X.Y.Z] - date`, update the link refs;
 3. `./scripts/check.sh full` + `RUST_DEOBF_PACKAGING=1 python3 -m pytest tests/test_packaging.py`;
@@ -374,6 +383,9 @@ Each release:
    workflow refuses otherwise) and the workflow does the rest. A failure in `build`/`test`
    publishes nothing (delete the tag, fix, re-tag); once uploaded, PyPI never accepts the same
    version again, so fix forward with X.Y.Z+1.
+5. after the FIRST release is on PyPI: put the README's PyPI install back first (its
+   "From PyPI (once 0.1.0 is released)" block) and drop the git-install note; update the
+   Status line above.
 
 ## Git
 - **Author every commit as the maintainer:** `Ve (VAHPEM) <ve0912084386@gmail.com>` — set
