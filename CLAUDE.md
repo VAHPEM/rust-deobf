@@ -340,7 +340,8 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
 - **Go binaries differ by Go version** (measured 1.21-1.26, x86-64): what a Go-aware filter sees
   changes -- CI's Go is 1.23. Test a Go change on several versions, never on one. Go 1.26 writes
   pclntab textStart = 0 even in non-PIE binaries (recover_go falls back to the text section);
-  Go packs its strings with no separator, so printable neighbours do not bound a token there.
+  Go packs its strings with no separator, so printable neighbours do not bound a token there --
+  and identifier neighbours do not end one either (1.26: `archive/zipTracerPid:\t0illegal seek`).
 - **Case-insensitive file-blob matching sees pointers as text:** `KvM\0\0\0\0\0` (pointer 0x4d764b)
   read as `kvm`. A short key in the low bytes of an aligned, otherwise-zero word is a number.
 - **UPX's x86-64 ELF stub ends in an escape hatch** (`syscall; pop rdx; ret` written right after

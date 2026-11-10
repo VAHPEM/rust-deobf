@@ -2950,3 +2950,50 @@ x86-64 Linux (CI) not re-run here.
 Also in this round (docs, issue #1): the README installs from git until 0.1.0 is on PyPI (never
 released: no tag, PyPI 404 for both names). CLAUDE.md's Releasing section now has the first-release
 step that was missed: a pending trusted publisher for both names, and the `pypi` environment.
+
+## 74. The open items of §73: doctor on Windows-on-ARM, TracerPid in Go 1.26, release wording (Nov 2026)
+
+**`rust-deobf doctor` failed the supported Windows setup** (`cc99d7e`). `_win_arm64_native()` keyed
+on `platform.machine()`, which is the host CPU: ARM64 even under the x64 python.exe that README
+recommends on Windows-on-ARM. It now uses the interpreter's `sysconfig.get_platform() ==
+"win-arm64"`. Measured on the Windows 11 ARM64 VM with x64 Python 3.14.7: `doctor` prints
+`win32 / ARM64 (interpreter win-amd64)` and no FAIL. The regression test (x64 interpreter on an
+ARM64 host) fails on the old code. Native ARM64 Python was not run (no such interpreter on the VM).
+
+**A real TracerPid check in Go 1.26 went unreported** (`2ffaca8`). Go packs literals with no
+separator. Go 1.26 stores `archive/zip` + `TracerPid:\t0` + `illegal seek`, and `.../maxnum` +
+`/proc/self/status` + `exec format error`. The identifier-neighbour rule rejected both (and
+`/proc/self/status` on 1.22). In a Go binary these two artifact keys now skip that rule.
+`ptrace_traceme` stays strict: the only Go source string containing it is x/tools' stdlib manifest
+(gopls).
+
+Measured on Kali, amd64 cross-builds (the §73 set):
+
+| binary | before | after |
+|---|---|---|
+| cgo ptrace + TracerPid control, Go 1.22 | `ptrace`, `tracerpid` | + `/proc/self/status` |
+| same, Go 1.26 | `ptrace` only | `ptrace`, `/proc/self/status`, `tracerpid` |
+| 12 benign builds, Go 1.21-1.26 (cgo + nocgo) | clean | clean |
+
+No non-test source file of Go 1.21, 1.23 or 1.26 contains either string, so the change cannot fire
+on a Go program's own runtime or stdlib. Rust and C binaries are untouched (the rule is Go-only).
+
+**Release wording** (`491a44f`). The PyPI badge rendered "package not found", and CHANGELOG
+`[0.1.0]` said "First packaged release" with a date. Now there is a static "not released yet" badge,
+and the CHANGELOG reads "not yet released". CLAUDE.md Releasing step 5 restores both after the first
+release.
+
+**The pe32 xfail removed in §73.** CI's `pe32`/`benchmark` jobs run `rustup update stable`.
+`rustup check` on Kali today reports stable = 1.99.1, the toolchain §73 measured, so the version
+matches. CI links with Ubuntu's mingw-w64 on an x86-64 host instead of Kali's. That combination
+has not been run.
+
+`./scripts/check.sh full` (tree 491a44f, `lab_matrix.py`):
+
+| target | result |
+|---|---|
+| macOS 15.5 ARM64 (local, Python 3.12.5) | 0 failed / 699 passed / 63 skipped |
+| ARM64 Kali (native aarch64, Python 3.14.7) | 0 failed / 729 passed / 33 skipped |
+| Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 672 passed / 90 skipped |
+
+x86-64 Linux (CI) not run here.
