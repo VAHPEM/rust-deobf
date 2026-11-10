@@ -3159,6 +3159,35 @@ def _drop_overlap_artifacts(records):
             if len(x) <= 16 and any(y.endswith(x[:k]) for k in range(6, min(len(x), len(y)))):
                 garbled.add(x)
                 break
+    # the same view, but anchored by WHERE it was captured: inside the buffer of a string the code
+    # used, i.e. reused scratch. There 6 shared characters are enough. Measured on i386 (PE32
+    # tight_xor, 8-byte movq stores into a reused stack buffer): `chema-v` + `9` at echo's start
+    # + 15, `ild-id-` + `9`, `chema-v` + `l` inside delta's buffer -- 7 shared characters, one
+    # short of the content-only rule above.
+    spans = sorted((a, a + len(y)) for y in used for a in addrof.get(y, ()) if len(y) >= 12)
+    span_lo = [lo for lo, _hi in spans]
+    widest = max((hi - lo for lo, hi in spans), default=0)
+
+    def in_used_buffer(a):
+        j = bisect.bisect_left(span_lo, a) - 1          # starts strictly before a
+        while j >= 0 and a - span_lo[j] < widest:
+            if a < spans[j][1]:
+                return True
+            j -= 1
+        return False
+
+    for x in texts - used - exact - garbled:
+        if len(x) < 7 or not any(in_used_buffer(a) for a in addrof.get(x, ())):
+            continue
+        for y in used:
+            if len(y) < 12 or x == y:
+                continue
+            m = len(x) - 1
+            while m >= 6 and y.find(x[:m], 1) < 0:
+                m -= 1
+            if m >= 6 and 0 < len(x) - m <= 3:
+                garbled.add(x)
+                break
     # a reversed view: a piece of a used string backwards (`ffo-yrtemelet-galf-e` from
     # `...feature-flag-telemetry-off`), a decode's intermediate state written in reverse order
     used_pool = "\0".join(sorted(used))

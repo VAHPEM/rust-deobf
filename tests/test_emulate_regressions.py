@@ -445,3 +445,48 @@ def test_i386_decoder_features():
                read=lambda va, n: cipher[:n] if va == 0xa3175 else b"\x00" * n)
     imm64, xors, ct, callees = R._features(img, 0x1000, len(code))
     assert (imm64, ct) == (1, 1), (imm64, ct)
+
+
+# CI run #118, test_tight_strings_by_emulation[pe32-*]: the records recover_emulate produced for
+# tight_xor__pe32__release__nostrip.exe (i686-pc-windows-gnu, rustc 1.99.1), as measured on the
+# ARM64 Kali VM. The decode writes 8-byte movq stores into a reused stack buffer; three views of
+# it -- 7 characters of a canary plus one byte -- were reported as strings.
+_PE32_TIGHT = [
+    ("canary::bravo::build-id-20261018", 6304, [805306368, 805306480, 805307568, 3222273940, 3222273980], True),
+    ("canary::alpha::7f3c-config-endpoint", 5536, [805306368, 805306480, 3222273821, 3222273917, 3222273965], True),
+    ("canary::charlie::/opt/app/resources/data.bin", 5536, [805306368, 805306480, 805307664, 3222273928, 3222273968], True),
+    ("canary::delta::feature-flag-telemetry-off", 5536, [805306368, 805306480, 805307776, 3222273863, 3222273911], True),
+    ("canary::echo::schema-version-4", 5536, [805306368, 805306480, 805307888, 3222273942, 3222273982], True),
+    ("chema-v9", 5536, [3222273957], False),
+    ("chema-vl", 5536, [3222273889], False),
+    ("ild-id-9", 5536, [3222273957], False),
+]
+
+
+def _records(rows):
+    out = []
+    for s, fn, addr, used in rows:
+        r = {"string": s, "function": fn, "method": "emulation", "addr": addr}
+        if used:
+            r["used"] = True
+        out.append(r)
+    return out
+
+
+def test_pe32_store_views_inside_a_used_buffer_are_dropped():
+    kept = [r["string"] for r in R._drop_overlap_artifacts(_records(_PE32_TIGHT))]
+    assert sorted(kept) == sorted(s for s, _f, _a, used in _PE32_TIGHT if used), kept
+
+
+def test_same_views_outside_any_used_buffer_are_kept():
+    # the address is the evidence: the same text captured in memory no used string occupied is
+    # left to the other rules (which keep it), so a separate short string is not lost
+    rows = [(s, f, a if used else [0x50000000 + 64 * i], used) for i, (s, f, a, used) in enumerate(_PE32_TIGHT)]
+    kept = {r["string"] for r in R._drop_overlap_artifacts(_records(rows))}
+    assert {"chema-v9", "chema-vl", "ild-id-9"} <= kept, kept
+
+
+def test_a_used_string_inside_a_used_buffer_is_never_dropped():
+    rows = [(s, f, a, used or s == "chema-v9") for s, f, a, used in _PE32_TIGHT]
+    kept = {r["string"] for r in R._drop_overlap_artifacts(_records(rows))}
+    assert "chema-v9" in kept
