@@ -184,3 +184,25 @@ def test_go_binary_with_packed_runtime_strings_not_anti_debug(tmp_path):
     e = A.evasion(p)
     assert e["go_runtime_filtered"]
     assert "anti-debug" not in e["evasion_apis"] and "anti-debug" not in e["techniques"], e
+
+
+def test_go_packed_tracerpid_check_is_found(tmp_path):
+    # Go 1.26 (measured, cgo amd64): the program's `TracerPid:\t0` and "/proc/self/status" literals
+    # sit between other strings with no separator (`archive/zip` before, `exec format error` after);
+    # the identifier-neighbour rule rejected both, so the check went unreported
+    import sys
+    sys.path.insert(0, str(ROOT / "tests"))
+    import recover_go as GO
+    from _mkelf import mkelf
+    _, tva, _ = mkelf(b"")
+    tab = GO._build_pclntab([(i * 0x10, f"runtime.f{i}") for i in range(16)], text_start=tva)
+    packed = (b"crypto/x509archive/zipTracerPid:\t0illegal seekinvalid s"
+              b"randhttpcookiemaxnum/proc/self/statusexec format errorpermission")
+    elf, _, _ = mkelf(tab + b"\x00" * 16 + packed + b"\x00go1.26.0\x00" + b"\x00" * 32)
+    p = tmp_path / "go126.elf"
+    p.write_bytes(elf)
+    e = A.evasion(p)
+    assert e["go_runtime_filtered"]
+    assert e["evasion_apis"].get("anti-debug-artifact") == ["/proc/self/status", "tracerpid"], e
+    # ... while the same packing still proves nothing for an identifier-shaped API name
+    assert "anti-debug" not in e["evasion_apis"], e

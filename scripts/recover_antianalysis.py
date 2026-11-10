@@ -49,6 +49,10 @@ _EVASION_APIS = {
                    "sbiedll", "sandboxie", "cuckoo", "/sys/class/dmi", "/proc/scsi/scsi"),
     "anti-debug-artifact": ("tracerpid", "/proc/self/status", "ptrace_traceme"),
 }
+# artifact strings matched without the identifier-neighbour rule in a Go binary (packed strings);
+# not `ptrace_traceme`: the only Go-source string with it is x/tools' stdlib manifest (gopls), and
+# `TracerPid` / `/proc/self/status` occur in no non-test Go 1.21-1.26 source (measured)
+_GO_GLUED = ("tracerpid", "/proc/self/status")
 # How much a category says on its own. Timing APIs are in nearly every program (any clock read), so
 # they are reported as a low signal and do not make a "technique" by themselves.
 _WEIGHT = {"anti-debug": "high", "anti-debug-artifact": "high", "sandbox/vm": "medium", "timing": "low"}
@@ -103,7 +107,8 @@ def _count_insns(img, skip=None):
     return counts
 
 
-def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8, api: bool = False) -> bool:
+def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8, api: bool = False,
+               glued: bool = False) -> bool:
     """Does `key` occur in the (lower-cased) file bytes as a string of its own -- not inside a longer
     identifier (`httptrace`, `runtime.ptraceState`), not as 4 chance bytes in compressed / random data
     (neighbours must be NUL, printable or the buffer edge), not as the low bytes of an aligned
@@ -112,7 +117,10 @@ def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8, api: bool = False
     `api`: the key is an API name; in a Go binary it must then stand as a NAME (NUL / edge on both
     sides, or `pkg.` before it) -- Go packs its strings with no separator, so printable neighbours
     prove nothing there (measured, Go 1.21 / 1.22: `wrong P` + `trace: out of memory` reads as
-    ` Ptrace:`)."""
+    ` Ptrace:`).
+    `glued`: the key is a distinctive artifact string (a path / status-line marker) in a Go binary:
+    an identifier neighbour does not end it there, for the same reason -- measured, Go 1.26 stores
+    `archive/zip` + `TracerPid:\t0` + `illegal seek` and `.../maxnum` + `/proc/self/status` + `exec`."""
     k = key.encode()
     i = blob.find(k)
     seen = 0
@@ -122,9 +130,9 @@ def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8, api: bool = False
         left = blob[lo] if lo >= 0 else 0
         right = blob[hi] if hi < len(blob) else 0
         ok = True
-        if k[0] in _IDENT and left in _IDENT:
+        if not glued and k[0] in _IDENT and left in _IDENT:
             ok = False
-        if k[-1] in _IDENT and right in _IDENT:
+        if not glued and k[-1] in _IDENT and right in _IDENT:
             ok = False
         for c in (left, right):
             if c != 0 and not (0x20 <= c < 0x7f) and c not in (0x09, 0x0a, 0x0d):
@@ -231,7 +239,8 @@ def evasion(path) -> dict:
     for cat, keys in _EVASION_APIS.items():
         api = cat in ("anti-debug", "timing")
         hits = sorted({k.strip() for k in keys
-                       if (api and _name_hits(names, k)) or _blob_hits(blob, k, is_go, word, api)})
+                       if (api and _name_hits(names, k))
+                       or _blob_hits(blob, k, is_go, word, api, is_go and k in _GO_GLUED)})
         if hits:
             found_apis[cat] = hits
 
