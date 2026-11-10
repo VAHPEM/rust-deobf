@@ -781,8 +781,9 @@ def run_matrix(targets, timeout=3600, poll=15, keep=False, pythons=None, dualvm_
                         "__JOB_RC=" not in getattr(t, "last_detail", ""):
                     t.note = "; ".join(filter(None, [
                         "the job ended without its exit marker or a result, i.e. it was killed "
-                        "from outside before the driver finished (on Windows: dualvm's job_start "
-                        "process did not outlive the SSH call that started it)", t.note]))
+                        "from outside before the driver finished (seen on Windows with a dualvm "
+                        "whose job_start used Start-Process: the job died with the SSH call)",
+                        t.note]))
                 results[t.name] = classify(t.name, run_id, res, _decode(log), _decode(junit),
                                            note=t.note)
                 if save:
