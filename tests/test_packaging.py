@@ -179,6 +179,18 @@ def test_cli_selftest_passes():
     assert out.returncode == 0 and "selftest OK" in out.stdout, out.stdout + out.stderr
 
 
+@pytest.mark.parametrize("interp,native", [("win-amd64", False), ("win-arm64", True)])
+def test_win_arm64_check_uses_interpreter_arch(monkeypatch, interp, native):
+    # Windows-on-ARM: platform.machine() is the HOST CPU (ARM64 even under x64 python.exe), so
+    # keying on it made `doctor` FAIL the very setup README recommends (x64 Python on ARM64)
+    cli = _cli()
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli.platform, "machine", lambda: "ARM64")
+    import sysconfig                                   # the same module object cli.py imports
+    monkeypatch.setattr(sysconfig, "get_platform", lambda: interp)
+    assert cli._win_arm64_native() is native
+
+
 # ------------------------------------------------------------------------- installed-mode tests
 SLOW = bool(os.environ.get("RUST_DEOBF_PACKAGING") or os.environ.get("RUST_DEOBF_WHEEL_DIR"))
 slow = pytest.mark.skipif(not SLOW, reason="installed-mode packaging test: set "

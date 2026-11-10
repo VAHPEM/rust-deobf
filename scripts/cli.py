@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from pathlib import Path
 
@@ -126,7 +127,9 @@ def _err(msg: str) -> None:
 
 
 def _win_arm64_native() -> bool:
-    return sys.platform == "win32" and platform.machine().upper() == "ARM64"
+    # the INTERPRETER's architecture: platform.machine() reports the host CPU, i.e. ARM64 even for
+    # the x64 python.exe that README recommends on Windows-on-ARM (measured, Python 3.14)
+    return sys.platform == "win32" and sysconfig.get_platform() == "win-arm64"
 
 
 WIN_ARM64_NOTE = ("Windows ARM64 *native* Python cannot run rust-deobf: unicorn and capstone<6 "
@@ -434,7 +437,8 @@ def doctor_checks(heavy: bool = True):
         f"{platform.python_version()} ({platform.python_implementation()}, "
         f"{8 * __import__('struct').calcsize('P')}-bit) at {sys.executable}"
         + ("" if v >= (3, 10) else " - rust-deobf needs Python >= 3.10"))
-    add(INFO, "platform", f"{sys.platform} / {platform.machine() or '?'} / {platform.platform()}")
+    add(INFO, "platform", f"{sys.platform} / {platform.machine() or '?'} (interpreter "
+        f"{sysconfig.get_platform()}) / {platform.platform()}")
     if _win_arm64_native():
         add(FAIL, "platform", WIN_ARM64_NOTE)
     elif sys.platform == "win32":
