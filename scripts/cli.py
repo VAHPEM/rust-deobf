@@ -270,8 +270,10 @@ def run_script(name: str, path: Path, argv, directories) -> object:
                      "   (or run `rust-deobf doctor`)")
             return 3
         origin = getattr(mod, "__file__", None)
+        # both sides resolved: on macOS the temp dir is /var/... -> /private/var/..., and
+        # comparing a resolved origin with an unresolved path called every module "shadowed"
         if not origin or os.path.normcase(str(Path(origin).resolve())) != \
-                os.path.normcase(str(path)):
+                os.path.normcase(str(Path(path).resolve())):
             _err(f"{name}: the module name {module!r} resolves to {origin or mod!r}, not {path} "
                  "(another module of that name shadows it on sys.path)")
             return 3
