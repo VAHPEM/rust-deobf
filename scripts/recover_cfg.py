@@ -44,7 +44,8 @@ sys.path.insert(0, str(ROOT))
 def _stub_import(img, va, cache):
     """If `va` is an import jump stub (ELF PLT / .plt.sec entry, or a PE `jmp [slot]` thunk), return
     the GOT/IAT slot it jumps through; else None. Static: decodes the stub bytes, no emulation.
-      AArch64:  [bti c] adrp x16, page ; ldr x17, [x16, #off] ; ... br x17
+      AArch64:  [bti c] adrp x16, page ; ldr x17, [x16, #off] ; ... br x17   (ELF PLT)
+                adrp x16, page ; ldr x16, [x16, #off] ; br x16                (Mach-O __stubs)
       x86-64:   [endbr64] [bnd] jmp [rip+disp32]
       x86-32:   jmp [abs32]
     """
@@ -57,8 +58,11 @@ def _stub_import(img, va, cache):
             w = list(struct.unpack("<%dI" % (len(b) // 4), b[:len(b) // 4 * 4]))
             if w and w[0] == 0xd503245f:            # bti c
                 w = w[1:]
+            # ldr x17, [x16, #off] (ELF PLT) or ldr x16, [x16, #off] (Mach-O __stubs: adrp x16;
+            # ldr x16, [x16, #off]; br x16)
             if len(w) >= 2 and (w[0] & 0x9f00001f) == 0x90000010 \
-                    and (w[1] & 0xffc003ff) == (0xf9400000 | (16 << 5) | 17):
+                    and (w[1] & 0xffc003ff) in ((0xf9400000 | (16 << 5) | 17),
+                                                (0xf9400000 | (16 << 5) | 16)):
                 immlo, immhi = (w[0] >> 29) & 3, (w[0] >> 5) & 0x7ffff
                 imm = (immhi << 2) | immlo
                 if imm & (1 << 20):
@@ -486,6 +490,9 @@ def _selftest():
     # adrp to a page BELOW the stub (negative immhi) -- the sign extension matters
     neg = struct.pack("<2I", 0xf0fffff0, 0xf9400211) + b"\0" * 8
     assert _stub_import(_Img(True, False, {0x10000: neg}), 0x10000, {}) == 0x10000 - 0x1000
+    # Mach-O __stubs entry: adrp x16 ; ldr x16, [x16, #off] ; br x16 -> the same slot
+    macho = struct.pack("<3I", 0x900002f0, 0xf9466210, 0xd61f0200)
+    assert _stub_import(_Img(True, False, {0x3d70: macho}), 0x3d70, {}) == 0x5fcc0
     # not a stub (adrp to x0, not x16) -> None
     assert _stub_import(_Img(True, False, {0x3d70: struct.pack("<4I", 0x90000000, 0, 0, 0)}),
                         0x3d70, {}) is None
@@ -522,7 +529,7 @@ def _selftest():
     # a W write invalidates the X register it aliases
     assert _arm_xreg("w5") == "x5" and _arm_xreg("x5") == "x5" and _arm_xreg("wzr") == "wzr"
     print("selftest OK: reachability BFS, address-taken root coverage-lift, dispatch-edge reach, "
-          "branch-immediate parse, PLT/.plt.sec/IAT stub decode (AArch64 + x86)")
+          "branch-immediate parse, PLT/.plt.sec/IAT/Mach-O __stubs decode (AArch64 + x86)")
 
 
 def main(argv=None) -> int:

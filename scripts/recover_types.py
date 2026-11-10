@@ -131,6 +131,16 @@ def demangle_rtti(name: str) -> str:
     return name
 
 
+def _rtti_name_ptr(value, ptr):
+    """type_info.__name as an address. libc++ on Apple arm64 stores it with bit 63 set when the
+    RTTI is not unique (libc++'s "NonUniqueARMRTTIBit" type_info comparison): measured, clang++ on
+    macOS arm64 writes `0x8000000100000675` for `6Animal` at 0x100000675. No user-space pointer
+    on a 64-bit target has bit 63 set, so clearing it is safe for every format."""
+    if value is None or ptr != 8:
+        return value
+    return value & ~(1 << 63)
+
+
 def recover_cpp_vtables(img, read):
     """C++ (Itanium ABI) vtables: `[offset_to_top, typeinfo_ptr, fn0, fn1, ...]`, where the object's
     vptr points at fn0 and typeinfo_ptr -> an RTTI whose name_ptr (second word) is the class name.
@@ -156,7 +166,7 @@ def recover_cpp_vtables(img, read):
                 continue
             if _exec(img, ti) or ti == 0:
                 continue
-            name_ptr = read(ti + ptr)            # type_info.__name
+            name_ptr = _rtti_name_ptr(read(ti + ptr), ptr)    # type_info.__name
             nm = _read_cstr(img, name_ptr)
             if not nm or not (nm[0].isdigit() or nm[0] in "NPKR"):
                 continue
@@ -285,6 +295,10 @@ def _print(res: dict) -> None:
 
 
 def _selftest():
+    # Apple arm64 non-unique RTTI: the type-name pointer carries bit 63 (measured value)
+    assert _rtti_name_ptr(0x8000000100000675, 8) == 0x100000675
+    assert _rtti_name_ptr(0x100000675, 8) == 0x100000675 and _rtti_name_ptr(None, 8) is None
+    assert _rtti_name_ptr(0x80001234, 4) == 0x80001234          # 32-bit: untouched
     # Synthetic resolver test: a hand-built .data.rel.ro-like buffer with one real vtable and
     # several decoys (a run of data pointers; a bad align; size not a multiple of align). Only the
     # real vtable must be recovered. We drive recover()'s inner logic via a tiny fake Image.
