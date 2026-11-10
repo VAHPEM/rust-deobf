@@ -2818,3 +2818,70 @@ What the native hosts exposed, all fixed:
 
 Lab changes for this round: Git for Windows (bash) and `pyelftools` / `pyyaml` were installed on
 the Windows VM. Its earlier rows ran pytest directly with check.sh's arguments.
+
+## 72. CI run #118: four failures that only show where the tools exist (Nov 2026)
+
+CI run #118 (commit 04a9c4a) had 4 real failures. The sandboxes skip all of them (no upx, no go,
+no pe32 build), so each was first reproduced on the lab. Where it was measured:
+- Bugs 1 and 2: x86-64 artifacts built in a `linux/amd64` Ubuntu 24.04 container on the ARM64
+  Kali VM (Docker + qemu) and analysed natively on Kali. Go crashes under qemu-user, so the Go
+  programs were cross-built for amd64 in a native arm64 container (Ubuntu `golang-1.21..1.26-go`,
+  `x86_64-linux-gnu-gcc` for cgo).
+- Bugs 3/4: the benchmark built natively on Kali (rustc 1.99.1) for pe, pe32 and elf-arm64; elf
+  x86-64 compiled natively and linked/stripped in the amd64 container.
+- No real x86-64 Linux host was used; all 4 were still open in the current tree (none fixed by
+  accident).
+
+| bug | test | before | after |
+|---|---|---|---|
+| 1 | `test_benign_go_not_flagged[True]` | Go 1.23 cgo: `['sandbox/vm']` (`kvm`) | Go 1.23 cgo and no-cgo: `[]` |
+| 2 | `test_upx_elf_for_host_arch_reaches_original_entry` (x86-64) | OEP 0x47e6dd | OEP 0x401770 = entry before packing |
+| 3/4 | `test_tight_strings_by_emulation[pe32-*]` | 5 canaries + `chema-v9`, `chema-vl`, `ild-id-9` | exactly the 5 canaries |
+
+1. **recover_antianalysis.** In the Go 1.23 cgo build, `.rodata` holds the pointer 0x4d764b at the
+   8-aligned file offset 0x106888, i.e. the bytes `KvM\0\0\0\0\0`. Blob matching is
+   case-insensitive and treats NUL neighbours as a string boundary, so the pointer read as the key
+   `kvm`. Fix: a key of at most word/2 bytes that fills the low bytes of an aligned word whose other
+   bytes are zero is a number, not text.
+2. **unpack_emulate.** UPX's x86-64 stub writes an escape hatch, `syscall; pop rdx; ret`
+   (0f 05 5a c3), right after the program's text: 0x47e6dd is the end of the text segment. The stub
+   jumps there to unmap itself; the `ret` enters 0x401770. The hatch was the first in-image
+   hand-off, so it was taken as the OEP. Even with `--follow` the real entry was never reported:
+   the hatch counted as a new stage, so returning into the previous stage's code was not a
+   transition. Fix: an in-image block of that exact shape (x86-64 only) is recorded under
+   `hatches`, starts no stage, and the block it returns to is the hand-off. `syscall` ends a
+   Unicorn block, so the whole hatch span is matched. The AArch64 UPX path (§61) is unchanged and
+   still passes. Golden re-dumped: the only change is the new `hatches` key, `[]` on every fixture.
+3. **recover_emulate.** The i386 decode stores 8 bytes at a time (`movq`) into a stack buffer that
+   the next decode reuses. Each junk string is one such store: 7 canary characters plus one byte,
+   captured unused inside a used canary's buffer (`chema-v9` at echo + 15). The existing rule for
+   "piece of a used string + junk" needs 8 shared characters for a short view. Fix: when the
+   capture address lies inside a used string's buffer, 6 shared characters are enough.
+   Old vs new over every release benchmark binary (22 crates, strip + nostrip):
+   - pe / pe32 / elf-arm64 (132 binaries): only the two tight_xor pe32 outputs change, exactly the
+     6 junk strings go, 0 canaries lost, nothing added.
+   - elf x86-64 (44 binaries): no change.
+   - `tests/test_benchmark.py` on Kali: 157 -> 159 passed.
+
+Each fix has a regression test (bug 2: a synthetic UPX-shaped stub via `tests/_mkelf.py`; bugs 1
+and 3/4: the measured bytes and records) that fails on the old code and passes on the new.
+
+`./scripts/check.sh full` after the fixes (tree 9941617, `lab_matrix.py`):
+
+| target | result |
+|---|---|
+| macOS 15.5 ARM64 (local, Python 3.12.5) | 0 failed / 691 passed / 63 skipped |
+| ARM64 Kali (native aarch64, Python 3.14.7) | 0 failed / 721 passed / 33 skipped |
+| Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 664 passed / 90 skipped |
+
+x86-64 Linux (CI) not re-run here.
+
+Found on the way, NOT fixed (separate bugs):
+- recover_antianalysis on other Go versions (amd64, same program):
+  - Go 1.21 / 1.22 flag `anti-debug` with and without cgo: Go's unseparated runtime string table
+    holds `... wrong P` + `trace: ...`, which reads as ` ptrace:`.
+  - Go 1.26 defeats the Go-runtime filter: 39 syscalls plus rdtsc and cpuid are counted.
+  - Go 1.24 / 1.25 are clean.
+- `test_2026_crates_by_emulation[obfuse_aes-{elf,pe}-*]` fails on Kali's rustc 1.99.1 builds,
+  identically before and after these fixes: only bravo plus a 32-byte cut of alpha is recovered.
+  CI's rustc passes it.

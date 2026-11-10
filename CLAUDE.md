@@ -327,6 +327,19 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `type_info.__name` for non-unique RTTI (recover_types masks it); a `__stubs` entry loads its GOT
   slot into x16, not x17 like an ELF PLT (recover_cfg accepts both); the temp dir is `/var` ->
   `/private/var`, so compare paths only after resolving BOTH sides.
+- **Reproducing x86-64-only failures from the ARM64 lab:** build the artifact in a `linux/amd64`
+  container on Kali (Docker + qemu binfmt) but ANALYSE it natively -- wall-clock budgets
+  (`unpack_emulate`'s) time out under qemu. Go itself crashes under qemu-user (`lfstack.push`):
+  cross-build Go in a native arm64 container (Ubuntu `golang-1.21..1.26-go` +
+  `gcc-x86-64-linux-gnu` for cgo, `GOTOOLCHAIN=local`). Rust: cargo native, link/strip through
+  the amd64 container (a `cc`/`strip` wrapper running `docker run`, same `$HOME`/`/tmp` mounts).
+- **Go binaries differ by Go version** (measured 1.21-1.26, x86-64): what a Go-aware filter sees
+  changes -- CI's Go is 1.23. Test a Go change on several versions, never on one.
+- **Case-insensitive file-blob matching sees pointers as text:** `KvM\0\0\0\0\0` (pointer 0x4d764b)
+  read as `kvm`. A short key in the low bytes of an aligned, otherwise-zero word is a number.
+- **UPX's x86-64 ELF stub ends in an escape hatch** (`syscall; pop rdx; ret` written right after
+  the program's text): code the stub produced in the image that is NOT the OEP; unpack_emulate
+  records it under `hatches`. `syscall` ends a Unicorn block, so match the hatch's whole span.
 
 ## Maintenance: a new rustc release does NOT mean a rewrite
 Rust ships a stable release every 6 weeks, but that is a *release* cadence, not an *architecture*
