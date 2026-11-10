@@ -390,7 +390,9 @@ Each release:
    publishes nothing (delete the tag, fix, re-tag); once uploaded, PyPI never accepts the same
    version again, so fix forward with X.Y.Z+1.
 5. after the FIRST release is on PyPI: put the README's PyPI install back first (its
-   "From PyPI (once 0.1.0 is released)" block) and drop the git-install note; update the
+   "From PyPI (once 0.1.0 is released)" block) and drop the git-install note; put the live
+   PyPI badge back (`https://img.shields.io/pypi/v/rust-deobf`, now a static "not released yet");
+   give CHANGELOG's `[0.1.0]` its release date (it reads "not yet released"); update the
    Status line above.
 
 ## Git

@@ -12,7 +12,7 @@ keys, config — **without ever running the sample**.
 ![formats](https://img.shields.io/badge/formats-ELF%20%7C%20PE%20%7C%20Mach--O-informational)
 ![arch](https://img.shields.io/badge/arch-x86--64%20%7C%20ARM64%20%7C%20x86-informational)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
-[![PyPI](https://img.shields.io/pypi/v/rust-deobf)](https://pypi.org/project/rust-deobf/)
+[![PyPI](https://img.shields.io/badge/PyPI-not%20released%20yet-lightgrey)](#install)
 
 [Demo](#-30-second-demo) · [Use it from an AI agent](#-use-it-from-an-ai-agent) ·
 [Install / quick start](#-quick-start) · [Results](#-results) · [Real malware](#-real-malware) ·

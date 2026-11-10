@@ -8,9 +8,11 @@ distributions always share one version.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-29
+## [0.1.0] - not yet released
 
-First packaged release: `pip install rust-deobf` / `pipx install rust-deobf`. Everything below
+Planned first packaged release (`pip install rust-deobf` / `pipx install rust-deobf` once it is on
+PyPI; until then install from git, see the README). The section was prepared 2026-10-29; no `v0.1.0`
+tag has been pushed, so nothing is on PyPI yet -- the date is set when the tag is. Everything below
 was developed in the open before packaging and is summarised by theme.
 
 ### Added
