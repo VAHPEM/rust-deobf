@@ -86,7 +86,9 @@ def test_c_source_file_names_are_not_go(tmp_path):
     not Go `pkg.Func` symbols, so a plain C binary must not be reported as mixed C+Go."""
     (tmp_path / "main.c").write_text("int helper_n(int);int main(int c,char**v){return helper_n(c);}\n")
     (tmp_path / "net.c").write_text("int helper_n(int x){return x+1;}\n")
-    out = tmp_path / "bin"
+    # MinGW gcc on Windows writes `-o bin` as bin.exe; reading `bin` then hit a missing file
+    # (recover -> {"error"} -> KeyError, CI windows-latest). Name the output what gcc writes.
+    out = tmp_path / ("bin.exe" if sys.platform == "win32" else "bin")
     r = subprocess.run([_cc(), "-O1", "-o", str(out), str(tmp_path / "main.c"), str(tmp_path / "net.c")],
                        capture_output=True, text=True)
     if r.returncode != 0:
