@@ -493,7 +493,12 @@ def analyze(path) -> dict:
     arch = "aarch64" if img.arm else ("x86" if img.x32 else "x86_64")
     data = {s.virtual_address: bytes(s.content) for s in img.binary.sections
             if s.virtual_address and not img._exec_sec(s)}
-    data_sorted = sorted(data.items())
+    # data sections first, then code: Apple clang / rustc on x86-64 Mach-O emit the jump table
+    # inside __text right after the function (measured, CI macos-15-intel; ELF puts it in .rodata).
+    # Entries are still accepted only when every target lands in the text range.
+    code = {s.virtual_address: bytes(s.content) for s in img.binary.sections
+            if s.virtual_address and img._exec_sec(s)}
+    data_sorted = sorted(data.items()) + sorted(code.items())
 
     def read_i32(va):
         for sv, raw in data_sorted:

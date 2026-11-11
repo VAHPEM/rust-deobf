@@ -67,13 +67,18 @@ def test_real_arm64_jump_table(tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which("rustc"), reason="rustc not available")
-def test_real_match_jump_table(tmp_path):
+@pytest.mark.parametrize("target", [None, "x86_64-apple-darwin"])
+def test_real_match_jump_table(tmp_path, target):
     # host rustc builds for the host: x86-64 on an x86 host, AArch64 on an ARM64 host (e.g. Kali on
     # Apple silicon). LLVM's jump-table threshold differs per target: x86-64 tables an 8-arm match,
     # while AArch64 lowers 8 arms to a compare tree (nothing to un-switch) and only tables a wider
     # match -- so the arm count follows the host. Either way the table must be recovered exactly.
+    # x86_64-apple-darwin (any Mac with that rustup target): rustc puts the table inside __text,
+    # right after the function, not in a data section (CI macos-15-intel found nothing)
     import platform
-    host = platform.machine().lower()
+    if target and sys.platform != "darwin":
+        pytest.skip("Mach-O cross-build needs Apple's linker")
+    host = "x86_64" if target else platform.machine().lower()
     arm = host in ("aarch64", "arm64")
     n = 20 if arm else 8
     src = tmp_path / "m.rs"
@@ -84,7 +89,8 @@ def test_real_match_jump_table(tmp_path):
         + "    _ => black_box(999),\n} }\n"
         "fn main(){ println!(\"{}\", d(black_box(3))); }\n")
     binp = tmp_path / "m"
-    r = subprocess.run(["rustc", "-O", str(src), "-o", str(binp)], capture_output=True, text=True)
+    r = subprocess.run(["rustc", "-O", *(["--target", target] if target else []), str(src),
+                        "-o", str(binp)], capture_output=True, text=True)
     if r.returncode != 0:
         pytest.skip("rustc failed: " + r.stderr.strip()[-200:])
     res = O.analyze(binp)
