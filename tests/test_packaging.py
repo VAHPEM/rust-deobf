@@ -264,8 +264,11 @@ def test_core_wheel_contents(dist):
     assert not stems & SOURCE_ONLY, stems & SOURCE_ONLY
     assert not [n for n in names if "tests/" in n or "fixtures" in n or n.startswith("premium")]
     assert {"cli", "_version", "__init__", "__main__", "recover", "soc_triage"} <= stems
-    for data in ("libfunc_sigs.json", "runtime_sigs.json", "rust_versions.json"):
-        assert f"rust_deobf/data/{data}" in names
+    # every data file of the checkout ships (the std signature layer, data/*.json.gz, once did not)
+    data = sorted(p.name for p in (SCRIPTS / "data").iterdir() if p.is_file())
+    assert "libfunc_sigs_std.json.gz" in data
+    missing = [d for d in data if f"rust_deobf/data/{d}" not in names]
+    assert not missing, f"data files not in the wheel: {missing}"
     meta = zipfile.ZipFile(dist / f"rust_deobf-{v}-py3-none-any.whl").read(
         f"rust_deobf-{v}.dist-info/METADATA").decode()
     assert "License-Expression: Apache-2.0" in meta
@@ -350,6 +353,8 @@ for m in pkgutil.iter_modules([d]):
 assert not bad, bad
 hits = [i for i, e in enumerate(sys.path) if e == d]
 assert hits == [len(sys.path) - 1], (hits, sys.path)
+# data next to the modules is found (the std signature layer once read ROOT/"scripts"/data: {})
+assert rust_deobf.recover_libfuncs.load_std_db(), "libfunc_sigs_std.json.gz not loaded"
 open("recover.py", "w").write("WHO = 'host'\n")      # the host program's own recover.py
 importlib.invalidate_caches()
 sys.modules.pop("recover", None)

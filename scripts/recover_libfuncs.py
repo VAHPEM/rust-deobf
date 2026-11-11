@@ -420,7 +420,9 @@ def generate(paths):
     return db
 
 
-STD_OUT = ROOT / "scripts" / "data" / "libfunc_sigs_std.json.gz"
+# next to this file (scripts/data, rust_deobf/data when installed): ROOT/"scripts" is
+# site-packages/scripts in an install, where the std layer then silently loaded as {} (VALIDATION §76)
+STD_OUT = Path(__file__).resolve().parent / "data" / "libfunc_sigs_std.json.gz"
 
 
 def load_db(path: Path | None = None):

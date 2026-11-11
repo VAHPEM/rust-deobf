@@ -65,4 +65,4 @@ packages = ["rust_deobf"]
 include-package-data = false
 
 [tool.setuptools.package-data]
-rust_deobf = ["data/*.json"]
+rust_deobf = ["data/*.json", "data/*.json.gz"]

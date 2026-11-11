@@ -479,7 +479,8 @@ def doctor_checks(heavy: bool = True):
     except Exception as e:  # noqa: BLE001
         add(FAIL, "unicorn-run", f"unicorn imports but cannot emulate: {type(e).__name__}: {e}")
 
-    for name in ("libfunc_sigs.json", "runtime_sigs.json", "rust_versions.json"):
+    for name in ("libfunc_sigs.json", "libfunc_sigs_std.json.gz", "runtime_sigs.json",
+                 "rust_versions.json"):
         p = _HERE / "data" / name
         add(OK if p.is_file() else WARN, f"data/{name}",
             "present" if p.is_file() else f"missing at {p} (reinstall rust-deobf)")
