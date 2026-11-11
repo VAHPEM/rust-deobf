@@ -8,6 +8,29 @@ distributions always share one version.
 
 ## [Unreleased]
 
+## [0.1.0rc2] - 2026-11-11
+
+Second release candidate. 0.1.0rc1 published nothing: its installed-wheel test failed on Windows +
+Python 3.10 (release run 42976295297), so neither distribution reached PyPI.
+
+### Fixed
+- **Installed std signature layer.** The wheel did not ship `data/libfunc_sigs_std.json.gz`
+  (package-data matched `data/*.json` only) and `recover_libfuncs` looked for it under
+  `site-packages/scripts/`; an installed rust-deobf therefore loaded no prebuilt-std signatures
+  (0 instead of 4989). Both fixed; `rust-deobf doctor` checks the file.
+- **Library mode put `site-packages/scripts` first on `sys.path`.** `gen_sigdb` and every premium
+  module inserted `<parent of the package>/scripts` -- the clone's `scripts/`, but a foreign
+  directory once installed. Had another distribution installed a top-level `scripts` package, its
+  modules (`recover`, ...) would have shadowed the host program's. Clone-only paths are now added
+  only in a checkout.
+- The installed-wheel test compared `sys.path` entries with `==`; Windows Python 3.10 spells a
+  venv's site-packages `lib` while the resolved package path is `Lib`. It now compares normalised
+  paths, and also fails if importing the modules adds any other `sys.path` entry.
+- **capstone / unicorn are always installed.** Their `platform_machine != "ARM64"` marker (meant for
+  native ARM64 Python, which has no wheels) also matched x64 Python 3.14 on Windows-on-ARM --
+  `platform_machine` is the host CPU there -- so pip left both out of the recommended setup.
+  Native ARM64 Python now fails at `pip install` instead (README: use x64 Python).
+
 ## [0.1.0rc1] - 2026-11-11
 
 Release candidate for 0.1.0: the first end-to-end run of the release pipeline -- build, the
@@ -76,5 +99,6 @@ was developed in the open before packaging and is summarised by theme.
   that survives one failing target), plus Windows and AArch64 portability fixes.
 
 [Unreleased]: https://github.com/VAHPEM/rust-deobf/compare/v0.1.0...HEAD
+[0.1.0rc2]: https://github.com/VAHPEM/rust-deobf/releases/tag/v0.1.0rc2
 [0.1.0rc1]: https://github.com/VAHPEM/rust-deobf/releases/tag/v0.1.0rc1
 [0.1.0]: https://github.com/VAHPEM/rust-deobf/releases/tag/v0.1.0

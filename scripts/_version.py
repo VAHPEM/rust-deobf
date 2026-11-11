@@ -7,4 +7,4 @@ and checked against the git tag by .github/workflows/release.yml. A plain file (
 derived) so a git clone, a shallow CI checkout, a GitHub zip download and an sdist all agree.
 Bump it together with a new CHANGELOG.md section; see "Releasing" in CLAUDE.md.
 """
-__version__ = "0.1.0rc1"
+__version__ = "0.1.0rc2"
