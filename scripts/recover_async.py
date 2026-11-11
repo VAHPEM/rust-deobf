@@ -908,6 +908,19 @@ def _run_a64(b: _Bin, load_va: int, v: int, lo: int, hi: int, seed=None) -> _Run
                 tainted = True                  # a spill scheduled into the dispatch
                 pc = nxt
                 continue
+            if m in ("str", "stur", "strb", "strh") and smem is not None:
+                # a store to ANOTHER field of the state's own object, scheduled into the dispatch
+                # (rustc 1.99, panic=abort: the parent coroutine's next state is written between
+                # the inner state load and its compare): same base register, disjoint bytes, so
+                # it cannot change the value being dispatched on
+                ms_ = _A64_MEM_IMM.match(s)
+                if ms_ and not ms_.group(4) and _ac(ms_.group(2)) == smem[0]:
+                    d_ = _num(ms_.group(3) or "0")
+                    w_ = {"strb": 1, "strh": 2}.get(m, 4 if parts[0].startswith("w") else 8)
+                    if d_ + w_ <= smem[1] or smem[1] + 8 <= d_:
+                        tainted = True
+                        pc = nxt
+                        continue
             if m in _A64_LOAD:
                 width, signed = _A64_LOAD[m]
                 dst = parts[0]
@@ -2184,6 +2197,12 @@ def _is_trap(b, va):
 _SELF_ROOTS = ("arg0", "arg1", "ecx", "edx")    # where `self` can arrive (edx/ecx: i386 fastcc)
 
 
+def _unwinds(anchors):
+    """Does the binary carry the "resumed after panicking" anchor at all (= built to unwind)?"""
+    return bool(anchors.get("strings", {}).get("panicked") or anchors["funcs"]["panicked"]
+                or anchors["inline"]["panicked"])
+
+
 def _try_dispatch(b, anchors, load_va, lo, hi, cls_cache, seed=None):
     def cls(t):
         if t not in cls_cache:
@@ -2205,8 +2224,19 @@ def _try_dispatch(b, anchors, load_va, lo, hi, cls_cache, seed=None):
     if kind(r1) != "returned":
         return None
     r2 = _dispatch_run(b, load_va, 2, lo, hi, seed)
-    if kind(r2) != "panicked":
-        return None
+    k2 = kind(r2)
+    if k2 != "panicked":
+        # panic=abort (the shape of the LTO release profiles): nothing can resume a coroutine
+        # after a panic, so rustc emits no Poisoned arm and no "resumed after panicking" message
+        # anywhere in the binary; state 2 is unreachable and LLVM folds it into the Returned arm.
+        # A jump table may also send the unreachable entry anywhere (x86-64 Mach-O, i386
+        # measured): state 2 is then not evidence either way, and it stands for the Returned arm
+        # so that a junk target never links two machines. Accepted only then -- in an unwinding
+        # binary state 2 must still reach the panicked arm. The anchor that remains is strong:
+        # state 1 calls "resumed after completion" with the coroutine's &Location.
+        if _unwinds(anchors):
+            return None
+        r2 = r1
     r0 = _dispatch_run(b, load_va, 0, lo, hi, seed)
     if r0.target is None or cls(r0.target)[0] is not None:
         return None
@@ -2444,6 +2474,8 @@ def analyze_function(b: _Bin, anchors, lo, hi):
             notes.append("state field shared with another inlined copy (disjoint resume targets)")
         if any(x.get("unreachable_arms") for x in ss):
             notes.append("Returned/Panicked arms optimized away (both states reach a trap)")
+        elif not _unwinds(anchors):
+            notes.append("panic=abort build: state 2 (Panicked) is unreachable, folded into Returned")
         if field[0] == "reg":
             # a promoted state: its write-backs are register moves into the dispatch -- the value
             # set reaching the dispatch (entry 0 + every back edge's next state) is the check
@@ -2728,6 +2760,7 @@ def recover(path) -> dict:
            "anchors": {}, "runtime": None, "machines": [], "poll_functions": [], "nesting": [],
            "counts": {}}
     anchors = find_anchors(b)
+    res["unwinds"] = _unwinds(anchors)     # False: built with panic=abort (no Poisoned arm)
     res["anchors"] = {"strings": {k: v for k, v in anchors["strings"].items()},
                       "functions": {k: sorted(v) for k, v in anchors["funcs"].items()},
                       "inline_sites": {k: len(v) for k, v in anchors["inline"].items()}}

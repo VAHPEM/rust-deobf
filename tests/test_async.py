@@ -141,7 +141,7 @@ exports:
 """
 
 
-def _build(tmp_path, target=None, program=None, toolchain=None):
+def _build(tmp_path, target=None, program=None, toolchain=None, extra=()):
     src = tmp_path / "hand.rs"
     src.write_text((program or PROGRAM).lstrip("\n"))
     out = tmp_path / ("hand_" + (target or "host"))
@@ -161,6 +161,7 @@ def _build(tmp_path, target=None, program=None, toolchain=None):
                        "-C", "link-arg=dynamic_lookup"]
     elif target:
         cmd += ["--target", target, "-C", "linker=rust-lld", "-C", "link-self-contained=yes"]
+    cmd += list(extra)
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path)
     if r.returncode != 0:
         pytest.skip("build failed: " + r.stderr.strip()[-300:])
@@ -415,6 +416,36 @@ def test_hand_executor_older_rustc(tmp_path, toolchain):
     if not _toolchain(toolchain):
         pytest.skip(f"toolchain {toolchain} not installed")
     _check_by_location(RA.recover(_build(tmp_path, toolchain=toolchain)))
+
+
+@pytest.mark.skipif(not shutil.which("rustc"), reason="rustc not available")
+@pytest.mark.parametrize("target", [None, "aarch64-unknown-linux-musl", "i686-unknown-linux-musl",
+                                    "aarch64-apple-darwin", "x86_64-apple-darwin"])
+def test_hand_executor_panic_abort(tmp_path, target):
+    """panic=abort (what the size-lto / speed-lto release profiles use): rustc emits no Poisoned
+    arm and no "resumed after panicking" message, state 2 is unreachable and LLVM folds it into the
+    Returned arm or anywhere in a jump table. Requiring state 2 to reach the panicked arm found
+    NO machine in such a binary (0 of 9 on every target, rustc 1.91 and 1.99.1 measured)."""
+    if target and not _target(target):
+        pytest.skip(f"{target} target not installed")
+    res = RA.recover(_build(tmp_path, target, extra=("-C", "panic=abort")))
+    ms = res["machines"]
+    sourced = [m for m in ms if m["source"]]
+    for m in sourced:
+        assert m["source"]["file"].endswith("hand.rs"), m["source"]
+        assert m["suspend_points"] == AWAITS[m["source"]["line"]], (m["source"], m["suspend_points"])
+        assert m["validated"], m["notes"]
+    lines = {m["source"]["line"] for m in sourced}
+    # found on every target and rustc measured (1.91: all but one inlined leaf copy -- i386 all 9,
+    # top as a register-state machine; 1.99.1: leaf, middle, the boxed block, and looper on
+    # AArch64). What 1.99.1 inlines into main's executor loop (top, its async block; looper on
+    # i386) loses its dispatch: top's state byte is stored at every await but read back once, in
+    # a single compare against one state (AArch64 measured) -- no Returned arm to anchor on, so
+    # no machine is claimed there (VALIDATION §79)
+    must = {_line("async fn leaf"), _line("async fn middle"), _line("Box::pin(async move")}
+    assert must <= lines, sorted(must - lines)
+    assert any("panic=abort" in n for m in ms for n in m["notes"])
+    assert res.get("unwinds") is False
 
 
 def test_no_async_no_machines(tmp_path):
