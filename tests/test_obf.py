@@ -36,3 +36,19 @@ def test_obf_strings(crate, fmt, ext, profile):
     got = {x["string"] for x in _run(path)["decoded"]}
     missing = sorted(w for w in want if not any(w in g for g in got))
     assert not missing, missing
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+@pytest.mark.parametrize("fmt,ext", FORMATS)
+@pytest.mark.parametrize("crate", CRATES)
+def test_obf_resolved_imports(crate, fmt, ext, profile):
+    """Names a crate resolves at run time (GetProcAddress) that are not in the file (§81)."""
+    want = json.loads((OBF / crate / "expected.json").read_text()).get("resolved_imports", {}).get(fmt)
+    if not want:
+        pytest.skip(f"{crate} resolves nothing by name on {fmt}")
+    path = BUILD / f"{crate}__{fmt}__{profile}__strip{ext}"
+    if not path.is_file():
+        pytest.skip(f"not built: {path.name}")
+    got = {r["name"] for r in _run(path).get("resolved_imports", []) if not r["in_file"]}
+    assert set(want) <= got, (sorted(set(want) - got), sorted(got))
+

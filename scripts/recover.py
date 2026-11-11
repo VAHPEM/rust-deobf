@@ -159,7 +159,7 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
     fmt, arch, imagebase = detect(path)
     result = {"file": str(path), "format": fmt, "arch": arch, "imagebase": imagebase,
               "decoded": [], "stack": [], "literals": [], "literals_missed": [],
-              "libfuncs": [], "engines": [], "notes": [], "errors": []}
+              "libfuncs": [], "resolved_imports": [], "engines": [], "notes": [], "errors": []}
     if fmt is None:
         result["notes"].append("not an ELF/PE/Mach-O binary LIEF can parse: nothing to recover")
         return result
@@ -232,6 +232,8 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
             known = {x["string"] for x in result["decoded"]}
             emu = [x for x in e.get("records", []) if len(x["string"]) >= min_len and x["string"] not in known]
             result["decoded"].extend(emu)
+            # names the code handed to GetProcAddress / dlsym / LoadLibrary at run time (§81)
+            result["resolved_imports"] = e.get("resolved_imports", [])
             result["engines"].append({"engine": "emulation (recover_emulate)", "strings": len(emu),
                                       "functions": f'{e.get("functions_tried", 0)}/{e.get("functions_total", 0)}',
                                       "timed_out": e.get("timed_out", False),
@@ -358,6 +360,10 @@ def print_text(result: dict, all_literals: bool = False) -> None:
             else:
                 where = f"function {_hex(x['function'])}  (emulation)"
             print(f"  {x['string']}{_tags(x)}\n      {where}")
+    if result.get("resolved_imports"):
+        print("\n== resolved at run time (GetProcAddress / dlsym / LoadLibrary) ==")
+        for x in result["resolved_imports"]:
+            print(f"  {x['kind']:<6} {x['name']}   (function {_hex(x['function'])})")
     if result["stack"]:
         print("\n== stack strings ==")
         for x in result["stack"]:

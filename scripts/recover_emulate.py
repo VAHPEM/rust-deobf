@@ -136,6 +136,13 @@ _FREE = {"free", "rust_dealloc", "rdl_dealloc", "heapfree", "localfree", "global
          "virtualfree", "cotaskmemfree"}
 
 
+# runtime resolvers whose name argument is recorded (lazy imports, §81)
+_RESOLVERS = frozenset(("getprocaddress", "dlsym", "dlvsym", "loadlibrarya", "loadlibraryexa",
+                        "loadlibraryw", "loadlibraryexw", "getmodulehandlea", "getmodulehandlew",
+                        "dlopen"))
+_API_NAME = re.compile(rb"[A-Za-z_][A-Za-z0-9_.@?$-]{2,127}")
+
+
 def _norm(name):
     return name.split("@")[0].lstrip("_").lower() if name else ""
 
@@ -1342,6 +1349,7 @@ class Emulator:
 
     def __init__(self, img: Image):
         self.img = img
+        self.resolved = {}       # (kind, name) -> first function whose run resolved it (§81)
         self.arm = img.arm
         self.x32 = img.x32
         self.ptr = img.ptr
@@ -1746,10 +1754,43 @@ class Emulator:
         sp = self.uc.reg_read(self.SP)
         return struct.unpack("<Q", self.uc.mem_read(sp + 8 + 8 * i, 8))[0]
 
+    def _cstr(self, p, wide=False, limit=128):
+        """A NUL-terminated ASCII (or UTF-16LE) name at `p`, or None."""
+        try:
+            raw = bytes(self.uc.mem_read(p, 2 * limit if wide else limit))
+        except UcError:
+            return None
+        if wide:
+            raw = raw.decode("utf-16-le", "replace").encode("ascii", "replace")
+        end = raw.find(b"\x00")
+        name = raw[:end] if end > 0 else b""
+        return name.decode("ascii") if _API_NAME.fullmatch(name) else None
+
+    def _note_resolution(self, n, arg):
+        """Record the name the code hands to a runtime resolver (lazy imports: an API name decoded
+        at run time and looked up, never in the import table). Return values are NOT changed --
+        still 0, as before: std's own compat shims resolve optional APIs the same way, and a
+        non-null result would send them down different paths."""
+        if n in ("getprocaddress", "dlsym", "dlvsym"):
+            p = arg(1)
+            if p >= 0x10000:                  # below: GetProcAddress by ordinal
+                name = self._cstr(p)
+                if name:
+                    self.resolved.setdefault(("proc", name), self.lo)
+        elif n in ("loadlibrarya", "loadlibraryexa", "getmodulehandlea", "dlopen",
+                   "loadlibraryw", "loadlibraryexw", "getmodulehandlew"):
+            p = arg(0)
+            if p:
+                name = self._cstr(p, wide=n.endswith("w"))
+                if name:
+                    self.resolved.setdefault(("module", name), self.lo)
+
     def _stub(self, name):
         """Model an external call by name; returns the value to place in the return register."""
         n = _norm(name)
         uc, arg = self.uc, self._arg
+        if n in _RESOLVERS:
+            self._note_resolution(n, arg)
         try:
             if n in _ALLOC:
                 return self._alloc(arg(_ALLOC[n][0]))
@@ -3533,7 +3574,13 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
                     found.add(c)
             rec = by_string.get(st)
             if rec is None:
-                if _degenerate(st) or not looks_like_text(st.encode("ascii", "ignore")) or explained(st):
+                # a name the code handed to GetProcAddress / dlsym that is not in the file
+                # verbatim was decoded, whatever pieces of it the file holds (`GetCurrentProcess`
+                # from the import table + `or` + `Number` explained GetCurrentProcessorNumber away)
+                resolver_arg = (("proc", st) in emu.resolved or ("module", st) in emu.resolved) \
+                    and st.encode("ascii", "ignore") not in img.file_bytes
+                if _degenerate(st) or not looks_like_text(st.encode("ascii", "ignore")) or \
+                        (explained(st) and not resolver_arg):
                     by_string[st] = False
                     continue
                 rec = by_string[st] = {"string": st, "function": fva, "method": "emulation",
@@ -3592,6 +3639,10 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
         tried_set.add(fva)
         runs += n
         collect(fva, strs, natural, set(emu.exact), set(emu.used), done)
+    # names handed to runtime resolvers ride along in by_string under keys no string can have
+    # (a NUL), so the parallel merge carries them; recover() splits them out again
+    for (kind, name), fva in emu.resolved.items():
+        by_string.setdefault(f"\x00{kind}\x00{name}", {"kind": kind, "name": name, "function": fva})
     return by_string, tried_set, runs, timed_out, found
 
 
@@ -3752,7 +3803,16 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
         by_string, tried_set, runs, timed_out, found = _emulate(img, order, scores, explained,
                                                                 canaries, time_budget, explore)
         tried = len(tried_set)
-    records = [r for r in by_string.values() if r]
+    # in_file: the name is in the file as text (std's own compat lookups -- SetThreadDescription,
+    # "kernel32" -- are); a name that is not was decoded at run time: a hidden import
+    def _in_file(name):
+        b = name.encode("ascii", "ignore")
+        return b in img.file_bytes or name.encode("utf-16-le") in img.file_bytes
+    resolved = sorted(({"kind": r["kind"], "name": r["name"], "function": r["function"],
+                        "in_file": _in_file(r["name"])}
+                       for k, r in by_string.items() if k.startswith("\x00") and r),
+                      key=lambda r: (r["in_file"], r["kind"] != "module", r["name"]))
+    records = [r for k, r in by_string.items() if r and not k.startswith("\x00")]
     records = _drop_junk_factories(records, img.file_bytes)
     records = _drop_overlap_artifacts(records)
     for r in records:
@@ -3762,7 +3822,9 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
             "ram_note": ram_note,
             "recall": len(found), "n": len(canaries),
             "arch": "aarch64" if img.arm else ("x86" if img.x32 else "x86-64"),
-            "recovered_texts": [r["string"] for r in records], "records": records}
+            "recovered_texts": [r["string"] for r in records], "records": records,
+            # modules / procedures the code resolved at run time by name (lazy imports, §81)
+            "resolved_imports": resolved}
 
 
 def _selftest():

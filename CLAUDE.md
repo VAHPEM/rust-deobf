@@ -324,6 +324,11 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   forced run that passes a complete natural decode on with 1-4 junk characters more (a flipped
   base64 padding branch) is dropped only with a witness: a natural run that RETURNED (`returned`,
   `natural_done`) and passed the shorter string on. `natural_done` is stripped from the records.
+- **Runtime resolvers (§81):** the emulator records the name argument of GetProcAddress /
+  LoadLibrary* / GetModuleHandle* / dlsym / dlopen (`resolved_imports`, `in_file=False` = decoded,
+  a hidden import) but still RETURNS 0 -- std's compat shims resolve optional APIs the same way and
+  a non-null result would change every PE run. A resolver argument that is not in the file verbatim
+  is never explained away as pieces of static text.
 - **Instruction budgets bind on software ciphers**: the `aes` crate on AArch64 has no AES
   instructions by default (soft fixsliced AES + GHASH, ~26k instructions per string). Callees get
   more budget only while running dense straight-line code (`Emulator._dense`, `DENSE` = 16

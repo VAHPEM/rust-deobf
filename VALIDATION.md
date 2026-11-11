@@ -3444,3 +3444,45 @@ Tests:
 - `test_encodings_by_pipeline` (benchmark).
 
 Three of these tests fail on the old code, for the stated reason.
+
+## 81. Lazy imports: API names decoded at run time and resolved by name (Nov 2026)
+
+Fixture: `obf_src/lazy_import`. Two harmless Win32 API names (the tick count, the current
+processor number) are XOR-encoded, decoded at run time and resolved with
+`GetProcAddress(GetModuleHandleA("kernel32.dll"), name)`, so neither is in the import table. On
+ELF the names are only decoded. Built on Kali (rustc 1.99.1): pe and elf-arm64, release and
+size-lto.
+
+**Before:**
+- The emulator modelled `GetProcAddress` / `LoadLibrary*` / `GetModuleHandle*` / `dlsym` / `dlopen`
+  as an unknown import returning 0. It did not record which name the code asked for, so the
+  binding of a decoded name to a runtime lookup was invisible.
+- `GetCurrentProcessorNumber` was missing from the decoded strings on PE. The static-text cover
+  explained it away as `GetCurrentProcess` (std's import table) + `or` + `Number`.
+
+**Now:**
+- `recover_emulate` records the name argument of those resolvers (ASCII, or UTF-16 for the `W`
+  forms; GetProcAddress by ordinal ignored). It reports them as `resolved_imports`
+  `{kind: proc|module, name, function, in_file}`, and `recover.run` passes them through.
+- `in_file=False` means the name is not in the file as text, i.e. it was decoded. That separates
+  the program's hidden imports from std's own compat lookups (`SetThreadDescription`, `kernel32`,
+  `NTDLL.DLL`, `GetTempPath2W`), which are `in_file=True`.
+- Return values are **unchanged** (still 0). std resolves optional APIs the same way, and a
+  non-null result would send it down different paths in every PE run.
+- A name handed to a resolver that is not verbatim in the file is no longer explained away by
+  pieces of the file.
+
+**Measured:**
+- pe release and size-lto: the hidden set is exactly {`kernel32.dll`, `GetTickCount`,
+  `GetCurrentProcessorNumber`}; both API names are decoded strings.
+- elf-arm64: both names decoded, no resolver (as written).
+- size-lto pe also yields `GetTickCount -> 0`: a forced path through the "resolved" branch that
+  formats the call's result.
+
+**Tests:**
+- `test_lazy_import_names_are_recorded_and_hidden_ones_marked`, on the committed fixture
+  `tests/fixtures/imports/lazy_import.exe` (249 KB, pe size-lto, stripped, sha256 413a5bd6...).
+- `test_obf_resolved_imports`.
+
+The golden emulation dump gained only the new `resolved_imports` key (empty on the benign
+fixture). Everything else is identical; regenerated for that reason.

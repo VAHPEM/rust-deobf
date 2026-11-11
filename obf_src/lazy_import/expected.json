@@ -1,0 +1,13 @@
+{
+  "strings": [
+    "GetTickCount",
+    "GetCurrentProcessorNumber"
+  ],
+  "resolved_imports": {
+    "pe": [
+      "GetTickCount",
+      "GetCurrentProcessorNumber"
+    ]
+  },
+  "notes": "XOR-encoded API names resolved with GetProcAddress at run time (PE); on ELF only decoded. Benign APIs."
+}

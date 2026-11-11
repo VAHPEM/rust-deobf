@@ -649,3 +649,21 @@ def test_encodings_fixture_gives_exactly_the_canaries():
     got = {x["string"] for x in res["decoded"]}
     assert got == set(canaries), (sorted(set(canaries) - got), sorted(got - set(canaries)))
 
+
+# --- names resolved at run time (lazy imports, VALIDATION §81) --------------------------------
+LAZY = ROOT / "tests" / "fixtures" / "imports" / "lazy_import.exe"
+
+
+def test_lazy_import_names_are_recorded_and_hidden_ones_marked():
+    # obf_src/lazy_import, pe size-lto: two harmless API names XOR-decoded and passed to
+    # GetProcAddress(GetModuleHandleA("kernel32.dll"), name). They are not in the file, so
+    # in_file=False; std's own compat lookups (SetThreadDescription, "kernel32") are in_file=True
+    res = R.recover(LAZY, [])
+    hidden = {(r["kind"], r["name"]) for r in res["resolved_imports"] if not r["in_file"]}
+    assert hidden == {("module", "kernel32.dll"), ("proc", "GetTickCount"),
+                      ("proc", "GetCurrentProcessorNumber")}, res["resolved_imports"]
+    assert any(r["in_file"] and r["name"] == "SetThreadDescription" for r in res["resolved_imports"])
+    # the decoded name is a string too: pieces of it in the import table (GetCurrentProcess) no
+    # longer explain it away as static text
+    texts = set(res["recovered_texts"])
+    assert "GetCurrentProcessorNumber" in texts and any("GetTickCount" in t for t in texts), texts
