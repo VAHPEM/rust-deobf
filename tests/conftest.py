@@ -10,6 +10,32 @@ BUILD = Path(os.environ.get("RUST_DEOBF_BUILD", ROOT / "build"))   # scripts/bui
 CANARIES = json.loads((ROOT / "bench_src" / "manifest.json").read_text())["canaries"]
 
 
+def bash_exe():
+    """An absolute path to a real bash, or None. Pass it to subprocess instead of the bare name: on
+    Windows CreateProcess searches System32 BEFORE PATH, so `["bash", ...]` runs WSL's bash.exe stub
+    (measured, CI windows-latest: "Windows Subsystem for Linux has no installed distributions")
+    even when shutil.which("bash") -- which walks PATH -- finds Git Bash."""
+    import shutil
+    if os.name != "nt":
+        return shutil.which("bash")
+    sysdirs = tuple(os.path.normcase(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), d))
+                    for d in ("System32", "Sysnative", "SysWOW64"))
+    cands = [shutil.which("bash")]
+    for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432"),
+                 os.environ.get("LOCALAPPDATA") and os.path.join(os.environ["LOCALAPPDATA"], "Programs")):
+        if root:
+            cands.append(os.path.join(root, "Git", "bin", "bash.exe"))
+    for c in cands:
+        if not c or not os.path.isfile(c):
+            continue
+        c = os.path.abspath(c)
+        nc = os.path.normcase(c)
+        if nc.startswith(sysdirs) or "\\windowsapps\\" in nc:      # WSL launcher stubs
+            continue
+        return c
+    return None
+
+
 # --- RUST_DEOBF_REQUIRE_BUILD: turn "binary missing" skips into failures ---------------------
 # Benchmark tests skip when a binary is not built, so `pytest` works on a partial build. In CI that
 # same leniency hides a broken build (every test skips, the job passes testing nothing). Set

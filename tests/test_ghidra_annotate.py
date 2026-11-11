@@ -308,7 +308,9 @@ def test_ghidra_run_handles_dash_leading_binary_name(tmp_path):
     import os
     import shutil
     import subprocess
-    if shutil.which("bash") is None:
+    from conftest import bash_exe
+    bash = bash_exe()
+    if bash is None:
         import pytest
         pytest.skip("bash not available")
     ghidra = tmp_path / "ghidra"
@@ -328,9 +330,9 @@ def test_ghidra_run_handles_dash_leading_binary_name(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     shutil.copy(ROOT / "tests" / "fixtures" / "emu" / "pe64.exe", work / "-sample.exe")
-    env = dict(os.environ, PATH="%s:%s" % (fakebin, os.environ.get("PATH", "")),
+    env = dict(os.environ, PATH=os.pathsep.join((str(fakebin), os.environ.get("PATH", ""))),
                GHIDRA_INSTALL_DIR=str(ghidra), TMPDIR=str(tmp_path))
-    p = subprocess.run(["bash", str(ROOT / "scripts" / "ghidra_run.sh"), "-sample.exe", "",
+    p = subprocess.run([bash, str(ROOT / "scripts" / "ghidra_run.sh"), "-sample.exe", "",
                         str(tmp_path / "proj")],
                        cwd=work, env=env, capture_output=True, text=True, timeout=300)
     assert p.returncode == 0, p.stdout + p.stderr

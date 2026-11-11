@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 import pytest
-from conftest import ROOT
+from conftest import ROOT, bash_exe
 
 import evaluate_all as EA
 import measure_fp as MF
@@ -76,14 +76,14 @@ def failing_cargo(tmp_path):
     return env
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+@pytest.mark.skipif(bash_exe() is None, reason="bash required")
 def test_build_all_fails_loudly_and_ships_nothing_stale(tmp_path, failing_cargo):
     out = tmp_path / "build"
     out.mkdir()
     stale = out / "plaintext__elf__release__strip"
     stale.write_bytes(b"stale from an earlier build")
     env = dict(failing_cargo, BUILD_DIR=str(out), ONLY="plaintext", FORMATS="elf", PROFILES="release")
-    r = subprocess.run(["bash", str(ROOT / "scripts" / "build_all.sh")], env=env,
+    r = subprocess.run([bash_exe(), str(ROOT / "scripts" / "build_all.sh")], env=env,
                        capture_output=True, text=True, timeout=120)
     assert r.returncode != 0, r.stdout + r.stderr
     assert "fake cargo" in r.stderr                       # cargo's own error is visible
@@ -92,10 +92,10 @@ def test_build_all_fails_loudly_and_ships_nothing_stale(tmp_path, failing_cargo)
     assert not (out / "plaintext__elf__release__nostrip").exists()
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+@pytest.mark.skipif(bash_exe() is None, reason="bash required")
 def test_build_obf_fails_loudly(tmp_path, failing_cargo):
     env = dict(failing_cargo, BUILD_DIR=str(tmp_path), FORMATS="elf")
-    r = subprocess.run(["bash", str(ROOT / "obf_src" / "build_obf.sh")], env=env,
+    r = subprocess.run([bash_exe(), str(ROOT / "obf_src" / "build_obf.sh")], env=env,
                        capture_output=True, text=True, timeout=300)
     assert r.returncode != 0
     assert "fake cargo" in r.stderr and "FAILED" in r.stderr
