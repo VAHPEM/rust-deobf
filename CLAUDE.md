@@ -178,7 +178,7 @@ carry a format version, and must ignore + rebuild a cache of another format, nev
 
 ### premium/ — Tier 4 deobfuscation (AGPL/commercial; each needs its own test)
 `deobf_cff.py` (detect control-flow flattening) · `deobf_deflatten.py` (recover flattened CF) ·
-`deobf_expr.py` (provable MBA/expression simplification) · `deobf_opaque.py` (opaque predicates) ·
+`deobf_expr.py` (provable MBA/expression simplification) · `deobf_opaque.py` (opaque predicates: every block, memory reads as unconstrained values, single-predecessor paths; claims typed opaque / constant / implied, §82) ·
 `devirt_emulate.py` (recover a VM's ISA by emulating its interpreter) · `lift_vm.py` (lift VM
 bytecode to a listing) · `opt_reverse.py` (reverse compiler optimizations: un-switch jump tables,
 unrolled loops; x86 + AArch64).

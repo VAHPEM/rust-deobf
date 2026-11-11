@@ -61,6 +61,8 @@ except Exception:
     z3 = None
 
 _SOLVER_TIMEOUT_MS = 2000      # an `unknown` from z3 is never a claim
+_LOADS = __import__("itertools").count(1)   # memory-read symbols: unique across lifts (a path lifts
+                                            # two blocks; equal names would be one z3 variable)
 
 
 class _Abandon(Exception):
@@ -145,15 +147,23 @@ def _bit(x, i):
     return z3.Extract(i, i, x) == 1
 
 
-def _lift_block(insns, nbits=64):
+def _lift_block(insns, nbits=64, init=None):
     """Symbolically execute a straight-line integer x86 block. Returns (regs, flags, terminator) or
     raises _Abandon. regs: canonical full register -> z3 BV of `nbits`; flags: ZF/SF/CF/OF -> z3
     Bool, or None when unknown/undefined at that point."""
     from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_OP_REG, X86_REG_EIP, X86_REG_RIP
     table = _X86_REGS.setdefault(nbits, _x86_regtable(nbits))
-    regs = {}
-    flags = {"ZF": None, "SF": None, "CF": None, "OF": None}   # unknown at block entry
+    regs = dict(init[0]) if init else {}
+    # unknown at block entry, or the predecessor's flags on a path (init)
+    flags = dict(init[1]) if init else {"ZF": None, "SF": None, "CF": None, "OF": None}
     term = None
+
+    def fresh_load(w):
+        # a memory read is an UNCONSTRAINED value: every claim must hold whatever memory holds --
+        # sound for always/never-taken (an OLLVM -bcf predicate over globals the program never
+        # writes is opaque for all of their values). Each read is its own symbol, even of the same
+        # address (an over-approximation: a store before it is ignored, never trusted).
+        return z3.BitVec("mem%d" % next(_LOADS), w)
 
     def desc(insn, reg):
         d = table.get(insn.reg_name(reg))
@@ -172,6 +182,8 @@ def _lift_block(insns, nbits=64):
         return v if w == nbits else z3.Extract(lo + w - 1, lo, v)
 
     def wr(insn, op, v):
+        if op.type == X86_OP_MEM:
+            return                                       # a store: registers and flags unchanged
         if op.type != X86_OP_REG:
             raise _Abandon("write to non-register")
         c, lo, w = desc(insn, op.reg)
@@ -192,6 +204,8 @@ def _lift_block(insns, nbits=64):
             regs[c] = z3.Concat(*parts)
 
     def width(insn, op):
+        if op.type == X86_OP_MEM and op.size in (1, 2, 4, 8):
+            return 8 * op.size
         if op.type != X86_OP_REG:
             raise _Abandon("expected register")
         return desc(insn, op.reg)[2]
@@ -199,6 +213,10 @@ def _lift_block(insns, nbits=64):
     def val(insn, op, w):
         if op.type == X86_OP_IMM:
             return z3.BitVecVal(op.imm & _mask(w), w)
+        if op.type == X86_OP_MEM:
+            if 8 * op.size != w:
+                raise _Abandon("memory operand width")
+            return fresh_load(w)
         if op.type == X86_OP_REG:
             v = rd(insn, op.reg)
             if v.size() != w:
@@ -214,17 +232,29 @@ def _lift_block(insns, nbits=64):
         if m.startswith("j"):
             term = insn                     # a (conditional) jump ends the block
             break
-        if m != "lea" and any(o.type == X86_OP_MEM for o in ops):
-            raise _Abandon("memory operand")
         n = len(ops)
+        if m in ("push", "pop") and n == 1 and ops[0].type == X86_OP_REG:
+            sp = "rsp" if nbits == 64 else "esp"
+            pw = nbits // 8
+            if desc(insn, ops[0].reg)[2] != nbits or desc(insn, ops[0].reg)[0] == table[sp][0]:
+                raise _Abandon("push/pop form")
+            spc = table[sp][0]
+            spv = full(spc)
+            if m == "pop":
+                wr(insn, ops[0], fresh_load(nbits))      # popped: an unconstrained value
+            regs[spc] = spv - pw if m == "push" else spv + pw   # (a pushed value is never read back)
+            continue
         if m in ("mov", "movabs") and n == 2:
             w = width(insn, ops[0])
             wr(insn, ops[0], val(insn, ops[1], w))
         elif m in ("movzx", "movsx", "movsxd") and n == 2:
             dw = width(insn, ops[0])
-            if ops[1].type != X86_OP_REG:
+            if ops[1].type == X86_OP_MEM and ops[1].size in (1, 2, 4):
+                src = fresh_load(8 * ops[1].size)
+            elif ops[1].type != X86_OP_REG:
                 raise _Abandon("movzx source")
-            src = rd(insn, ops[1].reg)
+            else:
+                src = rd(insn, ops[1].reg)
             sw = src.size()
             if sw > dw:
                 raise _Abandon("narrowing extend")
@@ -234,7 +264,10 @@ def _lift_block(insns, nbits=64):
             dw = width(insn, ops[0])
             mem = ops[1].mem
             if mem.base in (X86_REG_RIP, X86_REG_EIP) or mem.index in (X86_REG_RIP, X86_REG_EIP):
-                raise _Abandon("rip-relative lea")       # value depends on the load base (PIE)
+                # the value depends on the load base (PIE): an unconstrained address, never a
+                # constant -- sound, like a memory read
+                wr(insn, ops[0], z3.BitVec("addr%d" % next(_LOADS), dw))
+                continue
             e = z3.BitVecVal(mem.disp & _mask(nbits), nbits)
             for r, sc in ((mem.base, 1), (mem.index, mem.scale)):
                 if r:
@@ -325,11 +358,8 @@ def _lift_block(insns, nbits=64):
     return regs, flags, term
 
 
-def _classify_x86(code, va, nbits):
-    from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
-    md = Cs(CS_ARCH_X86, CS_MODE_32 if nbits == 32 else CS_MODE_64)
-    md.detail = True
-    _regs, flags, term = _lift_block(list(md.disasm(code, va)), nbits)
+def _cond_x86(_regs, flags, term):
+    """The taken-condition of the block's terminating jcc, or None (no claim possible)."""
     if term is None or not term.mnemonic.startswith("j"):
         return None
     jcc = _X86_JCC.get(term.mnemonic[1:])
@@ -338,7 +368,33 @@ def _classify_x86(code, va, nbits):
     need, build = jcc
     if any(flags[f] is None for f in need):
         return None                     # reads a flag we do not know exactly: no claim
-    return _decide(build(flags), term)
+    return build(flags)
+
+
+def _md(arch):
+    from capstone import (CS_ARCH_ARM64, CS_ARCH_X86, CS_MODE_32, CS_MODE_64,
+                          CS_MODE_LITTLE_ENDIAN, Cs)
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN) if arch == "aarch64" else \
+        Cs(CS_ARCH_X86, CS_MODE_32 if arch == "x86" else CS_MODE_64)
+    md.detail = True
+    return md
+
+
+def _lift(arch, code, va, init=None):
+    insns = list(_md(arch).disasm(code, va))
+    if arch == "aarch64":
+        return _lift_block_arm64(insns, init)
+    return _lift_block(insns, 32 if arch == "x86" else 64, init)
+
+
+def _cond(arch, state):
+    return _cond_arm64(*state) if arch == "aarch64" else _cond_x86(*state)
+
+
+def _classify_x86(code, va, nbits):
+    state = _lift("x86" if nbits == 32 else "x86_64", code, va)
+    cond = _cond_x86(*state)
+    return None if cond is None else _decide(cond, state[2])
 
 
 # ------------------------------------------------------------------------------------- AArch64 --
@@ -362,6 +418,8 @@ def _acanon(nm):
         return "xzr", 64 if nm[0] == "x" else 32
     if nm in ("sp", "wsp"):
         return "sp", 64 if nm == "sp" else 32
+    if nm in ("fp", "lr"):                       # capstone's names for x29 / x30
+        return ("x29" if nm == "fp" else "x30"), 64
     if nm and nm[0] in "xw" and nm[1:].isdigit() and 0 <= int(nm[1:]) <= 30:
         return "x" + nm[1:], 64 if nm[0] == "x" else 32
     raise _Abandon("non-GPR register " + str(nm))
@@ -381,7 +439,7 @@ def _aflags_logic(r):
     return {"N": _neg(r), "Z": r == 0, "C": z3.BoolVal(False), "V": z3.BoolVal(False)}
 
 
-def _lift_block_arm64(insns):
+def _lift_block_arm64(insns, init=None):
     """AArch64 analog of _lift_block: symbolically execute a straight-line integer block, each op at
     its register width (w = 32, x = 64; w writes zero-extend), tracking NZCV exactly through
     cmp/cmn/tst/adds/subs/ands/bics/negs and the terminating branch (b.<cond> / cbz / cbnz / tbz /
@@ -389,8 +447,8 @@ def _lift_block_arm64(insns):
     instruction. Returns (regs, flags, term); flags N/Z/C/V -> z3 Bool or None (unknown)."""
     from capstone.arm64 import (ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG, ARM64_SFT_ASR,
                                 ARM64_SFT_LSL, ARM64_SFT_LSR, ARM64_SFT_ROR)
-    regs = {}
-    flags = {"N": None, "Z": None, "C": None, "V": None}
+    regs = dict(init[0]) if init else {}
+    flags = dict(init[1]) if init else {"N": None, "Z": None, "C": None, "V": None}
     term = None
 
     def rdname(nm):
@@ -451,10 +509,65 @@ def _lift_block_arm64(insns):
         if m == "nop":
             continue
         if any(o.type == ARM64_OP_MEM for o in ops):
+            # loads give unconstrained values and stores are ignored (see the x86 lifter); a
+            # pre/post-index writeback changes the base register: not modelled -> abandon
+            post_index = n >= 2 and ops[-1].type == ARM64_OP_IMM and ops[-2].type == ARM64_OP_MEM
+            wb = None                          # (base register, new value) of a pre/post-index
+            if getattr(insn, "writeback", False) or post_index:
+                mop = next(o for o in ops if o.type == ARM64_OP_MEM)
+                if mop.mem.index:
+                    raise _Abandon("memory writeback with index")
+                bname = insn.reg_name(mop.mem.base)
+                step = ops[-1].imm if post_index else mop.mem.disp
+                wb = (mop, rdname(bname) + z3.BitVecVal(step & _mask(64), 64))
+                if _acanon(bname)[1] != 64:
+                    raise _Abandon("writeback base width")
+                if post_index:
+                    ops = ops[:-1]
+                    n -= 1
+            ld = {"ldr": None, "ldur": None, "ldrb": 8, "ldurb": 8, "ldrh": 16, "ldurh": 16,
+                  "ldrsb": -8, "ldursb": -8, "ldrsh": -16, "ldursh": -16, "ldrsw": -32,
+                  "ldursw": -32}
+            def writeback():
+                if wb is not None:
+                    c = _acanon(insn.reg_name(wb[0].mem.base))[0]
+                    if c != "xzr":
+                        regs[c] = wb[1]
+            if m in ld and n == 2:
+                w = width(ops[0], insn)
+                k = ld[m]
+                if wb is not None and _acanon(insn.reg_name(ops[0].reg))[0] == \
+                        _acanon(insn.reg_name(wb[0].mem.base))[0]:
+                    raise _Abandon("load into its own writeback base")
+                if k is None:
+                    setreg(ops[0], insn, z3.BitVec("mem%d" % next(_LOADS), w))
+                else:
+                    v = z3.BitVec("mem%d" % next(_LOADS), abs(k))
+                    if abs(k) > w:
+                        raise _Abandon("load width")
+                    ext = z3.SignExt if k < 0 else z3.ZeroExt
+                    setreg(ops[0], insn, v if abs(k) == w else ext(w - abs(k), v))
+                writeback()
+                continue
+            if m == "ldp" and n == 3:
+                base_c = _acanon(insn.reg_name(ops[2].mem.base))[0]
+                if wb is not None and base_c in {_acanon(insn.reg_name(o.reg))[0] for o in ops[:2]}:
+                    raise _Abandon("load pair into its own writeback base")
+                for o in ops[:2]:
+                    setreg(o, insn, z3.BitVec("mem%d" % next(_LOADS), width(o, insn)))
+                writeback()
+                continue
+            if m in ("str", "stur", "strb", "sturb", "strh", "sturh", "stp"):
+                writeback()                    # a store: only a writeback changes a register
+                continue
             raise _Abandon("memory")
         if m == "b" or m.startswith("b.") or m in ("cbz", "cbnz", "tbz", "tbnz"):
             term = insn
             break
+        if m in ("adrp", "adr") and n == 2:
+            # a PC-relative address: depends on the load base -- unconstrained (see x86 rip lea)
+            setreg(ops[0], insn, z3.BitVec("addr%d" % next(_LOADS), width(ops[0], insn)))
+            continue
         if m in ("mov", "movz") and n == 2:
             w = width(ops[0], insn)
             setreg(ops[0], insn, opval(ops[1], insn, w))
@@ -529,10 +642,13 @@ def _lift_block_arm64(insns):
 
 
 def _classify_arm64(code, va):
-    from capstone import CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, Cs
-    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
-    md.detail = True
-    regs, flags, term = _lift_block_arm64(list(md.disasm(code, va)))
+    state = _lift("aarch64", code, va)
+    cond = _cond_arm64(*state)
+    return None if cond is None else _decide(cond, state[2])
+
+
+def _cond_arm64(regs, flags, term):
+    """The taken-condition of the block's terminating branch, or None (no claim possible)."""
     if term is None:
         return None
     tm = term.mnemonic
@@ -567,7 +683,7 @@ def _classify_arm64(code, va):
         cond = build(flags)
     else:
         return None
-    return _decide(cond, term)
+    return cond
 
 
 # ---------------------------------------------------------------------------------- decision --
@@ -578,14 +694,35 @@ def _unsat(c):
     return s.check() == z3.unsat        # sat or unknown (timeout) -> not proven
 
 
-def _decide(cond, term):
-    always_true = _unsat(z3.Not(cond))
-    always_false = (not always_true) and _unsat(cond)
+def _decide(cond, term, assume=None):
+    """Always / never taken -- for every input, or (assume: a path condition) for every input on
+    that path: unsat(assume and not cond) / unsat(assume and cond). (Not via Implies(assume, cond):
+    an implication is true wherever the path is not taken, so "never" could never be shown.)"""
+    a = assume if assume is not None else z3.BoolVal(True)
+    always_true = _unsat(z3.And(a, z3.Not(cond)))
+    always_false = (not always_true) and _unsat(z3.And(a, cond))
     if not (always_true or always_false):
         return None                     # input-dependent: a real branch, not opaque
     return {"branch_va": term.address, "jcc": term.mnemonic,
             "result": "always-taken" if always_true else "never-taken",
-            "dead_direction": "fall-through" if always_true else "target"}
+            "dead_direction": "fall-through" if always_true else "target",
+            # opaque: the condition reads inputs (registers, memory) and is constant anyway --
+            # an inserted predicate. constant: it simplifies to true/false with no input left --
+            # a branch the compiler did not fold (`mov al,1; test al,al; je`), not obfuscation
+            "kind": "opaque" if _has_inputs(z3.simplify(cond)) else "constant"}
+
+
+def _has_inputs(e):
+    seen, stack = set(), [e]
+    while stack:
+        x = stack.pop()
+        if x.get_id() in seen:
+            continue
+        seen.add(x.get_id())
+        if z3.is_const(x) and x.decl().kind() == z3.Z3_OP_UNINTERPRETED:
+            return True
+        stack.extend(x.children())
+    return False
 
 
 def classify_block(code: bytes, va: int, arch: str = "x86_64"):
@@ -604,8 +741,106 @@ def classify_block(code: bytes, va: int, arch: str = "x86_64"):
         return None
 
 
+def classify_path(pred: bytes, pred_va: int, taken: bool | None, code: bytes, va: int,
+                  arch: str = "x86_64"):
+    """Classify the block at `va` as reached from the block at `pred_va` -- its ONLY predecessor --
+    over the edge `taken` (True: pred's branch taken, False: its fall-through, None: an
+    unconditional jump or straight fall-through). pred's registers and flags flow into the block
+    and the edge's condition is assumed. Sound only when the caller knows every predecessor of the
+    block (recover() requires a function without indirect jumps). Never raises."""
+    if z3 is None:
+        return None
+    try:
+        p_state = _lift(arch, pred, pred_va)
+        assume = z3.BoolVal(True)
+        if taken is not None:
+            pc = _cond(arch, p_state)
+            if pc is None:
+                return None
+            assume = pc if taken else z3.Not(pc)
+        b_state = _lift(arch, code, va, init=(p_state[0], p_state[1]))
+        cond = _cond(arch, b_state)
+        if cond is None or _unsat(assume):
+            return None
+        # constant by itself once the predecessor's computation flows in (an OLLVM -bcf predicate
+        # computed in one block and tested in the next): opaque / constant as for one block
+        r = _decide(cond, b_state[2])
+        if r is None:
+            # constant only GIVEN the edge's condition: a check implied by an earlier one (a
+            # redundant bounds check the compiler kept: `a+b < n` then `n-(a+b)-1 < n`) -- true,
+            # but not an inserted predicate
+            r = _decide(cond, b_state[2], assume)
+            if r is None:
+                return None
+            r["kind"] = "implied"
+        r["via"] = pred_va                # proven on the path through this predecessor
+        return r
+    except _Abandon:
+        return None
+    except Exception:       # noqa: BLE001 -- containment, as classify_block
+        return None
+
+
+_BRANCHES_A64 = ("b", "br", "ret", "cbz", "cbnz", "tbz", "tbnz")
+MAX_BLOCKS = 512                     # per function
+
+
+def _function_blocks(img, arch, lo, hi):
+    """Recursive descent over [lo, hi): {block start: (end, [(succ, taken)])} and whether the
+    function has an indirect jump (then predecessor sets are not known to be complete)."""
+    md = _md(arch)
+    code, base = img.code, img.text_va
+    leaders, work, indirect = {lo}, [lo], False
+    ends = {}
+    while work and len(ends) < MAX_BLOCKS:
+        a = work.pop()
+        if a in ends or not lo <= a < hi:
+            continue
+        succ, end = [], a
+        for ins in md.disasm(code[a - base:hi - base], a):
+            end = ins.address + ins.size
+            m = ins.mnemonic
+            if arch == "aarch64":
+                cond = m.startswith("b.") or m in ("cbz", "cbnz", "tbz", "tbnz")
+                jump = m == "b"
+                stop = cond or m in _BRANCHES_A64
+                if m == "br":
+                    indirect = True
+            else:
+                cond = m.startswith("j") and m != "jmp"
+                jump = m == "jmp"
+                stop = m.startswith("j") or m.startswith("ret")
+                if jump and ins.operands and ins.operands[0].type != 2:     # jmp reg / [mem]
+                    indirect = True
+            if cond or jump:
+                t = ins.operands[-1].imm if ins.operands and ins.operands[-1].type == 2 else None
+                if t is not None and lo <= t < hi:
+                    succ.append((t, True if cond else None))
+                    leaders.add(t)
+                    work.append(t)
+                elif cond or t is None:
+                    indirect = indirect or t is None
+            if cond:
+                succ.append((end, False))
+                leaders.add(end)
+                work.append(end)
+            if stop:
+                break
+        ends[a] = (end, succ)
+    # split blocks at leaders found later (a straight fall-through into a leader is an edge)
+    blocks = {}
+    for a in sorted(ends):
+        end, succ = ends[a]
+        cut = next((x for x in sorted(leaders) if a < x < end), None)
+        blocks[a] = (cut, [(cut, None)]) if cut is not None else (end, succ)
+    return blocks, indirect
+
+
 def recover(path) -> dict:
-    """Scan each function's entry block for an opaque terminating branch."""
+    """Scan every block of every function (recursive descent) for an opaque terminating branch:
+    alone first, then -- in functions without indirect jumps, where the predecessor set is known
+    -- through its single predecessor (a predicate computed in one block and tested in the next,
+    the -O2 shape of an OLLVM -bcf guard)."""
     import recover_emulate
     import gen_runtime_sigs
     img = recover_emulate.Image(path)
@@ -614,12 +849,33 @@ def recover(path) -> dict:
                     if img.text_va <= a < img.text_end)
     nexts = {s: n for s, n in zip(starts, starts[1:] + [img.text_end])}
     out = []
+    blocks_seen = 0
+
+    def raw(a, e):
+        return img.code[a - img.text_va:min(e, a + 256) - img.text_va]
     for s in starts:
-        block = img.code[s - img.text_va:min(nexts[s], s + 256) - img.text_va]
-        r = classify_block(block, s, arch)
-        if r:
-            out.append(r)
-    return {"arch": arch, "functions": len(starts), "opaque_branches": out}
+        try:
+            blocks, indirect = _function_blocks(img, arch, s, nexts[s])
+        except Exception:   # noqa: BLE001 -- one odd function must not end the scan
+            continue
+        blocks_seen += len(blocks)
+        preds = {}
+        for a, (_e, succ) in blocks.items():
+            for t, taken in succ:
+                if t is not None:
+                    preds.setdefault(t, []).append((a, taken))
+        for a, (e, _succ) in sorted(blocks.items()):
+            r = classify_block(raw(a, e), a, arch)
+            if r is None and not indirect and a != s and len(preds.get(a, ())) == 1:
+                p, taken = preds[a][0]
+                if blocks[p][0] - p <= 256:          # the WHOLE predecessor, never a truncation
+                    r = classify_path(raw(p, blocks[p][0]), p, taken, raw(a, e), a, arch)
+            if r:
+                out.append(r)
+    return {"arch": arch, "functions": len(starts), "blocks": blocks_seen,
+            "opaque_branches": [r for r in out if r["kind"] == "opaque"],
+            "constant_branches": [r for r in out if r["kind"] == "constant"],
+            "implied_branches": [r for r in out if r["kind"] == "implied"]}
 
 
 def _asm_block(hexstr):

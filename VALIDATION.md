@@ -3486,3 +3486,62 @@ size-lto.
 
 The golden emulation dump gained only the new `resolved_imports` key (empty on the benign
 fixture). Everything else is identical; regenerated for that reason.
+
+## 82. OLLVM -bcf and Hikari string encryption (Nov 2026)
+
+No obfuscating LLVM fork is available in the lab, so the passes' **output shapes** are written by
+hand and compiled with clang (`obf_src/ollvm_bcf/bcf.c`, `obf_src/hikari_strenc/hikari_ctor.c`),
+as `ollvm_fla` already was.
+
+**-bcf (bogus control flow):** real blocks guarded by opaque predicates over two globals the
+program never writes (`y < 10 || x*(x-1) even`), with the false side leading to a junk call.
+`deobf_opaque` found **0** of them in every build. Four reasons:
+1. A block that read memory was abandoned.
+2. Only each function's entry block was scanned.
+3. clang -O2/-Os computes the parity in one block and tests it in the next.
+4. `push`, rip-relative `lea`, `adrp` and AArch64 writeback abandoned the block.
+
+Changes, all sound for always/never claims:
+- A memory read is an unconstrained value, and stores are ignored.
+- push/pop are modelled; a rip-relative lea or adrp is an unconstrained address; pre/post-index
+  writeback is modelled exactly.
+- Every block of every function is scanned (recursive descent within the function).
+- A block whose only predecessor is known is lifted through it, with the edge's condition.
+  This is done only in functions without an indirect jump, where the predecessor set is complete.
+
+Claims are now typed:
+- `opaque`: reads inputs and is constant anyway, an inserted predicate.
+- `constant`: no input left after simplification (`mov al,1; test al,al; je`), a branch the
+  compiler did not fold.
+- `implied`: constant only given the predecessor's edge condition. These are redundant checks;
+  benign_rust_std.x64 0x4dee8 (`a+b < n` then `n-(a+b)-1 < n`) was verified by hand, on both
+  edges.
+
+Measured (macOS clang, Mach-O):
+
+| build | opaque before | opaque after | constant / implied |
+|---|---|---|---|
+| arm64 -O1 / -O2 / -Os | 0 / 0 / 0 | 3 / 2 / 2 | 0 |
+| x86-64 -O1 / -O2 / -Os | 0 / 0 / 0 | 3 / 2 / 2 | 0 |
+| benign_rust_std.x64 | 0 | **0** | 12 / 3 (each checked: true) |
+
+At -O2, clang merges the last two guards onto one parity test, hence 2.
+
+Precision: `test_precision_on_committed_binary` is unchanged and green (opaque == []). The
+unit tests cover push/pop, unconstrained loads and stores, both writeback forms, a predicate
+computed in the predecessor, and both edges of the implied check. Two of my own errors were
+caught before commit:
+- deciding a path with `Implies(assume, cond)`, which can never show "never taken";
+- `fp`/`lr` (capstone's x29/x30) not accepted as GPRs.
+
+Not done: a differential test of the new memory forms against Unicorn (the generator emits no
+memory operands). The random-block differential test needs llvm-mc and ran on Kali only (see the
+lab table). Windows / ELF builds of bcf.c are measured by CI's native job, not here.
+
+**Hikari string encryption** (XOR'd constants in .data, all decrypted in place by one global
+constructor): already recovered before this round (2/2 strings, arm64 and x86-64 Mach-O, clang
+-O2), via constructor priming plus emulation of the constructor. It is locked by
+`test_hikari_constructor_strings`.
+
+Tests: `tests/test_ollvm_shapes.py` (built at test time; fails on the old code, 6 cases) and the
+new cases in `tests/test_opaque.py`.

@@ -141,3 +141,68 @@ def test_recover_contains_per_block_failures(monkeypatch):
         raise RuntimeError("synthetic lifter bug")
     monkeypatch.setattr(O, "_lift_block", boom)
     assert O.classify_block(_b("4889f8 4883c801 4883f800 7500"), 0x1000) is None
+
+
+# --- memory as unconstrained values; push/pop; AArch64 writeback; cross-block (VALIDATION §82) ---
+# hand-assembled with clang's integrated assembler (x86: .intel_syntax), deterministic
+def test_bcf_predicate_over_a_global_is_opaque():
+    # push rbx; mov eax,[rip+..] (OLLVM's global x); ecx = ~x * x; test cl,1; jne: x*(x-1) style
+    # parity -- the product is even for EVERY value the global holds
+    r = O.classify_block(_b("53 8b0500010000 89c1 f7d1 0fafc8 f6c101 7500"), 0x1000)
+    assert r and r["result"] == "never-taken" and r["kind"] == "opaque", r
+
+
+def test_push_pop_move_the_stack_pointer():
+    # mov rax,rsp; push rbx; push rcx; pop rdx; sub rax,rsp; cmp rax,8; jne -> never
+    r = O.classify_block(_b("4889e0 53 51 5a 4829e0 4883f808 7500"), 0x1000)
+    assert r and r["result"] == "never-taken", r
+
+
+def test_popped_and_reloaded_values_are_unconstrained():
+    # pop rax; cmp rax,0; je -> no claim. A store is never trusted either: mov [rdi],5;
+    # mov eax,[rdi]; cmp eax,5; je -> no claim (an over-approximation, never an unsound claim)
+    assert O.classify_block(_b("58 4883f800 7400"), 0x1000) is None
+    assert O.classify_block(_b("c70705000000 8b07 83f805 7400"), 0x1000) is None
+
+
+def test_arm64_post_and_pre_index_writeback():
+    # mov x2,x0; ldr x1,[x0],#8; sub x3,x0,x2; cmp x3,#8; b.ne -> never (x0 advanced by 8)
+    r = O.classify_block(_b("e20300aa 018440f8 030002cb 7f2000f1 01020054"), 0x1000, "aarch64")
+    assert r and r["result"] == "never-taken", r
+    # ldr x1,[x0,#16]! -> advanced by 16
+    r = O.classify_block(_b("e20300aa 010c41f8 030002cb 7f4000f1 01020054"), 0x1000, "aarch64")
+    assert r and r["result"] == "never-taken", r
+
+
+def test_arm64_bcf_predicate_after_a_frame_push():
+    # stp x29,x30,[sp,#-16]!; adrp x8,..; ldr w8,[x8]; mvn w9,w8; mul w8,w8,w9; tbnz w8,#0
+    r = O.classify_block(_b("fd7bbfa9 08000090 080140b9 e903282a 087d091b 08020037"), 0x1000,
+                         "aarch64")
+    assert r and r["result"] == "never-taken" and r["kind"] == "opaque", r
+    # a loaded value alone: ldr x0,[x1]; cmp x0,#0; b.eq -> no claim
+    assert O.classify_block(_b("200040f9 1f0000f1 00020054"), 0x1000, "aarch64") is None
+
+
+def test_predicate_computed_in_the_predecessor():
+    # clang -O2 splits the guard: pred computes cl = ~x*x and tests the other global (y >= 10);
+    # the block only does `test cl,1; jne`. Alone: no claim; through its only predecessor: opaque
+    pred = _b("8b0500010000 89c1 f7d1 0fafc8 833d000200000a 7d00")
+    blk = _b("f6c101 7500")
+    assert O.classify_block(blk, 0x2000) is None
+    for taken in (True, False):
+        r = O.classify_path(pred, 0x1000, taken, blk, 0x2000)
+        assert r and r["result"] == "never-taken" and r["kind"] == "opaque" and r["via"] == 0x1000, r
+
+
+def test_check_implied_by_the_predecessor_is_not_opaque():
+    # benign_rust_std.x64 0x4dee8 (measured): a+b < n, then n-b+~a < n -- true on that path only,
+    # a redundant bounds check, reported as "implied", never as an opaque predicate
+    pred = _b("4b8d040a 4839d8 7300")
+    blk = _b("4c89d0 48f7d0 4889df 4c29cf 4801c7 4839df 7300")
+    assert O.classify_block(blk, 0x2000) is None
+    r = O.classify_path(pred, 0x1000, False, blk, 0x2000)
+    assert r and r["result"] == "never-taken" and r["kind"] == "implied", r
+    # the other edge (s = a+b >= n): n-s-1 wraps to 2^64+n-s-1 >= n, so jae is always taken --
+    # also implied, also true
+    r = O.classify_path(pred, 0x1000, True, blk, 0x2000)
+    assert r and r["result"] == "always-taken" and r["kind"] == "implied", r
