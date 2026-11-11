@@ -504,3 +504,74 @@ def test_a_used_string_inside_a_used_buffer_is_never_dropped():
     rows = [(s, f, a, used or s == "chema-v9") for s, f, a, used in _PE32_TIGHT]
     kept = {r["string"] for r in R._drop_overlap_artifacts(_records(rows))}
     assert "chema-v9" in kept
+
+
+# obfuse_aes (AES-256-GCM, software AES on AArch64), elf-arm64 release strip, Kali builds #12 and #22
+# (VALIDATION §77/§78; sha256 6abac2f08d24d2fd / dd2c7175c67ffff4): records as the emulator produced
+# them. The last partial block is decrypted in a 16-byte stack scratch at 0x7f00000ffde0 and used
+# from there; the capture also read 4 bytes before it (and one after), printable by chance -- which
+# ones depends on the build's random key, so the leaked piece changed per build (CI #122, #123).
+_AES_BLOCK = [
+    ("canary::delta::feature-flag-telemetry-off", 0x225660, [0x300000f0, 0x300006f0, 0x30000770], True),
+    ("canary::delta::feature-flag-tele", 0x225660, [0x300006f0], False),
+    ("metry-off", 0x225660, [0x7f00000ffde0], True),
+    ("emetry-off", 0x225660, [0x3000010f], False),
+    (":gUnmetry-offa", 0x225660, [0x7f00000ffddc], False),            # build #12
+    ("canary::echo::schema-version-4", 0x225660, [0x300000f0, 0x300007e0, 0x30000850], True),
+    ("canary::echo::sc", 0x225660, [0x300007e0], False),
+    ("hema-version-4", 0x225660, [0x7f00000ffde0], True),
+    ("9(dFhema-version-4", 0x225660, [0x7f00000ffddc], False),        # build #22
+]
+
+
+def test_used_aead_block_read_with_its_neighbours_is_dropped():
+    kept = {r["string"] for r in R._drop_overlap_artifacts(_records(_AES_BLOCK))}
+    assert ":gUnmetry-offa" not in kept and "9(dFhema-version-4" not in kept, kept
+    assert {"canary::delta::feature-flag-telemetry-off", "canary::echo::schema-version-4"} <= kept
+
+
+def test_same_text_not_over_the_used_block_is_kept():
+    # the address is the evidence: the used piece must sit inside x exactly where it was used. The
+    # same text captured one byte off (or elsewhere) is not that view and is left to the other rules
+    rows = [(s, f, [a[0] + 1] if s in (":gUnmetry-offa", "9(dFhema-version-4") else a, u)
+            for s, f, a, u in _AES_BLOCK]
+    kept = {r["string"] for r in R._drop_overlap_artifacts(_records(rows))}
+    assert {":gUnmetry-offa", "9(dFhema-version-4"} <= kept, kept
+
+
+def test_used_block_view_rule_needs_the_piece_to_belong_to_a_longer_used_string():
+    # a used string that is NOT a piece of another used one (a string of its own, e.g. a short
+    # message) keeps a longer capture around it: only an AEAD block of a used whole is junk-padded
+    rows = [(s, f, a, u) for s, f, a, u in _AES_BLOCK if not s.startswith("canary::delta")]
+    rows = [(s, f, a, u) for s, f, a, u in rows if s != "emetry-off"]
+    kept = {r["string"] for r in R._drop_overlap_artifacts(_records(rows))}
+    assert ":gUnmetry-offa" in kept, kept
+
+
+# The adversarial input itself: obfuse_aes 1.0.1 (AES-256-GCM, unseeded), elf-arm64 release strip,
+# built on Kali with rustc 1.99.1 (build #12 of VALIDATION §77; sha256 6abac2f08d24d2fd...). Its
+# random key makes the scratch around the last partial block printable (`:gUn` ... `a`); every other
+# build of the 35 measured but one passed. A committed binary keeps this case forever, whatever keys
+# future builds draw.
+AEAD_LEAK = ROOT / "tests" / "fixtures" / "aead" / "obfuse_aes_leak.arm64"
+
+
+def test_aead_scratch_leak_fixture_gives_exactly_the_canaries():
+    import json
+    import recover
+    canaries = json.loads((ROOT / "bench_src" / "manifest.json").read_text())["canaries"]
+    res = recover.run(AEAD_LEAK, stackstrings=False, literals=False, time_budget=300)
+    got = {x["string"] for x in res["decoded"]}
+    assert got == set(canaries), (sorted(set(canaries) - got), sorted(got - set(canaries)))
+
+
+def test_byte_by_byte_decode_chain_keeps_the_whole_string():
+    # scatter_cryptify size-lto (pe / elf-arm64, measured): the decoder pushes one byte at a time, so
+    # every prefix is a used string at the SAME address and the whole string holds the last of them
+    # at offset 0. That is the string, not a scratch block with junk: a first version of the block
+    # rule dropped three whole strings here.
+    s = "Software\\Northwind\\Agent\\Settings"
+    rows = [(s[:n], 0x158d, [0x30000160], True) for n in range(len("Software\\Northwind\\Agent"), len(s))]
+    rows.append((s, 0x158d, [0x30000160], False))
+    kept = {r["string"] for r in R._drop_overlap_artifacts(_records(rows))}
+    assert s in kept, kept

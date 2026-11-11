@@ -3212,6 +3212,37 @@ def _drop_overlap_artifacts(records):
             if m >= 6 and 0 < len(x) - m <= 3:
                 garbled.add(x)
                 break
+    # a used block read with its neighbours: x holds, AT THE ADDRESS the code used it, a string u
+    # the code passed on -- itself a piece of a longer used string (an AEAD's last partial block,
+    # decrypted in a 16-byte stack scratch) -- plus a few bytes on either side that are keystream or
+    # stale stack and printable by chance. Measured (obfuse_aes, AES-256-GCM, AArch64 software AES):
+    # `:gUn` + `metry-off` + `a`, `9(dF` + `hema-version-4`, CI #122 ` ` + `metry-off` + `}.o@ `
+    # -- which bytes are printable depends on the key, so the piece that leaked changed per build
+    # (VALIDATION §78). The content-only block rule above takes junk after the piece only.
+    # (holders(): the pooled, cached substring search -- a pairwise scan of used strings was
+    # quadratic, and real binaries yield thousands)
+    whole = used | exact
+    blocks = sorted((a, u) for u in used if len(u) >= 6
+                    and any(len(y) > len(u) and y in whole for y in holders(u))
+                    for a in addrof.get(u, ()))
+    block_lo = [a for a, _u in blocks]
+    # Junk BEFORE the block is required (k > 0): a string decoded byte by byte into a growing buffer
+    # (cryptify) is a chain of used prefixes at one address, and the whole string holds the last of
+    # them at offset 0 -- that is the string itself, not a scratch block (measured: scatter_cryptify
+    # size-lto lost three whole strings to the k = 0 case). Junk only after the block is the
+    # content rule's case above. And x must not be text of a used string itself.
+    for x in texts - used - exact - garbled:
+        hit = False
+        for a in addrof.get(x, ()):
+            j = bisect.bisect_right(block_lo, a)          # blocks starting strictly after a
+            while not hit and j < len(blocks) and blocks[j][0] < a + len(x):
+                au, u = blocks[j]
+                k = au - a
+                if k + len(u) <= len(x) and x[k:k + len(u)] == u and 0 < len(x) - len(u) <= 8:
+                    hit = True
+                j += 1
+        if hit and not any(y != x and y in whole for y in holders(x)):
+            garbled.add(x)
     # a reversed view: a piece of a used string backwards (`ffo-yrtemelet-galf-e` from
     # `...feature-flag-telemetry-off`), a decode's intermediate state written in reverse order
     used_pool = "\0".join(sorted(used))
