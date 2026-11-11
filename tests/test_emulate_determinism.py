@@ -53,3 +53,30 @@ def test_results_independent_of_allocation(monkeypatch):
     assert grabbed > 100                     # the perturbation really ran
     diff = [hex(f) for f in plain if plain[f] != perturbed[f]]
     assert not diff, f"allocation-dependent results in {len(diff)} functions: {diff[:8]}"
+
+
+@pytest.mark.parametrize("fixture", ["ct32", "ct64"])
+def test_reset_restores_fpu_sse_and_flags(fixture):
+    """A run must not inherit CPU state from the one before it. _reset wrote the general registers
+    one by one and left x87 (stack, tags), SSE and EFLAGS as the previous run had them: on unicorn
+    2.1.4 (CPUID reports AES-NI) exploring one PE32 function left the x87 stack full, the next
+    function's i386 `fild`/`fistp` 64-bit loads read the indefinite value, and obfuse_aes lost 2 of
+    5 strings in whichever worker ran that function first (CI benchmark pe32, VALIDATION §75)."""
+    from unicorn import x86_const as X
+    img = R.Image(str(ROOT / "tests" / "fixtures" / "emu" / fixture))
+    regs = (X.UC_X86_REG_FPSW, X.UC_X86_REG_FPTAG, X.UC_X86_REG_FPCW, X.UC_X86_REG_MXCSR,
+            X.UC_X86_REG_EFLAGS, X.UC_X86_REG_XMM2)
+
+    def state(emu):
+        emu._reset()
+        return [emu.uc.reg_read(r) for r in regs]
+
+    clean = state(R.Emulator(img))
+    dirty = R.Emulator(img)
+    uc = dirty.uc
+    uc.reg_write(X.UC_X86_REG_FPTAG, 0)                          # all 8 x87 slots in use
+    uc.reg_write(X.UC_X86_REG_FPSW, 0x0041)     # stack fault + invalid flags
+    uc.reg_write(X.UC_X86_REG_XMM2, 0x1234)
+    uc.reg_write(X.UC_X86_REG_MXCSR, 0x1f80 ^ 0x6000)            # round toward zero
+    uc.reg_write(X.UC_X86_REG_EFLAGS, 0x487)                     # DF set, CF/PF/SF
+    assert state(dirty) == clean

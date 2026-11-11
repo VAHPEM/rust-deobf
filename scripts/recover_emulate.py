@@ -1399,6 +1399,13 @@ class Emulator:
             except Exception:
                 pass
         _fast_access(uc)
+        # the power-on CPU context, restored at every _reset: registers the reset does not write one
+        # by one (x87 stack + tags, SSE/AVX, MXCSR, EFLAGS, AArch64 SIMD/FPCR) otherwise carry over
+        # from the previous run. Measured (unicorn 2.1.4, PE32 obfuse_aes): exploring one function
+        # left the x87 stack full, so the next function's i386 64-bit loads (`fild`/`fistp`) read
+        # the indefinite value and `main` decoded 3 of 5 strings -- in whichever worker happened to
+        # run that function first (results depended on the worker count).
+        self._ctx0 = uc.context_save()
         map_image(uc, self.img.binary)
         # read+execute only: a store through an import's address (a data import such as msvcrt's
         # `__initenv`, or a fake pointer that is really a function pointer) faults like it would
@@ -1544,6 +1551,7 @@ class Emulator:
             self.sizes = {}
         self.last_error = 0
         self.brk = BRK
+        uc.context_restore(self._ctx0)     # every register back to power-on (see _fresh)
         # thread-local storage: Rust reads thread-locals (the current thread, panic count, output
         # capture) through the thread pointer; with it at 0 the first access faults
         tp = TLS + TLS_SIZE // 2
