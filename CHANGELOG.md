@@ -8,6 +8,12 @@ distributions always share one version.
 
 ## [Unreleased]
 
+## [0.1.0rc1] - 2026-11-11
+
+Release candidate for 0.1.0: the first end-to-end run of the release pipeline -- build, the
+installed-wheel tests on four operating systems, and Trusted Publishing to PyPI for both
+distributions. The content is the 0.1.0 section below.
+
 ## [0.1.0] - not yet released
 
 Planned first packaged release (`pip install rust-deobf` / `pipx install rust-deobf` once it is on
@@ -70,4 +76,5 @@ was developed in the open before packaging and is summarised by theme.
   that survives one failing target), plus Windows and AArch64 portability fixes.
 
 [Unreleased]: https://github.com/VAHPEM/rust-deobf/compare/v0.1.0...HEAD
+[0.1.0rc1]: https://github.com/VAHPEM/rust-deobf/releases/tag/v0.1.0rc1
 [0.1.0]: https://github.com/VAHPEM/rust-deobf/releases/tag/v0.1.0
