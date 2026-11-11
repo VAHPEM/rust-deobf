@@ -273,7 +273,11 @@ def test_core_wheel_contents(dist):
         f"rust_deobf-{v}.dist-info/METADATA").decode()
     assert "License-Expression: Apache-2.0" in meta
     assert f'Requires-Dist: rust-deobf-premium=={v}; extra == "premium"' in meta
-    assert re.search(r'Requires-Dist: unicorn.*platform_machine != "ARM64"', meta)
+    # unconditional: a platform_machine marker dropped them for x64 Python 3.14 on Windows-on-ARM
+    # (platform_machine is the host CPU there), the setup README recommends
+    for dep in ("capstone", "unicorn"):
+        line = [ln for ln in meta.splitlines() if ln.startswith(f"Requires-Dist: {dep}")]
+        assert len(line) == 1 and ";" not in line[0], line
     sdist = tarfile.open(dist / f"rust_deobf-{v}.tar.gz").getnames()
     assert not [n for n in sdist if "/premium/" in n or "/tests/" in n], "core sdist leaks"
 

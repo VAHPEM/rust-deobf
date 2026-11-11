@@ -334,8 +334,8 @@ python3 -m pip install rust-deobf          # into the current environment / venv
 - **Extras:** `[dynamic]` Frida (runs the sample: isolated VM only), `[rules]` yara-python +
   flare-capa to validate exported rules, `[dev]` pytest + build.
 - **Windows on ARM:** use the **x64** Python build (it runs under emulation). Native ARM64 Python
-  has no `unicorn`/`capstone<6` wheels; `pip install` still completes there, and `rust-deobf`
-  explains what to do instead of failing.
+  has no `unicorn`/`capstone<6` wheels, so `pip install` fails there while building them; install
+  into an x64 Python instead (`rust-deobf doctor` checks which one you are running).
 - **Upgrades and data:** the signature/data files (`data/*.json`) ship inside the package and are
   replaced on upgrade. Per-user caches live under `~/.cache/rust-deobf` (Linux; macOS
   `~/Library/Caches/rust-deobf`, Windows `%LOCALAPPDATA%\rust-deobf` — `rust-deobf doctor` prints
