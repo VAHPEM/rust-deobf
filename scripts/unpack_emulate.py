@@ -88,6 +88,7 @@ _WIN_ARGS = {
     "getcurrentprocessid": 0, "queryperformancecounter": 1, "getsystemtimeasfiletime": 1,
     "isdbcsleadbyteex": 2, "multibytetowidechar": 6, "widechartomultibyte": 8, "freelibrary": 1,
     "getprocessheap": 0, "heapalloc": 3, "heapfree": 3, "exitthread": 1,
+    "writefile": 5, "writeconsolew": 5, "writeconsolea": 5,
 }
 # C runtime DLLs export cdecl functions: the caller cleans the stack, so any of them can be returned
 # from on x86-32 without knowing its argument count
@@ -173,6 +174,7 @@ class _Unpacker:
         self.stopped = "ret"             # ret|oep|exit|budget|timeout|unmapped|write_cap|error|import:<n>
         self.blocks = 0
         self.modules = {}                # fake handle -> dll name
+        self.tls = {}                    # TlsAlloc index -> value (Rust std on Windows needs it)
         self.dyn = []                    # GetProcAddress names; dyn i lives at _DYN + 16*i
         self.dyn_by_name = {}
         self.iat = {}                    # slot va -> "dll!api" for slots the stub filled in
@@ -499,6 +501,34 @@ class _Unpacker:
         if api in ("malloc", "calloc"):
             n = self._arg(0) * (self._arg(1) if api == "calloc" else 1)
             return self._ret(self._alloc(min(n, HEAP_SIZE)), nargs)
+        # thread-local storage: Rust std's thread-locals (and their destructors) go through these;
+        # returning 0 made TlsSetValue fail and std abort (__fastfail) before main's own code ran
+        if api == "tlsalloc":
+            if len(self.tls) >= 1024:
+                return self._ret(0xffffffff, nargs)              # TLS_OUT_OF_INDEXES
+            i = len(self.tls) + 1
+            self.tls[i] = 0
+            return self._ret(i, nargs)
+        if api == "tlsgetvalue":
+            return self._ret(self.tls.get(self._arg(0) & 0xffffffff, 0), nargs)
+        if api == "tlssetvalue":
+            i = self._arg(0) & 0xffffffff
+            if i not in self.tls:
+                return self._ret(0, nargs)
+            self.tls[i] = self._arg(1)
+            return self._ret(1, nargs)
+        if api == "tlsfree":
+            return self._ret(1 if self.tls.pop(self._arg(0) & 0xffffffff, None) is not None else 0, nargs)
+        # output succeeds (all bytes written): a failed write is an io::Error and std's print!
+        # panics -- the run would end in an abort that says nothing about the sample
+        if api in ("writefile", "writeconsolew", "writeconsolea"):
+            n, done = self._arg(2), self._arg(3)
+            if done:
+                try:
+                    uc.mem_write(done, struct.pack("<I", n & 0xffffffff))
+                except UcError:
+                    pass
+            return self._ret(1, nargs)
         dll = name.split("!")[0].lower() if "!" in name else ""
         if self.x32 and self.pe and api not in _WIN_ARGS and not dll.startswith(_CDECL_DLLS):
             # unknown stdcall cleanup: returning would corrupt the stack, so stop honestly here

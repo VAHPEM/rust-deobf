@@ -1,0 +1,17 @@
+[package]
+name = "rust_packer"
+version = "0.1.0"
+edition = "2021"
+
+# benign: see src/main.rs. No dependencies.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+
+[profile.size-lto]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

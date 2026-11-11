@@ -186,3 +186,22 @@ def test_abbreviated_execute_gate_rejected(tmp_path, monkeypatch):
     # ... but not when it only appears in the target's pass-through --argv
     unpack.main([str(sample), "--dynamic", "--json", "--argv", "--i-understand-this-executes"])
     assert seen == {"dynamic": True, "ack": False}
+
+
+RUST_PACKER = ROOT / "tests" / "fixtures" / "pack" / "rust_packer.exe"
+
+
+def test_rust_written_packer_stage2_is_carved():
+    # obf_src/rust_packer, pe size-lto (VALIDATION §83): a whole Rust std program is the stub; it
+    # RC4-decrypts a 64-byte stage-2 into VirtualAlloc'd RWX memory and calls it. Before, std's
+    # thread-locals failed (TlsSetValue returned 0) and the run aborted (__fastfail) before main's
+    # own code: no OEP, nothing carved.
+    import json
+    want = bytes.fromhex(json.loads((ROOT / "obf_src" / "rust_packer" / "expected.json")
+                                    .read_text())["stage2"]["x86_64"])
+    res = U.recover(RUST_PACKER)
+    carved = [r for r in res["_regions"] if r["executed"]]
+    assert carved and carved[0]["_bytes"][:len(want)] == want, \
+        ({k: res.get(k) for k in ("stopped", "oep")}, [r["_bytes"][:16].hex() for r in carved])
+    assert res["oep"] == carved[0]["va"]
+    assert "VirtualAlloc" in res["import_calls"]

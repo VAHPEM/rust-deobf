@@ -52,3 +52,31 @@ def test_obf_resolved_imports(crate, fmt, ext, profile):
     got = {r["name"] for r in _run(path).get("resolved_imports", []) if not r["in_file"]}
     assert set(want) <= got, (sorted(set(want) - got), sorted(got))
 
+
+ARCH = {"elf": "x86_64", "pe": "x86_64", "elf-arm64": "aarch64"}
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+@pytest.mark.parametrize("fmt,ext", FORMATS)
+@pytest.mark.parametrize("crate", CRATES)
+def test_obf_unpacked_stage2(crate, fmt, ext, profile):
+    """A Rust-written packer (§83): the whole std program runs as the stub, RC4-decrypts the stage-2
+    into fresh RWX memory (mmap / VirtualAlloc) and calls it. unpack_emulate must stop at that call
+    (the OEP) and carve exactly the decrypted stage-2."""
+    want = json.loads((OBF / crate / "expected.json").read_text()).get("stage2", {}).get(ARCH[fmt])
+    if not want:
+        pytest.skip(f"{crate} carries no packed stage-2")
+    path = BUILD / f"{crate}__{fmt}__{profile}__strip{ext}"
+    if not path.is_file():
+        pytest.skip(f"not built: {path.name}")
+    import unpack_emulate as U
+    res = U.recover(path)
+    # the stage-2 runs in FRESH memory, called (not jumped to) by the stub, so emulation goes on
+    # past it (a hand-off into fresh memory is followed, as UPX's ELF decompressor needs); the
+    # stop reason is whatever the program does next. What must hold: the OEP is the carved,
+    # executed stage-2, byte for byte
+    carved = [r for r in res["_regions"] if r["executed"]]
+    assert carved, {k: res.get(k) for k in ("stopped", "error", "oep")}
+    assert carved[0]["_bytes"][:len(want) // 2] == bytes.fromhex(want), \
+        [r["_bytes"][:16].hex() for r in carved]
+    assert res["oep"] == carved[0]["va"], (res["oep"], carved[0]["va"])

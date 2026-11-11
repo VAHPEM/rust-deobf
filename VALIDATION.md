@@ -3545,3 +3545,41 @@ constructor): already recovered before this round (2/2 strings, arm64 and x86-64
 
 Tests: `tests/test_ollvm_shapes.py` (built at test time; fails on the old code, 6 cases) and the
 new cases in `tests/test_opaque.py`.
+
+## 83. A Rust-written packer: a std program as the stub, RC4 stage-2 in fresh RWX memory (Nov 2026)
+
+Fixture: `obf_src/rust_packer`, benign. The whole Rust std program is the stub. It RC4-decrypts a
+64-byte stage-2 (a NOP sled, then `mov eax, 42; ret` / `mov w0, #42; ret`) into memory from
+`mmap` / `VirtualAlloc` (RWX) and calls it. Run natively on Kali it prints "stage-2 returned 42".
+Built pe and elf-arm64, release and size-lto.
+
+**Before:**
+- **PE: nothing.** unpack_emulate returned `TlsAlloc` / `TlsSetValue` / `TlsGetValue` as 0, an
+  unknown import. `TlsSetValue` = FALSE made std's thread-locals fail, and std aborted
+  (`int 0x29`, `__fastfail`) after writing a panic to stderr. That happened before main's own
+  code, so there was no `VirtualAlloc`, no OEP and no carve. Every Rust std program on Windows
+  is affected (MinGW std uses TLS keys), packed or not.
+- elf-arm64: the stage-2 did run (an OEP was reported), but nothing was carved, because the
+  first fixture's 6-8 byte stage-2 was under `_MIN_REGION` (16 bytes). The fixture was enlarged
+  to 64 bytes; real payloads are larger still.
+
+**Fix:** TLS is modelled (indices, values, `TLS_OUT_OF_INDEXES` past 1024 keys), and
+`WriteFile` / `WriteConsoleW/A` succeed and report every byte written. A failed write is an
+io::Error, and std's print! panics.
+
+**After (4 builds):** the executed region is exactly the 64-byte stage-2, byte for byte, and the
+OEP is its address.
+- elf-arm64 ends `exit`.
+- pe ends `error`: std aborts in a later print path after the stage-2 returned, from a call still
+  not modelled. The stop reason is reported, not hidden; the OEP and the carve were already
+  correct.
+
+A stage-2 that is CALLED (not jumped to) in fresh memory stays a followed stage, as UPX's ELF
+decompressor needs. The OEP is then the first unpacked code.
+
+The golden emulation dump (UPX PE / ELF fixtures included) is unchanged.
+
+Tests:
+- `test_rust_written_packer_stage2_is_carved`, on the committed `tests/fixtures/pack/rust_packer.exe`
+  (248 KB, pe size-lto, stripped). On the old code it fails with no OEP and nothing carved.
+- `test_obf_unpacked_stage2` (built matrix).

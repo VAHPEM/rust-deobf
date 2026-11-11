@@ -411,6 +411,9 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   drop glue keys on `_Unwind_Resume`; MSVC uses `__CxxFrameHandler3` funclets). Rust's own
   mangling and vtables are ABI-independent. `gen_sigdb._pe_abi` detects MSVC; nothing else uses it
   yet, and recover_libfuncs keys the std layer by arch+format only (§75).
+- **unpack_emulate models Win32 TLS** (§83): `TlsAlloc/Get/Set/Free` keep real values and
+  WriteFile/WriteConsole succeed -- returning 0 made every Rust std program on Windows abort
+  (`int 0x29`) before main, so a Rust-written packer was never followed to its stage-2.
 - **UPX's x86-64 ELF stub ends in an escape hatch** (`syscall; pop rdx; ret` written right after
   the program's text): code the stub produced in the image that is NOT the OEP; unpack_emulate
   records it under `hatches`. `syscall` ends a Unicorn block, so match the hatch's whole span.

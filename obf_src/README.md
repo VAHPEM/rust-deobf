@@ -18,5 +18,9 @@ meets, as opposed to the hand-rolled ciphers in `bench_src/`. Ground truth for e
   post-pass form and compiled by the tests themselves (`tests/test_deflatten.py`,
   `tests/test_ollvm_shapes.py`, §82).
 
+- **rust_packer** — a Rust std program as a packer stub: RC4-decrypts a 64-byte stage-2 (returns
+  42) into fresh RWX memory and calls it; `expected.json` `stage2` is what unpack_emulate must
+  carve (§83). Safe to run.
+
 No payloads, no real indicators. Samples of real malware are referenced by hash only, in
 `../gallery/manifest.json`, and analysed in an isolated VM.
