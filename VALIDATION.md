@@ -3177,3 +3177,55 @@ tests are not part of it):
 | macOS 15.5 ARM64 (local, Python 3.12.5) | 0 failed / 709 passed / 60 skipped |
 | ARM64 Kali (native aarch64, Python 3.14.7) | 0 failed / 733 passed / 36 skipped |
 | Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 676 passed / 93 skipped |
+
+## 77. Is the benchmark gate deterministic? Measured: no, by design (Nov 2026)
+
+CI #121 (7e2dcbf) was green; CI #122 and #123 were red on the same commit 81f2f02. 81f2f02 changed
+only a version string and a CHANGELOG entry. Both red runs failed `obfuse_aes` elf-arm64 on precision,
+each with a different extra string: #122 `' metry-off}.o@ '`, #123 `'ENDPOINT'`. Both are pieces of
+canaries caught mid-decode.
+
+**1. Which benchmark crates draw fresh keys per build.** Source read in the crates
+`build_all.sh` resolves (no Cargo.lock is committed: `bench_src/*/Cargo.lock` is ignored, so CI
+resolves versions afresh each run; here obfuse 1.0.1, muddy 0.3.3, obfstr 0.4.6, obfany 0.1.5,
+litcrypt 0.4.0, litcrypt2 0.1.3, cryptify 3.2.1):
+- `obfuse` (polymorphic), `obfuse_aes`, `obfuse_xor`: `getrandom` at macro expansion unless the
+  call passes `seed = "..."` (all three modes honour it).
+- `muddy`: `OsRng` key and nonce; no seed option (its `env` feature moves the key out of the
+  binary to run time).
+- Fixed: litcrypt / litcrypt2 / cryptify (key from an env var the manifest sets), obfstr / obfany
+  (`SEED` = "FIXED" without `OBFSTR_SEED` / `OBFANY_SEED`), the hand-rolled crates.
+
+Measured on ARM64 Kali (rustc 1.99.1): all of `bench_src` built 5 times from clean `target/`
+dirs (Cargo.lock kept from run 1), formats elf-arm64, elf-arm64gnu, pe, pe32, release.
+| crates | sha256 across the 5 builds |
+|---|---|
+| obfuse, obfuse_aes, obfuse_xor, muddy | 5 distinct in every format (also with the PE timestamp/checksum zeroed) |
+| the other 18 | identical (ELF byte for byte; PE identical once COFF TimeDateStamp + CheckSum are zeroed) |
+
+**2. Does recovery change with the build?** The test's exact call (`recover.run(...,
+stackstrings=False, literals=False, time_budget=300)`), unicorn 2.1.4 (CI's), 4 workers:
+- The analysis itself is repeatable: build 1 analysed twice, identical in all 40 cells. The same
+  builds analysed on the Windows VM (x64 Python, unicorn's x86-64 build) gave exactly the Kali
+  results (20/20 cells): host-independent.
+- The verdict follows the build:
+
+| crate / format | builds passing | failing builds: extra string |
+|---|---|---|
+| obfuse_aes elf-arm64 (nostrip and strip alike) | 33/35 | #12 `:gUnmetry-offa`, #22 `9(dFhema-version-4` |
+| obfuse_aes pe | 34/35 | #5 `/yuSYuS/` |
+| obfuse_aes pe32 | 5/5 | |
+| obfuse, obfuse_xor, muddy, obfany (all 4 formats) | 5/5 | |
+| obfuse_aes elf-arm64gnu (native Kali link) | 0/5 | the same extras in every build (reversed symbol names `BleRataDteG_dniw`, ...): build-independent, Kali's native glibc link only (CI's cross link passes); not investigated here |
+
+So `test_2026_crates_by_emulation[obfuse_aes-*]` passes or fails by the key the build drew. CI
+went 1 of 3 on elf-arm64, against 33 of 35 here. The sample is small, and the cause of that gap is
+not established. Every failing build's extra string is a canary piece, which is the recovery bug
+(§78), not the gate. The randomness only picks which piece leaks.
+
+The failing builds are kept as deterministic inputs (sha256 prefix): elf-arm64 #12 nostrip
+`36d0245c42762f27`, strip `6abac2f08d24d2fd`; #22 nostrip `8b30ae0874a0cee0`, strip
+`dd2c7175c67ffff4`; pe #5 nostrip `0bb94c2be2aa1b30`, strip `ea7a25d63c7a23cb`.
+
+Also measured: under x64 emulation on the Windows VM one obfuse_aes pe run took 256 s, close to
+the test's 300 s wall-clock `time_budget`. A slow host could be cut by time, not by code.
