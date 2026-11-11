@@ -76,8 +76,17 @@ def test_no_cpp_vtables_in_rust_binary():
     assert RT.recover(FIXTURE)["cpp_vtables"] == []
 
 
+_ARCH_FLAGS = {"host": [], "macho-x86_64": ["-arch", "x86_64"]}
+
+
 @pytest.mark.skipif(not __import__("shutil").which("clang++"), reason="clang++ not available")
-def test_cpp_vtables_and_rtti(tmp_path):
+@pytest.mark.parametrize("target", ["host", "macho-x86_64"])
+def test_cpp_vtables_and_rtti(tmp_path, target):
+    # macho-x86_64 (any Mac: Apple clang cross-builds it): x86-64 RTTI is weak, so each vtable's
+    # typeinfo slot is a `<weak-def-coalesce>` bind to the image's own __ZTI*, which used to read as
+    # an import trampoline -> no vtable found (CI macos-15-intel); arm64 RTTI is plain rebases
+    if target != "host" and sys.platform != "darwin":
+        pytest.skip("Apple clang -arch cross-build")
     import subprocess
     src = tmp_path / "v.cpp"
     src.write_text(
@@ -88,7 +97,7 @@ def test_cpp_vtables_and_rtti(tmp_path):
         "int r=a->sound()+a->legs();delete a;return r;}\n"
         "int main(){return pick(1);}\n")
     binp = tmp_path / "v"
-    r = subprocess.run(["clang++", "-O1", "-fno-inline", str(src), "-o", str(binp)],
+    r = subprocess.run(["clang++", *_ARCH_FLAGS[target], "-O1", "-fno-inline", str(src), "-o", str(binp)],
                        capture_output=True, text=True)
     if r.returncode != 0:
         pytest.skip("clang++ failed: " + r.stderr.strip()[-200:])

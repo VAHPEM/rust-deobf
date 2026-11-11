@@ -344,7 +344,17 @@ class Image:
         try:
             for bind in b.bindings:
                 sym = bind.symbol.name if bind.symbol else None
-                if sym and bind.address:
+                if not (sym and bind.address):
+                    continue
+                # a weak definition coalesced at load time (`<weak-def-coalesce>`, ordinal -3) that
+                # THIS image exports resolves to itself: x86-64 C++ RTTI (`__ZTI*`, `__ZTS*`) is
+                # weak, so every vtable's typeinfo slot is such a bind (measured, Apple clang -arch
+                # x86_64; arm64 emits non-unique RTTI as plain rebases). A trampoline there hid
+                # every C++ vtable.
+                val = int(getattr(bind.symbol, "value", 0) or 0)
+                if val and getattr(bind.symbol, "has_export_info", False):
+                    self.patches[bind.address] = val + int(getattr(bind, "addend", 0) or 0)
+                else:
                     self.patches[bind.address] = self._import(sym)
         except Exception:
             pass
