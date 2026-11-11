@@ -3312,3 +3312,76 @@ template. Until it exists, muddy has the weekly single build only.
 - `ENDPOINT` (CI #123) is **not reproduced**: none of 35 Kali builds produced it. It is
   `endpoint` with bit 0x20 flipped, a mid-decode state. Believed to be the same class (scratch
   read mid-decode). Not claimed fixed; watch for recurrence.
+
+## 79. Builds that hide their metadata: panic=abort, location-detail, remapped paths, immediate-abort (Nov 2026)
+
+Question: which Rust tiers fail, and do they fail silently, on the build flags that strip
+attribution metadata? Measured on the lab (Kali AArch64, rustc 1.99.1 via `RUSTC_BOOTSTRAP=1`;
+macOS, rustc 1.91.1). Programs: `tests/test_async.py`'s hand-executor program (async, fmt, panics)
+and `bench_src/meta_probe` (14 registry crates). Variants: plain release; `-Zlocation-detail=none`;
+`+ -Zfmt-debug=none`; `+ -Cpanic=abort`; `--remap-path-prefix` (home and registry);
+`-Cpanic=immediate-abort -Zbuild-std`.
+
+**Found and fixed:**
+1. **recover_async found NO machine in any panic=abort build** (0 of 9, every target, both rustc).
+   panic=abort is what the benchmark's own size-lto / speed-lto profiles use. With no unwinding,
+   rustc emits no Poisoned arm and no "resumed after panicking" message. State 2 is unreachable,
+   and LLVM folds it into the Returned arm, or points it anywhere in a jump table. The dispatch
+   validation required state 2 to reach the panicked arm. Now:
+   - When the binary carries no "panicked" anchor at all, state 2 stands for the Returned arm.
+   - The anchor that remains is state 1 calling "resumed after completion" with the coroutine's
+     `&Location`.
+   - A binary that unwinds is validated exactly as before.
+
+   AArch64 1.99.1 also schedules a store to another field of the same object (the parent's next
+   state) between the inner state load and its compare. The run now steps over a store with the
+   same base register and disjoint bytes.
+
+   Coroutines found (before → after), per-machine await counts all correct:
+
+   | target, rustc | unwind | panic=abort before | after |
+   |---|---|---|---|
+   | macOS arm64 host, 1.91.1 | 9 | 0 | 8 (one inlined leaf copy missed) |
+   | x86-64 Mach-O, 1.91.1 | 9 | 0 | 8 |
+   | i686 musl, 1.91.1 | 9 | 0 | 9 (top as a register-state machine, no &Location) |
+   | AArch64 Linux, 1.99.1 | 9 | 0 | 5 (leaf ×2, middle, boxed block, looper) |
+   | i686 musl, 1.99.1 | 9 | 0 | 3 |
+
+   **Not recovered (measured limit):** what rustc 1.99.1 inlines into `main`'s executor loop.
+   top's state byte is stored at every await but read back once, in a single compare against one
+   state, so there is no Returned arm to anchor on. No machine is claimed there.
+
+   Test: `test_hand_executor_panic_abort` (5 targets, whichever are installed; built at test
+   time). On the old code it fails with "no machine": `{13,18,24,31,38} <= set()`.
+
+2. **recover_rust_meta reported 0 crates for a remapped build.** With
+   `--remap-path-prefix=$HOME/.cargo/registry/src=/reg`, every Location still reads
+   `/reg/index.crates.io-<16 hex>/regex-automata-0.4.18/src/...`. The crate tier keyed on the
+   `.cargo/registry/src` prefix. The index directory (`index.crates.io-<hash>` sparse,
+   `github.com-<hash>` git) now names a registry checkout whatever stands before it: 0 → 14 crates,
+   equal to the plain build. Cargo `trim-paths`' bare `<crate>-<version>/src/...` is read only from
+   a path a Location record bounds exactly; a regex hit can have rodata glued onto its front.
+   trim-paths itself is **NOT MEASURED** on a real build (synthetic paths only).
+3. **`panic=immediate-abort` made a Rust binary `is_rust: False`.** No panic path, no Location, no
+   message is left. rustc's ELF `.comment` (`rustc version 1.99.1 (58cf8f9c3 2026-10-13)`) is
+   still there; GNU strip keeps it. It is now Rust evidence, and it gives the toolchain
+   (`rustc_source: ".comment"`). gen_sigdb read it already and keeps its own source attribution.
+4. **Silent empties now say why** (`notes`):
+   - no Location records at all;
+   - every Location belongs to the prebuilt std (`-Zlocation-detail=none` on meta_probe: 0
+     crates). That second note is an observation, not a verdict: a dependency-free `rustc x.rs`
+     program looks the same (measured).
+
+**Measured, no change needed:**
+- String recovery by emulation (`recover.run`) found the probe's XOR canary in every variant.
+- recover_idioms keeps its fmt sites under location-detail / fmt-debug (106 → 105 → 104). Only
+  the `&Location`-bearing panic sites drop (183 → 165), as they must.
+- Under immediate-abort, panic sites drop to 0 and fmt sites to 305 of 635: those panics and their
+  messages no longer exist.
+- `-Zlocation-detail=none` leaves async machines intact but anonymous (9 machines, no source
+  line).
+
+Not measured: MSVC targets, Mach-O and PE `.comment` (neither format has one), trim-paths on a
+real build.
+
+`./scripts/check.sh full` (macOS ARM64): 725 passed, 0 failed.

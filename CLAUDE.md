@@ -378,6 +378,12 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `rustc --target x86_64-apple-darwin`): C++ RTTI is weak, so vtable typeinfo slots are
   `<weak-def-coalesce>` binds to the image's own `__ZTI*` (Image resolves a bind whose symbol the
   image exports to that symbol, not to a trampoline); switch jump tables sit inside `__text`.
+- **panic=abort / hidden-metadata builds (§79):** panic=abort (the LTO profiles) has no Poisoned
+  arm and no "resumed after panicking" string -- recover_async accepts state 2 as the Returned arm
+  only when the binary carries no panicked anchor (`_unwinds`); an unwinding binary is validated
+  as before. Remapped registry paths keep `index.crates.io-<16 hex>/<crate>-<ver>/`
+  (`RE_CARGO_REMAPPED`); immediate-abort leaves only ELF `.comment` as Rust evidence. A tier that
+  comes back empty on such a build says why (`notes`), never a silent nothing.
 - **Compressed sections are not text**: SHF_COMPRESSED / `.zdebug_*` bytes are zlib; a 3-byte key
   matches them by chance (`\nkvm?` in Go 1.24's .debug_info). recover_antianalysis zeroes them.
 - **Windows: never `subprocess.run(["bash", ...])`** -- CreateProcess searches the app dir and
