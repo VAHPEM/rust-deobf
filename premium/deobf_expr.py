@@ -33,7 +33,11 @@ from __future__ import annotations
 import sys as _sys
 from pathlib import Path as _Path
 # premium module: find both premium/ (sibling premium modules) and the Apache core in scripts/
-for _p in (str(_Path(__file__).resolve().parent), str(_Path(__file__).resolve().parent.parent / 'scripts')):
+# ../scripts only in a source checkout (premium/ next to scripts/); installed, it would name
+# site-packages/scripts -- not ours, and first on sys.path (VALIDATION §76). The installed core is
+# put on the path by rust_deobf_premium/__init__.py (library) or PYTHONPATH (the CLI).
+_h = _Path(__file__).resolve().parent
+for _p in [str(_h)] + ([str(_h.parent / 'scripts')] if _h.name == 'premium' and (_h.parent / 'scripts' / 'recover_emulate.py').is_file() else []):
     if _p not in _sys.path:
         _sys.path.insert(0, _p)
 

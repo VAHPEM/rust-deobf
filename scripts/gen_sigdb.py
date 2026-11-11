@@ -69,7 +69,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
+_HERE = Path(__file__).resolve().parent     # scripts/, or rust_deobf/ when installed (never ROOT/"scripts":
+sys.path.insert(0, str(_HERE))              # that is site-packages/scripts there -- VALIDATION §76)
 
 SIGDB_FORMAT = 1                    # bump when the DB layout or the signing rules change
 DEFAULT_TIMEOUT = 1800              # seconds for the whole run (installs + builds + signing)
@@ -426,7 +427,7 @@ def commit_of_version(version: str | None) -> str | None:
     if not version:
         return None
     try:
-        table = json.loads((ROOT / "scripts" / "data" / "rust_versions.json").read_text())
+        table = json.loads((_HERE / "data" / "rust_versions.json").read_text())
     except (OSError, ValueError):
         return None
     for h, rel in table.items():

@@ -39,8 +39,12 @@ import sys
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent                     # premium/ (sibling premium modules)
-_CORE = _HERE.parent / "scripts"                            # the Apache-2.0 core
-for _p in (str(_HERE), str(_CORE)):
+# ../scripts only in a source checkout (premium/ next to scripts/); installed, it would name
+# site-packages/scripts -- not ours, and first on sys.path (VALIDATION §76). The installed core is
+# put on the path by rust_deobf_premium/__init__.py (library) or PYTHONPATH (the CLI).
+_CORE = _HERE.parent / "scripts"                            # the Apache-2.0 core (checkout)
+for _p in [str(_HERE)] + ([str(_CORE)] if _HERE.name == "premium"
+                          and (_CORE / "recover_emulate.py").is_file() else []):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

@@ -35,8 +35,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT / "premium"))
+# ../scripts only in a source checkout (premium/ next to scripts/); installed, it would name
+# site-packages/scripts -- not ours, and first on sys.path (VALIDATION §76). The installed core is
+# put on the path by rust_deobf_premium/__init__.py (library) or PYTHONPATH (the CLI).
+if Path(__file__).resolve().parent.name == "premium" and (ROOT / "scripts" / "recover_emulate.py").is_file():
+    sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # own dir (premium/ or rust_deobf_premium/)
 
 _MAX_CASES = 4096          # a sane upper bound on switch arms
 

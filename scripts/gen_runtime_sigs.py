@@ -29,7 +29,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "scripts" / "data" / "runtime_sigs.json"
+_HERE = Path(__file__).resolve().parent     # scripts/, or rust_deobf/ when installed
+OUT = _HERE / "data" / "runtime_sigs.json"
 SIG_LEN = 64
 # symbol name in the unstripped build -> the name recover_emulate models it as
 TARGETS = {
@@ -233,7 +234,7 @@ def main():
     if "--selftest" in sys.argv:
         _selftest()
         return
-    sys.path.insert(0, str(ROOT / "scripts"))
+    sys.path.insert(0, str(_HERE))
     stdcall = "--stdcall" in sys.argv
     paths = [Path(a) for a in sys.argv[1:] if a != "--stdcall"]
     if not paths:

@@ -338,10 +338,14 @@ def test_installed_library_mode(venv):
     """import rust_deobf.X == the bare X the scripts use; the package dir never shadows the host's
     own modules (a host `recover.py` in cwd keeps winning); every shipped module imports."""
     code = r"""
-import importlib, pkgutil, sys
+import importlib, os, pkgutil, sys
+before = list(sys.path)
 import rust_deobf, rust_deobf.recover_emulate as a, recover_emulate as b
 assert a is b and a.__name__ == "recover_emulate", (a, b)
 d = rust_deobf.__path__[0]
+# one directory, several spellings: Windows Python 3.10 lists a venv's site-packages as `lib`, while
+# Path.resolve() (what the package registers) gives the on-disk `Lib` (VALIDATION §76)
+key = lambda e: os.path.normcase(os.path.normpath(os.path.abspath(e or os.curdir)))
 bad = []
 for m in pkgutil.iter_modules([d]):
     if m.name.startswith(("_", "ghidra_")):
@@ -351,8 +355,12 @@ for m in pkgutil.iter_modules([d]):
     except Exception as e:
         bad.append((m.name, repr(e)))
 assert not bad, bad
-hits = [i for i, e in enumerate(sys.path) if e == d]
+hits = [i for i, e in enumerate(sys.path) if key(e) == key(d)]
 assert hits == [len(sys.path) - 1], (hits, sys.path)
+# importing every module added nothing else -- no site-packages/scripts (ROOT / "scripts" when
+# installed) ahead of the host's own entries
+added = [e for e in sys.path if key(e) not in {key(x) for x in before} | {key(d)}]
+assert not added, (added, sys.path)
 # data next to the modules is found (the std signature layer once read ROOT/"scripts"/data: {})
 assert rust_deobf.recover_libfuncs.load_std_db(), "libfunc_sigs_std.json.gz not loaded"
 open("recover.py", "w").write("WHO = 'host'\n")      # the host program's own recover.py
@@ -360,8 +368,14 @@ importlib.invalidate_caches()
 sys.modules.pop("recover", None)
 import recover
 assert getattr(recover, "WHO", None) == "host", recover
-import rust_deobf_premium.deobf_opaque as p, deobf_opaque as q
+import rust_deobf_premium, rust_deobf_premium.deobf_opaque as p, deobf_opaque as q
 assert p is q
+for m in pkgutil.iter_modules(rust_deobf_premium.__path__):
+    if not m.name.startswith("_"):
+        importlib.import_module("rust_deobf_premium." + m.name)
+ours = {key(d), key(rust_deobf_premium.__path__[0])}
+added = [e for e in sys.path if key(e) not in {key(x) for x in before} | ours]
+assert not added, ("premium", added, sys.path)
 print("library-mode OK")
 """
     try:
