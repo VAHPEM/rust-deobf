@@ -1,0 +1,10 @@
+{
+  "strings": [
+    "canary::alpha::7f3c-config-endpoint",
+    "canary::bravo::build-id-20261018",
+    "canary::charlie::/opt/app/resources/data.bin",
+    "canary::delta::feature-flag-telemetry-off",
+    "canary::echo::schema-version-4"
+  ],
+  "notes": "garble -literals -tiny -seed=<fixed>; built by build.sh (Go + garble), not build_obf.sh (no Cargo.toml); named expected_garble.json so test_obf does not treat it as a cargo crate. tests/test_go.py::test_garble_literals."
+}

@@ -378,6 +378,11 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   pclntab textStart = 0 even in non-PIE binaries (recover_go falls back to the text section);
   Go packs its strings with no separator, so printable neighbours do not bound a token there --
   and identifier neighbours do not end one either (1.26: `archive/zipTracerPid:\t0illegal seek`).
+- **garble patches the pclntab magic** (`0x657d6f45` from v0.14.2 / go1.24): recover_go reads a
+  table with an unknown magic as each known layout, only when it is Go-shaped (>= 64 functions,
+  90% pkg.Name) and inside .text, and reports `pclntab_magic_patched`. A stripped Go ELF has no
+  .eh_frame: `Image.functions` takes `recover_go.function_starts` (all entries, -tiny empties
+  names) -- without it main.main (called through a pointer) was nobody's start (§84).
 - **Case-insensitive file-blob matching sees pointers as text:** `KvM\0\0\0\0\0` (pointer 0x4d764b)
   read as `kvm`. A short key in the low bytes of an aligned, otherwise-zero word is a number.
 - **Every run starts from the power-on CPU context** (`Emulator._ctx0`, `context_save` in

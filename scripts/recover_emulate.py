@@ -635,6 +635,13 @@ class Image:
             return blob[va - base:va - base + n]
         return b""
 
+    def _go_starts(self):
+        try:
+            import recover_go
+            return recover_go.function_starts(self.path)
+        except Exception:               # noqa: BLE001 -- a hint, never a reason to fail the image
+            return []
+
     def functions(self):
         """[(start_va, size)] for every function we can find, in address order."""
         lo, hi = self.text_va, self.text_end
@@ -649,6 +656,12 @@ class Image:
                               if lo <= a < hi)
         else:
             starts.update(a for a in _eh_frame_starts(self.binary) if lo <= a < hi)
+            if not starts:
+                # no unwind table: maybe Go (its ELF has none; runtime.main calls main.main through
+                # a pointer, so with call targets alone main.main ran as the tail of its
+                # neighbour). The pclntab lists every function -- garble's patched-magic tables
+                # too (§84). A Rust/C ELF has .eh_frame and never pays for the scan.
+                starts.update(a for a in self._go_starts() if lo <= a < hi)
         starts.update(a for a, _ in self.function_symbols() if lo <= a < hi)
         # leaf functions need no unwind entry (`lea rsi,[ct]; push 0x24; pop rdx; jmp decrypt`
         # under opt-level="z" has none in .pdata): every direct call target is a function too

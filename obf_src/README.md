@@ -22,5 +22,8 @@ meets, as opposed to the hand-rolled ciphers in `bench_src/`. Ground truth for e
   42) into fresh RWX memory and calls it; `expected.json` `stage2` is what unpack_emulate must
   carve (§83). Safe to run.
 
+- **garble_go** — Go, built by its own `build.sh` (Go + garble in a container, fixed `-seed`):
+  the five canaries plain and under `garble -literals -tiny` (§84); `expected_garble.json`.
+
 No payloads, no real indicators. Samples of real malware are referenced by hash only, in
 `../gallery/manifest.json`, and analysed in an isolated VM.

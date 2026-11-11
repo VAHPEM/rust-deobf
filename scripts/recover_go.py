@@ -37,12 +37,45 @@ _MAX_FUNCS = 2_000_000
 _MAX_NAME = 1024              # a function name is read at most this many bytes (crafted-table DoS)
 
 
-def _header_ok(raw: bytes, off: int) -> bool:
-    """Cheap structural check of a pclntab header at `raw[off:]` (any supported version)."""
+def _header_ok(raw: bytes, off: int, any_magic: bool = False) -> bool:
+    """Cheap structural check of a pclntab header at `raw[off:]` (any supported version). With
+    `any_magic`, the 4-byte magic is not checked: garble writes a random one (VALIDATION §84)."""
     if off < 0 or off + 8 > len(raw):
         return False
-    return (struct.unpack_from("<I", raw, off)[0] in _MAGICS and raw[off + 4:off + 6] == b"\0\0"
-            and raw[off + 6] in (1, 2, 4) and raw[off + 7] in (4, 8))
+    return ((any_magic or struct.unpack_from("<I", raw, off)[0] in _MAGICS)
+            and raw[off + 4:off + 6] == b"\0\0" and raw[off + 6] in (1, 2, 4) and raw[off + 7] in (4, 8))
+
+
+# the layouts a magic-patched table is tried as, newest first
+_PATCH_LAYOUTS = (_V120, _V118, _V116, _V12)
+_PATCH_MIN_FUNCS = 64          # a magic-patched table must parse into this many Go-shaped names...
+
+
+def _go_shaped(funcs) -> bool:
+    """... and most of them must look like Go symbols (pkg.Name, printable, no spaces)."""
+    if len(funcs) < _PATCH_MIN_FUNCS:
+        return False
+    ok = sum(1 for n in funcs.values() if "." in n and " " not in n and n.isprintable())
+    return ok >= 0.9 * len(funcs)
+
+
+def parse_any(raw: bytes, text_start=None, text_span=None):
+    """parse_pclntab, and for a table whose magic was patched (garble), each known layout in turn:
+    the first that yields a Go-shaped function table whose entries lie in `text_span` (when given)
+    wins. Returns (parsed or None, the patched magic as hex or None)."""
+    if raw is None or len(raw) < 16:
+        return None, None
+    if _header_ok(raw, 0):
+        return parse_pclntab(raw, text_start), None
+    if not _header_ok(raw, 0, any_magic=True):
+        return None, None
+    for layout in _PATCH_LAYOUTS:
+        p = parse_pclntab(raw, text_start, layout=layout)
+        fns = p.get("functions") if p else None
+        if fns and _go_shaped(fns) and (text_span is None or all(
+                text_span[0] <= k < text_span[1] for k in fns)):
+            return p, hex(struct.unpack_from("<I", raw, 0)[0])
+    return None, None
 
 
 def find_pclntab(b):
@@ -74,7 +107,27 @@ def find_pclntab(b):
             parsed = parse_pclntab(raw[off:])
             if parsed and parsed["functions"]:
                 return s.virtual_address + off, raw[off:], False
+    # no known magic anywhere: a table whose magic was patched (garble). Its header shape is still
+    # there; accepted only when parse_any reads a Go-shaped table at it (bounded scan)
+    tried = 0
+    for s in b.sections:
+        try:
+            raw = bytes(s.content)
+        except Exception:
+            continue
+        i = raw.find(b"\0\0", 4)
+        while i != -1 and tried < _PATCH_SCAN:
+            off = i - 4
+            if off % 4 == 0 and _header_ok(raw, off, any_magic=True) and raw[off:off + 4] != b"\0" * 4:
+                tried += 1
+                parsed, patched = parse_any(raw[off:])
+                if parsed and patched:
+                    return s.virtual_address + off, raw[off:], False
+            i = raw.find(b"\0\0", i + 1)
     return None, None, False
+
+
+_PATCH_SCAN = 4096             # magic-patched header candidates tried per binary
 
 
 def _layout(magic: int, ptr: int):
@@ -92,16 +145,18 @@ def _layout(magic: int, ptr: int):
                          "pcln": 8 + 7 * ptr}
 
 
-def parse_pclntab(raw: bytes, text_start=None):
+def parse_pclntab(raw: bytes, text_start=None, layout=None):
     """Return {"magic", "version_hint", "functions": {entry_va: name}} for a Go pclntab (1.2, 1.16,
     1.18, 1.20+ layouts, pointer size 4 or 8), or None if `raw` does not start with one. For 1.18+
     `text_start` overrides the header's textStart (a PIE whose field is 0 in the file, filled by a
     dynamic relocation). Bounded against crafted tables: nfunc must fit the table, a name is read
     at most _MAX_NAME bytes, repeated name offsets are decoded once, and the total decoded name
     bytes are capped relative to the table size."""
-    if raw is None or len(raw) < 16 or not _header_ok(raw, 0):
+    if raw is None or len(raw) < 16 or not _header_ok(raw, 0, any_magic=layout is not None):
         return None
     magic = struct.unpack_from("<I", raw, 0)[0]
+    if layout is not None and magic not in _MAGICS:
+        magic = layout                           # read a magic-patched table as this layout
     ptr = raw[7]
     info = {"magic": hex(magic), "version_hint": _MAGICS[magic], "ptr_size": ptr, "functions": {}}
     hlen, f = _layout(magic, ptr)
@@ -146,6 +201,7 @@ def parse_pclntab(raw: bytes, text_start=None):
         return name
 
     funcs = {}
+    entries = []
     for i in range(nfunc):
         base = functab + i * ent
         if magic in (_V118, _V120):
@@ -162,9 +218,12 @@ def parse_pclntab(raw: bytes, text_start=None):
         if budget[0] <= 0:
             info["truncated"] = True
             break
+        entries.append(entry)
         if name:
             funcs[entry] = name
     info["functions"] = funcs
+    # every function entry, named or not (garble -tiny empties most names; the starts remain)
+    info["entries"] = entries
     # the functab ends with one extra entry: the end PC of the last function (= runtime.etext), so
     # a consumer can tell Go text from C code linked around it (cgo / external linking)
     endb = functab + nfunc * ent
@@ -205,7 +264,16 @@ def _text_section_start(b, pe, imagebase):
     return lo, hi
 
 
-def recover(path) -> dict:
+def function_starts(path) -> list:
+    """Every Go function entry (named or not) from the pclntab -- magic-patched tables included --
+    as RVAs for PE / VAs otherwise; [] when there is no Go pclntab. For callers that need function
+    boundaries (recover_emulate): a stripped Go binary has no unwind table and runtime.main reaches
+    main.main through a pointer, so call targets alone merge main.main into its neighbour."""
+    r = recover(path, _entries=True)
+    return r.get("_entries", []) if r.get("is_go") else []
+
+
+def recover(path, _entries=False) -> dict:
     """{is_go, go_version, pclntab_va, function_count, functions{addr: name}, ...}. Addresses follow
     the toolkit convention: RVAs for PE (add `imagebase` to rebase), VAs for ELF / Mach-O."""
     import lief
@@ -217,9 +285,14 @@ def recover(path) -> dict:
     version = ver.group().decode() if ver else None
     pe = b.format.name == "PE"
     imagebase = b.optional_header.imagebase if pe else 0
+    patched = None
     try:
         va, raw, named = find_pclntab(b)
-        parsed = parse_pclntab(raw) if raw is not None else None
+        span0 = _text_section_start(b, pe, imagebase)
+        parsed, patched = parse_any(raw, text_span=span0) if raw is not None else (None, None)
+        if parsed is None and patched is None and raw is not None and not _header_ok(raw, 0):
+            # a magic-patched table whose 1.18+ textStart is 0 in the file: the text section
+            parsed, patched = parse_any(raw, text_start=span0[0] if span0 else None, text_span=span0)
         if parsed and parsed["magic"] in (hex(_V118), hex(_V120)):
             ptr = parsed["ptr_size"]
             if struct.unpack_from("<Q" if ptr == 8 else "<I", raw, 8 + 2 * ptr)[0] == 0:
@@ -229,11 +302,11 @@ def recover(path) -> dict:
                 # 0..0xdf780 instead of 0x401000..): then Go's text is the text section.
                 ts = None if pe else _text_start_reloc(b, va + 8 + 2 * ptr)
                 if ts:
-                    parsed = parse_pclntab(raw, text_start=ts)
+                    parsed = parse_pclntab(raw, text_start=ts, layout=int(parsed['magic'], 16) if patched else None)
                 else:
                     span = _text_section_start(b, pe, imagebase)
                     if span:
-                        cand = parse_pclntab(raw, text_start=span[0])
+                        cand = parse_pclntab(raw, text_start=span[0], layout=int(parsed['magic'], 16) if patched else None)
                         fns = cand.get("functions") if cand else None
                         # only when every entry then lies inside that text
                         if fns and all(span[0] <= k < span[1] for k in fns):
@@ -241,11 +314,13 @@ def recover(path) -> dict:
     except Exception:
         va, raw, named, parsed = None, None, False, None
     funcs = parsed["functions"] if parsed else {}
+    ents = parsed.get("entries", []) if parsed else []
     text_end = parsed.get("text_end") if parsed else None
     if pe and funcs:
         # the pclntab stores absolute VAs (textStart / entry); report RVAs like the rest of the
         # toolkit (lief section addresses, recover_imports, recover_cfg are RVA-based for PE)
         funcs = {k - imagebase if k >= imagebase else k: v for k, v in funcs.items()}
+        ents = [k - imagebase if k >= imagebase else k for k in ents]
         if text_end is not None and text_end >= imagebase:
             text_end -= imagebase
     # Go only on strong evidence: a named pclntab section, a `go1.x` version string, or a scan-found
@@ -261,6 +336,9 @@ def recover(path) -> dict:
         "address_space": "rva" if pe else "va", "imagebase": imagebase,
         "pclntab_va": va, "pclntab_magic": parsed["magic"] if parsed else None,
         "pclntab_version_hint": parsed["version_hint"] if parsed else None,
+        # garble (and similar) overwrite the pclntab magic to break Go tooling: a strong
+        # obfuscation signal in itself; the table was read as the layout named in version_hint
+        "pclntab_magic_patched": patched,
         "function_count": len(funcs),
         "functions": {hex(k): v for k, v in sorted(funcs.items())},
     }
@@ -268,6 +346,8 @@ def recover(path) -> dict:
         out["text_end"] = hex(text_end)
     if parsed and parsed.get("truncated"):
         out["truncated"] = True
+    if _entries:
+        out["_entries"] = sorted(set(ents))
     return out
 
 

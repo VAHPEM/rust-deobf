@@ -3583,3 +3583,60 @@ Tests:
 - `test_rust_written_packer_stage2_is_carved`, on the committed `tests/fixtures/pack/rust_packer.exe`
   (248 KB, pe size-lto, stripped). On the old code it fails with no OEP and nothing carved.
 - `test_obf_unpacked_stage2` (built matrix).
+
+## 84. garble (Go): a patched pclntab magic, Go function starts, literal decoding (Nov 2026)
+
+Fixture: `obf_src/garble_go`, a benign Go program that prints the five canaries.
+- Built by its `build.sh` in a Go 1.24.13 container on Kali, with garble v0.14.2 from the Go
+  module proxy.
+- Three targets: linux/arm64, linux/amd64, windows/amd64. Each is built plain (control) and with
+  `garble -literals -tiny -seed=<fixed>`.
+- Two clean builds gave identical sha256 for all 6 binaries.
+- `expected_garble.json` is named so that test_obf does not take it for a cargo crate.
+
+**Before** (garble builds):
+- recover_go: **0 functions**, no version. garble overwrites the pclntab magic (`0x657d6f45`
+  instead of `0xfffffff1`); the rest of the header is intact.
+- recover.run: 0/5 canaries on elf-arm64 and elf, 1/5 on pe. A stripped Go ELF has no unwind
+  table, and runtime.main calls main.main through a pointer, so with call targets alone main.main
+  was never a function start. It ran as its neighbour's tail.
+
+**Fixes:**
+- recover_go reads a magic-patched table as each known layout in turn. It is accepted only when:
+  - it parses into ≥ 64 functions, ≥ 90% of them Go-shaped (pkg.Name, printable);
+  - every entry lies in the text section.
+- Unnamed tables (PE) are found by a bounded header-shape scan (4096 candidates).
+- The result says `pclntab_magic_patched`, an obfuscation signal in itself.
+- `function_starts()` lists every entry, named or not. `-tiny` empties most names: 218 named of
+  ~1960 entries.
+- `Image.functions` takes Go's starts when an ELF / Mach-O has no `.eh_frame`. A Rust or C ELF
+  has one and never pays for the scan.
+
+**After:**
+
+| build | canaries before → after | recover_go functions (named) |
+|---|---|---|
+| garble elf-arm64 | 0 → **5/5** | 0 → 218 |
+| garble elf (x86-64) | 0 → **5/5** | 0 → 219 |
+| garble pe | 1 → 1/5 | 0 → 240 |
+| plain (all three) | 0 (plain text: the literal tier) | unchanged (1780-1818) |
+
+**Measured limits, not fixed:**
+- **pe 1/5:** `main.main` runs, but its first `fmt.Println` spends the instruction budget in Go's
+  Windows write path (two unnamed hot functions), so the run ends after one string.
+- **Precision:** the garble builds also yield other decoded strings, 23 / 36 / 23 per build (elf-arm64
+  / elf / pe). Read one by one:
+  - 22 / 22 / 15 are std literals that garble encrypted and the emulator decoded correctly
+    (`malformed time zone information`, `no such process` ...);
+  - 1 / 14 / 8 are mid-decode artifacts of garble's in-place reversing decoders: a reversed piece
+    glued to the string (`tnioPefasnU.eultV` + `reflect.Value.UnsafePointer`,
+    `skip this directory@R`). Not filtered yet.
+
+Tests (`tests/test_go.py`):
+- a magic-patched synthetic pclntab is read (on the old code: "no Go pclntab found");
+- two controls: non-Go-shaped names, and too few functions, are not read;
+- a host-built stripped Go ELF's `main.main` is a function start of the emulator. It needs Go and
+  Linux: CI, not this Mac.
+
+garble end to end needs garble and is a lab measurement (`obf_src/garble_go/build.sh`), not a CI
+job. Not measured: other garble versions, Go versions other than 1.24, `-controlflow`.

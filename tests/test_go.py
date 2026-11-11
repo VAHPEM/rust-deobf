@@ -176,3 +176,57 @@ def test_text_start_zero_kept_when_entries_do_not_fit(tmp_path):
     p.write_bytes(elf)
     g = GO.recover(p)
     assert sorted(int(k, 16) for k in g["functions"]) == [off for off, _n in names]
+
+
+# ---- garble (VALIDATION §84): a patched pclntab magic, and Go function starts for the emulator ----
+_PATCHED = 0x657d6f45      # what garble v0.14.2 wrote in place of 0xfffffff1 (measured, go1.24.13)
+
+
+def _patched_elf(tmp_path, names, magic=_PATCHED):
+    sys.path.insert(0, str(ROOT / "tests"))
+    from _mkelf import mkelf
+    tab = bytearray(GO._build_pclntab(names, text_start=0x401000))   # = mkelf's text VA
+    struct.pack_into("<I", tab, 0, magic)
+    elf, text_va, _ = mkelf(bytes(tab) + b"\x00" * 0x2000)
+    p = tmp_path / "patched.elf"
+    p.write_bytes(elf)
+    return p, text_va
+
+
+def test_magic_patched_pclntab_is_read(tmp_path):
+    names = [(i * 0x10, f"pkg{i % 7}.Func{i}") for i in range(80)]
+    p, text_va = _patched_elf(tmp_path, names)
+    g = GO.recover(p)
+    assert g["is_go"] and g["function_count"] == 80, g.get("note")
+    assert g["pclntab_magic_patched"] == hex(_PATCHED) and g["pclntab_version_hint"] == "go1.20+"
+    assert GO.function_starts(p) == sorted(text_va + off for off, _n in names)
+
+
+@pytest.mark.parametrize("names", [
+    [(i * 0x10, f"f{i}") for i in range(80)],                 # not Go-shaped (no pkg.Name)
+    [(i * 0x10, f"pkg.F{i}") for i in range(16)],             # too few to trust a patched header
+], ids=["not-go-shaped", "too-few"])
+def test_magic_patched_needs_a_go_shaped_table(tmp_path, names):
+    p, _ = _patched_elf(tmp_path, names)
+    g = GO.recover(p)
+    assert not g["is_go"] and GO.function_starts(p) == []
+
+
+@pytest.mark.skipif(not shutil.which("go"), reason="go not available")
+def test_go_function_starts_reach_the_emulator(tmp_path):
+    # stripped Go ELF: no unwind table, and runtime.main calls main.main through a pointer -- with
+    # call targets alone main.main was not a function start and ran as its neighbour's tail
+    # (garble -literals: 0 of 5 strings decoded before, 5 of 5 after, elf-arm64 + elf; §84)
+    if sys.platform != "linux":
+        pytest.skip("ELF host build")
+    import recover_emulate as E
+    src = tmp_path / "g.go"
+    src.write_text(_GO_SRC)
+    binp = tmp_path / "bin"
+    r = subprocess.run(["go", "build", "-ldflags=-s", "-o", str(binp), str(src)],
+                       capture_output=True, text=True, cwd=tmp_path, env={**__import__("os").environ,
+                                                                          "CGO_ENABLED": "0"})
+    if r.returncode != 0:
+        pytest.skip("go build failed: " + r.stderr.strip()[-200:])
+    main = next(int(k, 16) for k, v in GO.recover(binp)["functions"].items() if v == "main.main")
+    assert main in dict(E.Image(binp).functions())
