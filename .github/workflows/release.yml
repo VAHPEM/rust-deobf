@@ -6,7 +6,10 @@
 #   test    -> install exactly those wheels into a fresh venv on Linux x86-64/ARM64, Windows and
 #              macOS; `rust-deobf --version|list|doctor`, `recover <committed fixture> --json`,
 #              premium subcommand, library mode (tests/test_packaging.py with RUST_DEOBF_WHEEL_DIR)
-#   publish -> PyPI via Trusted Publishing (no API token stored anywhere)
+#   publish-core / publish-premium -> PyPI via Trusted Publishing (no API token stored anywhere),
+#              one job per project: PyPI binds each pending trusted publisher to a distinct
+#              (repo, workflow, environment), so rust-deobf publishes from environment `pypi` and
+#              rust-deobf-premium from `pypi-premium`; each job sees only its own files
 #   github-release -> a GitHub Release with the CHANGELOG section as notes and the dists attached
 name: Release
 
@@ -38,16 +41,29 @@ jobs:
             echo "::error::CHANGELOG.md has no '## [$v]' section"; exit 1
           fi
       - run: python -m pip install --upgrade build twine
+      # one directory + artifact per distribution: each publish job uploads only its own project
       - name: Build rust-deobf (core, Apache-2.0)
-        run: python -m build --outdir dist .
+        run: python -m build --outdir dist/core .
       - name: Build rust-deobf-premium (AGPL-3.0-or-later OR commercial)
-        run: python -m build --outdir dist premium
-      - run: python -m twine check --strict dist/*
-      - run: ls -l dist
+        run: python -m build --outdir dist/premium premium
+      - name: Each directory holds exactly its own distribution
+        shell: bash
+        run: |
+          ls -l dist/core dist/premium
+          bad=$(ls dist/core | grep -v '^rust_deobf-' || true; ls dist/premium | grep -v '^rust_deobf_premium-' || true)
+          if [ -n "$bad" ]; then echo "::error::unexpected files: $bad"; exit 1; fi
+          [ "$(ls dist/core | wc -l)" -eq 2 ] && [ "$(ls dist/premium | wc -l)" -eq 2 ] || {
+            echo "::error::expected one wheel + one sdist per distribution"; exit 1; }
+      - run: python -m twine check --strict dist/core/* dist/premium/*
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/
+          name: dist-core
+          path: dist/core/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-premium
+          path: dist/premium/
           if-no-files-found: error
 
   test:
@@ -64,9 +80,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # both artifacts merged into one flat dist/: tests/test_packaging.py expects all four files
+      # (core + premium wheel and sdist) in RUST_DEOBF_WHEEL_DIR, and installs rust-deobf[premium]
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
       - run: python -m pip install pytest
       - name: Installed-wheel tests (fresh venv, run outside the checkout)
@@ -74,35 +93,56 @@ jobs:
           RUST_DEOBF_WHEEL_DIR: ${{ github.workspace }}/dist
         run: python -m pytest tests/test_packaging.py -v -rs
 
-  publish:
+  publish-core:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
-      name: pypi
+      name: pypi                            # = rust-deobf's trusted publisher on PyPI
       url: https://pypi.org/project/rust-deobf/
     permissions:
       id-token: write                       # PyPI Trusted Publishing (OIDC)
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist
-      # uploads every file in dist/: both projects (rust-deobf, rust-deobf-premium); each PyPI
-      # project needs this repo + workflow + environment registered as a trusted publisher
+          name: dist-core                   # rust-deobf only
+          path: dist-core
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-core/
+
+  publish-premium:
+    # after the core: rust-deobf-premium pins rust-deobf==<same version>, so it must not reach PyPI
+    # when the core upload failed (it would be uninstallable)
+    needs: [test, publish-core]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi-premium                    # = rust-deobf-premium's trusted publisher on PyPI
+      url: https://pypi.org/project/rust-deobf-premium/
+    permissions:
+      id-token: write                       # PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-premium                # rust-deobf-premium only
+          path: dist-premium
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-premium/
 
   github-release:
-    needs: publish
+    needs: [publish-core, publish-premium]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4   # both distributions, flat: dist/* attaches all four
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
       - name: Release notes from CHANGELOG.md
         shell: bash

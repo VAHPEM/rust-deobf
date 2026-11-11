@@ -371,25 +371,38 @@ run, and pypi.org returns 404 for `rust-deobf`, `rust_deobf` and `rust-deobf-pre
 the README's `pip install rust-deobf` failed). Until the first release the README installs from
 git (`git+https://github.com/VAHPEM/rust-deobf`, premium via `#subdirectory=premium`; the
 `[premium]` extra cannot resolve `rust-deobf-premium==X` before it is on PyPI).
-One-time PyPI setup (maintainer): on pypi.org create a **pending trusted publisher** for each of the
-two projects, `rust-deobf` and `rust-deobf-premium` (Account → Publishing → "Add a new pending
-publisher": owner `VAHPEM`, repository `rust-deobf`, workflow `release.yml`, environment `pypi`);
-the first release then creates both projects. In GitHub → Settings → Environments create `pypi`
-(optionally with required reviewers = a manual approval gate before upload). No API token is stored.
+One-time PyPI setup (maintainer, DONE 2026-11-11 on pypi.org): a **pending trusted publisher** per
+project, owner `VAHPEM`, repository `rust-deobf`, workflow `release.yml`, and a DIFFERENT environment
+for each -- `rust-deobf` -> `pypi`, `rust-deobf-premium` -> `pypi-premium`. PyPI requires that: it
+refuses a second pending publisher with the same owner/repo/workflow/environment ("A pending trusted
+publisher matching this configuration has already been registered for a different project name").
+So `release.yml` has two publish jobs, `publish-core` (environment `pypi`, uploads only
+`dist-core/`) and `publish-premium` (environment `pypi-premium`, only `dist-premium/`, runs after
+the core: premium pins `rust-deobf==` the same version); each has its own `id-token: write`. The
+`build` job makes one artifact per distribution (`dist-core`, `dist-premium`); `test` and
+`github-release` merge both into one flat `dist/` (tests/test_packaging.py wants all four files in
+`RUST_DEOBF_WHEEL_DIR`). In GitHub → Settings → Environments create BOTH `pypi` and
+`pypi-premium` (optionally with required reviewers = a manual approval gate before upload). No API
+token is stored.
 Optional dry run: the same publisher on test.pypi.org with `repository-url:
-https://test.pypi.org/legacy/` on the publish step.
+https://test.pypi.org/legacy/` on both publish steps.
 Each release:
 0. **first release only, before tagging** (the step that was missed): on pypi.org a *pending*
    trusted publisher exists for BOTH distribution names, `rust-deobf` and `rust-deobf-premium` --
-   Trusted Publishing cannot create a new project without one, so the upload fails -- and the
-   GitHub environment `pypi` exists (the workflow's publish job names it);
+   Trusted Publishing cannot create a new project without one, so the upload fails -- and BOTH
+   GitHub environments exist in the repo settings, `pypi` (publish-core) and `pypi-premium`
+   (publish-premium), with the protection rules you want -- GitHub silently CREATES an
+   environment a job names on first use, without rules, so a missing one does not fail the job,
+   it just skips any approval gate;
 1. bump `scripts/_version.py` (SemVer; pre-1.0 a minor bump may change `--json`/flags);
 2. move `CHANGELOG.md`'s `[Unreleased]` items into `## [X.Y.Z] - date`, update the link refs;
 3. `./scripts/check.sh full` + `RUST_DEOBF_PACKAGING=1 python3 -m pytest tests/test_packaging.py`;
 4. commit, `git tag vX.Y.Z`, `git push origin master vX.Y.Z` — the tag must equal the version (the
    workflow refuses otherwise) and the workflow does the rest. A failure in `build`/`test`
    publishes nothing (delete the tag, fix, re-tag); once uploaded, PyPI never accepts the same
-   version again, so fix forward with X.Y.Z+1.
+   version again, so fix forward with X.Y.Z+1. If `publish-core` succeeded and `publish-premium`
+   failed (e.g. its environment/publisher was wrong), fix the setting and re-run only the failed
+   job ("Re-run failed jobs"): re-tagging would re-upload the core and be refused.
 5. after the FIRST release is on PyPI: put the README's PyPI install back first (its
    "From PyPI (once 0.1.0 is released)" block) and drop the git-install note; put the live
    PyPI badge back (`https://img.shields.io/pypi/v/rust-deobf`, now a static "not released yet");
