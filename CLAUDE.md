@@ -168,7 +168,7 @@ and the installed one run the same files; nothing was moved and the scripts' bar
 
 Rules: **adding a tool** = one row in `cli.py` `COMMANDS` (and nothing else; a script that needs
 the repo tree goes in `setup.py` `SOURCE_ONLY` instead). A new data file under `scripts/data/` must
-match `package-data` (`data/*.json`). Locate data via `Path(__file__).resolve().parent / "data"`,
+match `package-data` (`data/*.json`, `data/*.json.gz`; `test_packaging` checks every file ships). Locate data via `Path(__file__).resolve().parent / "data"`,
 never `ROOT / "scripts"` (= `site-packages/scripts` when installed). **The core never imports a
 premium module** (license boundary; `test_packaging` enforces it). A per-user cache goes under
 `cli.cache_dir()` (`~/.cache/rust-deobf`, macOS `~/Library/Caches`, Windows `%LOCALAPPDATA%`), must
@@ -335,7 +335,14 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   fake pointer -- corrupted the `ret` stubs for every later run. Unicorn's `uc.mem_write` ignores
   page protection AND does not invalidate translated blocks (use `ctl_remove_cache`).
 - **Windows-on-ARM: `platform.machine()` is the HOST CPU** (ARM64 even for an x64 python.exe, Python
-  3.14 measured); the interpreter's architecture is `sysconfig.get_platform()` (`win-amd64`).
+  3.14 measured; x64 3.10 still says AMD64); the interpreter's architecture is
+  `sysconfig.get_platform()` (`win-amd64`). The PEP 508 marker `platform_machine` is the same value,
+  so never gate a dependency on it (it dropped capstone/unicorn from x64 Python 3.14, §76).
+- **Installed layout:** `ROOT / "scripts"` (= `parent.parent / "scripts"`) is `site-packages/scripts`
+  once installed -- a foreign dir, and on sys.path at index 0 it can shadow a host program's modules.
+  Use the module's own directory; a premium module adds `../scripts` only in a checkout (§76).
+  Windows Python 3.10 spells a venv's site-packages `lib`, `Path.resolve()` gives `Lib`: compare
+  sys.path entries normalised (`normcase(normpath(abspath(e)))`), never with `==`.
 - **macOS arm64 (native tests build Mach-O with the host compiler):** libc++ sets bit 63 of
   `type_info.__name` for non-unique RTTI (recover_types masks it); a `__stubs` entry loads its GOT
   slot into x16, not x17 like an ELF PLT (recover_cfg accepts both); the temp dir is `/var` ->

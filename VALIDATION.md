@@ -3114,3 +3114,66 @@ Also in this round:
 | Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 676 passed / 93 skipped |
 
 x86-64 Linux, windows-latest and macos-15-intel (CI): not run here.
+
+## 76. Release 0.1.0rc1 red on Windows + Python 3.10; three installed-mode bugs behind it (Nov 2026)
+
+Release run 42976295297 (tag `v0.1.0rc1`): `build` green, 7/8 `test` cells green, `test
+(windows-latest, 3.10)` red in `test_installed_library_mode`. The assertion was `hits == []`: no
+`sys.path` entry was `==` the package dir. Nothing reached PyPI. Two hypotheses, separated on data
+before any fix.
+
+**Reproduced** on the Windows 11 ARM64 VM: a fresh venv from x64 Python 3.10.11 (the CI version),
+the rc1 wheels installed, the test's library-mode script run verbatim. It fails the same way:
+
+| | value |
+|---|---|
+| `rust_deobf.__path__[0]` | `...\venv\lib\site-packages\rust_deobf` |
+| last `sys.path` entry | `...\venv\Lib\site-packages\rust_deobf` (`normcase` equal, `samefile` True) |
+| `sys.path[0]` | `...\venv\Lib\site-packages\scripts` (does not exist) |
+
+**(1) The failing assertion is a test bug.** 3.10's `site` spells a venv's site-packages `lib`;
+the package registers `Path(__file__).resolve()`, which gives the on-disk `Lib`. Same directory, at
+the end of `sys.path` as required. With the test comparing normalised paths, the rc1 wheel passes
+that check.
+
+**(2) Is also real, on every OS, and the test did not look for it.** `gen_sigdb` (shipped) and
+every premium module insert `<package parent>/scripts` at index 0: the clone's `scripts/`, but
+`site-packages/scripts` once installed. Measured on the same venv with a stand-in
+`site-packages/scripts/recover.py` (a foreign distribution shipping a top-level `scripts`
+package): after `import rust_deobf.recover_emulate` the host's own `recover.py` wins; after
+`import rust_deobf.gen_sigdb` or `rust_deobf_premium.deobf_opaque`, the stand-in wins.
+
+**Found while reproducing:**
+- The installed std signature layer was empty. The wheel left out
+  `data/libfunc_sigs_std.json.gz` (package-data `data/*.json`), and `recover_libfuncs` read it from
+  `ROOT/"scripts"/data`. Installed: `load_std_db()` = {} (0 signatures); clone: 4989.
+- capstone/unicorn were not installed on x64 Python 3.14 under Windows-on-ARM. The marker
+  `platform_machine != "ARM64"` reads the host CPU there; x64 3.10 reports AMD64 and was unaffected.
+  The maintainer chose to drop the marker.
+
+| commit | fix | regression test (fails on the old wheel) |
+|---|---|---|
+| `09ea9da` | ship `data/*.json.gz`, read it next to the module, doctor checks it | every `scripts/data` file in the wheel; library mode loads the std layer |
+| `65d3d8e` | no `site-packages/scripts` on sys.path (clone-only paths only in a checkout) | library mode: normalised comparison + no sys.path entry added besides the package dirs (rc1 wheel: fails on `site-packages\scripts`) |
+| `65dc2a7` | capstone/unicorn without a marker | METADATA lists both with no marker (rc2-before-fix wheel: fails) |
+
+Measured after the fixes, rc2 wheels on the Windows VM:
+
+| interpreter | install | library mode | doctor |
+|---|---|---|---|
+| x64 Python 3.10.11 | ok | OK | no FAIL, std layer present |
+| x64 Python 3.14.7 (ARM64 host) | ok, capstone + unicorn installed | OK | no FAIL |
+| native ARM64 Python 3.14 | fails building capstone / unicorn (expected, README) | -- | -- |
+
+The installed-mode tests (`RUST_DEOBF_WHEEL_DIR`, 17 passed) were also run locally on macOS ARM64
+with Python 3.12. The release workflow's own cells (Linux x86-64/ARM64, windows-latest, macOS ×
+3.10/3.13) were not run here; they run at the `v0.1.0rc2` tag.
+
+`./scripts/check.sh full` (tree 65dc2a7 + these docs, `lab_matrix.py`; the installed-mode packaging
+tests are not part of it):
+
+| target | result |
+|---|---|
+| macOS 15.5 ARM64 (local, Python 3.12.5) | 0 failed / 709 passed / 60 skipped |
+| ARM64 Kali (native aarch64, Python 3.14.7) | 0 failed / 733 passed / 36 skipped |
+| Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 676 passed / 93 skipped |
