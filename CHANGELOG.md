@@ -8,6 +8,37 @@ distributions always share one version.
 
 ## [Unreleased]
 
+Coverage of more obfuscation techniques (VALIDATION §79-§85). Each item: a benign fixture,
+before/after measured, a test that fails on the previous code.
+
+### Added
+- **Strings that are never plain UTF-8**: UTF-16LE text in emulated memory, and small zlib/gzip
+  streams verified by their checksum (new `recover.run` engine "compressed strings",
+  `recover_blobs.small_streams`). New benchmark crate `encodings` (§80).
+- **Lazy imports**: `recover_emulate` / `recover.run` report `resolved_imports`, the names handed
+  to GetProcAddress / LoadLibrary* / GetModuleHandle* / dlsym / dlopen at run time; `in_file=False`
+  marks a decoded, hidden import (§81).
+- **OLLVM -bcf**: `deobf_opaque` scans every block, treats memory reads as unconstrained values,
+  models push/pop / rip-relative lea / adrp / AArch64 writeback, and follows single-predecessor
+  paths. Claims are typed opaque / constant / implied (new `constant_branches`,
+  `implied_branches`) (§82).
+- **garble**: `recover_go` reads a magic-patched pclntab (`pclntab_magic_patched`), and
+  `recover_go.function_starts` gives the emulator Go's function starts (§84).
+
+### Fixed
+- `recover_async` found no state machine in a `panic=abort` build (the LTO profiles): 0 of 9 ->
+  all but what LLVM inlines into the executor loop (§79).
+- `recover_rust_meta`: remapped registry paths (`--remap-path-prefix`) gave 0 crates (now 14 of
+  14), `panic=immediate-abort` builds were reported as not Rust (rustc's `.comment` is now
+  evidence), and an empty result carries `notes` saying why (§79).
+- `recover_emulate`: a forced run's one-byte overrun of a complete decode no longer replaces the
+  string (base64) (§80).
+- `unpack_emulate` models Win32 TLS and writes: every Rust std program on Windows aborted before
+  main, so a Rust-written packer was never followed to its stage-2 (§83).
+- `recover.run` names an architecture it does not emulate (`ELF/riscv`, not `ELF/?`), says
+  "WebAssembly module" for a wasm input, and gives the dynamic-analysis hint only when emulation
+  actually ran (§85).
+
 ## [0.1.0rc2] - 2026-11-11
 
 Second release candidate. 0.1.0rc1 published nothing: its installed-wheel test failed on Windows +

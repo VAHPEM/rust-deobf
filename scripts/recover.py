@@ -100,6 +100,10 @@ def detect(path):
             arch = "x86"                     # 32-bit x86
         elif "ARM" in cand:
             arch = "arm"
+        elif cand:
+            # name what it is (RISCV, MIPS, PPC64, ...) instead of "?": the note says it is not
+            # an architecture the emulator runs, and should say which one it is
+            arch = cand.split(".")[-1].lower()
     except Exception:
         pass
     imagebase = 0
@@ -161,6 +165,19 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
               "decoded": [], "stack": [], "literals": [], "literals_missed": [],
               "libfuncs": [], "resolved_imports": [], "engines": [], "notes": [], "errors": []}
     if fmt is None:
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(4)
+        except OSError:
+            head = b""
+        if head == b"\0asm":
+            # say what it is: Rust / Go / C compile to WebAssembly too, and none of the engines
+            # (Unicorn has no wasm) reads it -- data segments hold plain literals, a `strings`
+            # pass sees those
+            result["format"] = "WASM"
+            result["notes"].append("WebAssembly module: not supported (no wasm loader or emulator "
+                                   "here); its plain literals are in the data section")
+            return result
         result["notes"].append("not an ELF/PE/Mach-O binary LIEF can parse: nothing to recover")
         return result
     # The emulation engine loads ELF, PE and Mach-O on x86-64, AArch64 and 32-bit x86. 32-bit PE
@@ -315,7 +332,7 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
                 result["notes"].append("--libfuncs: no signature DB at scripts/data/libfunc_sigs.json; "
                                        "generate it with recover_libfuncs.py --gen <unstripped builds>")
 
-    if not result["decoded"]:
+    if not result["decoded"] and emu_ok:
         result["notes"].append("no decoded strings: for AEAD (e.g. muddy) or decoders that only run at "
                                "runtime, recover_dynamic.py can observe them -- it EXECUTES the sample, "
                                "so only inside an isolated analysis VM")
@@ -518,9 +535,9 @@ def main(argv=None):
     except Exception as e:
         print(f"recover: analysis error: {type(e).__name__}: {e}", file=sys.stderr)
         return EXIT_ERROR
-    if result["format"] is None:
-        print(f"recover: unsupported input: {path} is not an ELF/PE/Mach-O binary LIEF can parse",
-              file=sys.stderr)
+    if result["format"] in (None, "WASM"):
+        why = (result["notes"] or ["not an ELF/PE/Mach-O binary LIEF can parse"])[0]
+        print(f"recover: unsupported input: {path}: {why}", file=sys.stderr)
         return EXIT_UNSUPPORTED
 
     if args.floss_json:

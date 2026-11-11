@@ -3640,3 +3640,31 @@ Tests (`tests/test_go.py`):
 
 garble end to end needs garble and is a lab measurement (`obf_src/garble_go/build.sh`), not a CI
 job. Not measured: other garble versions, Go versions other than 1.24, `-controlflow`.
+
+## 85. Integer constants and other architectures: measured, mostly not done (Nov 2026)
+
+**Integer constants (goldberg_int!) — not done.**
+- Measured: `goldberg_int!(0x12345678)` hides the value. It is in none of the pe / elf-arm64
+  release / size-lto builds.
+- goldberg draws its keys with `random::<u32>()` at every build, so it is not deterministic, like
+  §77's crates.
+- The value exists only after goldberg's flattened state machine runs. deobf_opaque's per-block
+  folding never sees it.
+- What would recover it: the emulator noting integer arguments at formatting / call sites. That is
+  a new value-tracking hook, not a filter, and it is not implemented in this round. The strings
+  of the same program are recovered (test_obf).
+
+**Other architectures: what the tool now says, no new engine.**
+- Measured on clang 21 builds: an armv7 ELF already got "emulation supports ... (this is ELF/arm):
+  skipped".
+- A RISC-V ELF said "ELF/?"; it now says "ELF/riscv", naming whatever machine LIEF reports.
+- A wasm module said "not an ELF/PE/Mach-O binary LIEF can parse"; it now says "WebAssembly module:
+  not supported ...". recover's CLI exits 3 and the MCP tool answers supported=false, as for any
+  unsupported input.
+- All three also got "no decoded strings: for AEAD ... recover_dynamic", advice about emulation
+  finding nothing although emulation never ran. That note now needs emulation to have run.
+- ARM32 / RISC-V / wasm emulation is NOT implemented: each needs a loader, an emulator (Unicorn has
+  no wasm) and its own tables, which is a project of its own.
+
+Tests: `test_wasm_module_is_named_and_unsupported` and
+`test_unknown_architecture_is_named_and_no_runtime_hint` (both fail on the old code).

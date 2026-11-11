@@ -112,3 +112,29 @@ def test_dynamic_hint_is_quoted_and_not_a_command(capsys):
     out = capsys.readouterr().out
     assert "'/tmp/dir with space/s.bin'" in out
     assert "python " not in out                          # a hint, not a ready-to-paste run line
+
+
+# --- inputs no engine runs: say what they are (VALIDATION §85) ---
+def test_wasm_module_is_named_and_unsupported(tmp_path):
+    w = tmp_path / "m.wasm"
+    w.write_bytes(b"\0asm\x01\0\0\0" + bytes(32))       # a WebAssembly module header
+    res = recover.run(w)
+    assert res["format"] == "WASM" and "WebAssembly" in res["notes"][0], res["notes"]
+    r = _cli(w)
+    assert r.returncode == recover.EXIT_UNSUPPORTED and "WebAssembly" in r.stderr, r.stderr
+
+
+def test_unknown_architecture_is_named_and_no_runtime_hint(tmp_path):
+    # a RISC-V ELF (e_machine 243): the note names it ("ELF/riscv", not "ELF/?"), and the
+    # "AEAD ... recover_dynamic" hint -- which is about emulation finding nothing -- is not given
+    # when emulation never ran
+    sys.path.insert(0, str(ROOT / "tests"))
+    from _mkelf import mkelf
+    elf = bytearray(mkelf(b"\x13\x00\x00\x00" * 8)[0])
+    elf[18:20] = (243).to_bytes(2, "little")
+    p = tmp_path / "rv.elf"
+    p.write_bytes(bytes(elf))
+    res = recover.run(p, time_budget=5)
+    assert res["format"] == "ELF" and res["arch"] == "riscv", (res["format"], res["arch"])
+    assert any("ELF/riscv" in n for n in res["notes"]), res["notes"]
+    assert not any("AEAD" in n for n in res["notes"]), res["notes"]

@@ -111,8 +111,9 @@ def tool_recover(args: dict) -> dict:
     min_len = int(args.get("min_len", 6))
     res = recover.run(path, emulate=emulate, time_budget=time_budget, min_len=min_len,
                       literals=True, stackstrings=True)
-    if res.get("format") is None:
-        return {"supported": False, "reason": "not an ELF/PE/Mach-O LIEF can parse"}
+    if res.get("format") in (None, "WASM"):
+        return {"supported": False, "reason": (res.get("notes") or
+                                               ["not an ELF/PE/Mach-O LIEF can parse"])[0]}
 
     def where(x):
         if x.get("method", "").startswith("static"):
