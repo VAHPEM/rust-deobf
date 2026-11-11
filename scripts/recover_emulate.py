@@ -65,7 +65,7 @@ from unicorn import x86_const as X
 from unicorn import arm64_const as A
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from emu_backend import fast_hook_add, release  # noqa: E402  (one Python frame per hook event)
+from emu_backend import fast_hook_add, mp_context, release  # noqa: E402  (one Python frame per hook event)
 
 ROOT = Path(__file__).resolve().parent.parent
 _SIGS = Path(__file__).resolve().parent / "data" / "runtime_sigs.json"
@@ -3771,8 +3771,9 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
     parallel_ok = False
     if workers > 1 and len(order) >= PARALLEL_MIN:
         import concurrent.futures as cf
-        import multiprocessing as mp
-        ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context("spawn")
+        # forkserver (engines preloaded), else spawn -- never a bare fork: it aborted children on
+        # macOS and inherits Unicorn state on Linux (emu_backend.mp_context, VALIDATION §86)
+        ctx = mp_context()
         shares = [[f for f, _ in order[i::workers]] for i in range(workers)]
         by_string, tried, runs, timed_out, found = {}, 0, 0, False, set()
         completed = set()                  # indices of shares whose worker returned cleanly

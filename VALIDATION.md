@@ -3668,3 +3668,61 @@ job. Not measured: other garble versions, Go versions other than 1.24, `-control
 
 Tests: `test_wasm_module_is_named_and_unsupported` and
 `test_unknown_architecture_is_named_and_no_runtime_hint` (both fail on the old code).
+
+## 86. Parallel recover() used a bare fork: macOS child aborts (affects 0.1.0) (Nov 2026)
+
+**Symptom (reported):**
+- The run aborts with SIGABRT on macOS, "crashed on child side of fork pre-exec".
+- It happens only on recover_emulate's parallel path: workers > 1 and a binary with at least
+  `PARALLEL_MIN` (2000) functions. Hence intermittent.
+- 0.1.0 has it.
+
+**Cause:** `recover()` took `mp.get_context("fork")` wherever fork existed. A fork without exec
+copies the caller as it is:
+- On macOS that is unsafe once the process has loaded system frameworks or runs threads. This is
+  why Python's default there has been spawn since 3.8.
+- On Linux, a fork after the caller created a Unicorn engine fails with "Could not allocate
+  dynamic translator buffer" (CLAUDE.md gotcha).
+
+Nothing needed fork's semantics. `_worker` takes the path and re-parses the Image itself, so no
+parent state is shared, and no test relied on it (none patches the module for workers). fuzz_recover
+already did the right thing.
+
+A dead worker did not fail the run: BrokenProcessPool is caught and the share re-runs in the
+parent. So the user-visible cost could also be a silent serial run after paying for the pool.
+
+**Fix:** one helper, `emu_backend.mp_context()`: forkserver with lief / capstone / unicorn
+preloaded, else spawn; never a bare fork on any OS. `recover_emulate` (parallel path) and
+`fuzz_recover._isolation_ctx` both use it.
+
+Consequences, reviewed:
+- Children re-import the caller's `__main__`, exactly like Python's default spawn on macOS and
+  Windows. A script that calls recover() in parallel needs the usual `if __name__ == "__main__":`
+  guard; recover.py, cli.py and mcp_server.py have it.
+- The forkserver process lives as long as the caller.
+- A worker that dies still yields BrokenProcessPool, and its share still re-runs in the parent
+  (unchanged). The pool is a context manager, so its workers are joined.
+
+**Measured, macOS 15.5 ARM64 (python.org Python 3.12.5, unicorn 2.1.4):**
+- **Before: the crash was NOT reproduced.** Old code, `meta_probe` elf-arm64 release (2668
+  functions), workers=4, 8 runs under three conditions:
+  - plain;
+  - Objective-C runtime initialised in the parent first (`urllib.request.getproxies()`,
+    `platform.mac_ver()`);
+  - the same plus two threads parsing with LIEF during the fork.
+
+  All 8 runs: 0 worker errors, 0 shares re-run in the parent. "Unicorn created in the parent
+  first, then the large binary" was 0 too, on macOS and on Kali. The report is not contradicted
+  (the trigger is environment-dependent), but this machine did not show it, so there is no
+  before/after for the crash itself.
+- **After:**
+  - `tests/test_parallel_workers.py` passes. It goes through the real parallel path with real child
+    processes (PARALLEL_MIN lowered in the parent: no committed fixture reaches 2000 functions, and a
+    larger one would break the fixture-size rule). It checks: the start method is not fork; no
+    share re-ran in the parent; the result equals workers=1. It fails on the old code (no helper).
+  - Forced parallel (workers=4) against one process on 4 benchmark binaries (encodings: elf-arm64
+    release / size-lto, pe32 size-lto, pe release): same decoded strings in all 4, 0 shares re-run
+    in the parent.
+  - **NOT MEASURED:** `meta_probe` at the native threshold with the new code (the run was stopped
+    before it reached it), the rest of the local benchmark binaries, and lab_matrix with this
+    change on Kali and Windows. The last lab run (943ddda) is from before it.

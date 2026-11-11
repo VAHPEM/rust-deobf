@@ -252,23 +252,13 @@ def _unlink(path: Path) -> None:
 # finding, not a dead fuzzer.
 # --------------------------------------------------------------------------------------------
 def _isolation_ctx():
-    """Use a forkserver where available (Linux, macOS), else spawn (Windows has only spawn) -- NOT a
-    plain fork. A fork inherits the parent's memory, so if the parent has already instantiated
-    Unicorn (e.g. this runs inside a pytest process that emulated in an earlier test), the child
-    inherits poisoned JIT state and fails with "Could not allocate dynamic translator buffer". A
-    forkserver forks from its own clean server process (which only imported the preloaded engines,
-    never created a Uc), so children are clean and cheap; spawn is the portable fallback. Both give
-    the child a fresh interpreter state for Unicorn, which is what matters for correctness."""
-    import multiprocessing as mp
-    methods = mp.get_all_start_methods()
-    if "forkserver" in methods:
-        ctx = mp.get_context("forkserver")
-        try:
-            ctx.set_forkserver_preload(["lief", "capstone", "unicorn"])
-        except Exception:
-            pass
-        return ctx
-    return mp.get_context("spawn")
+    """A forkserver where available (Linux, macOS), else spawn (Windows has only spawn) -- NOT a
+    plain fork: a fork inherits the parent's memory, so if the parent has already instantiated
+    Unicorn (e.g. inside a pytest process that emulated in an earlier test) the child inherits
+    poisoned JIT state and fails with "Could not allocate dynamic translator buffer". The one shared
+    choice: emu_backend.mp_context (also recover_emulate's parallel path)."""
+    import emu_backend
+    return emu_backend.mp_context()
 
 
 _POLL = 0.1             # how often the parent checks a silent worker for death

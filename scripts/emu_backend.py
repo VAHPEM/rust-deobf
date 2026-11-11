@@ -15,6 +15,8 @@ cost of getting each hook event into Python is large. This module cuts that cost
   an invalid-memory hook's return value decides whether emulation continues. Any other hook type
   (UC_HOOK_INSN, UC_HOOK_INTR, ...), or a Unicorn binding without the internals this relies on,
   goes through `uc.hook_add` unchanged.
+* `mp_context()`: the multiprocessing context for emulation workers -- forkserver (engines
+  preloaded), else spawn, never a bare fork (recover_emulate's parallel path, fuzz_recover).
 
 icicle-emu (a JIT SLEIGH emulator, `pip install icicle-emu`) was evaluated as an alternative
 backend and is deliberately NOT wired in: its Python API (0.0.11) has no hooks at all (only
@@ -153,8 +155,40 @@ def release(uc):
         box[0] = None
 
 
+# engines a worker needs: imported once by the forkserver process, so each worker forks from a
+# process that has them loaded but has never created a Uc (or a thread, or touched macOS frameworks)
+MP_PRELOAD = ("lief", "capstone", "unicorn")
+
+
+def mp_context(methods=None):
+    """The multiprocessing context for emulation workers: a forkserver (preloading MP_PRELOAD)
+    where the platform has one, else spawn -- NEVER a bare fork, on any OS. A bare fork copies the
+    caller as it is: after the caller created a Unicorn engine the child fails with "Could not
+    allocate dynamic translator buffer" (Linux), and on macOS a fork without exec from a process
+    that loaded system frameworks or runs threads can abort in the child ("crashed on child side
+    of fork pre-exec"). A forkserver forks from its own clean process; spawn starts a fresh
+    interpreter (Windows has only spawn). `methods` overrides mp.get_all_start_methods() (tests).
+    Both re-import the caller's __main__ in the child (as Python's default spawn on macOS and
+    Windows already does): a script calling recover() in parallel needs the usual
+    `if __name__ == "__main__":` guard. (VALIDATION §86)"""
+    import multiprocessing as mp
+    methods = mp.get_all_start_methods() if methods is None else methods
+    if "forkserver" in methods:
+        ctx = mp.get_context("forkserver")
+        try:
+            ctx.set_forkserver_preload(list(MP_PRELOAD))
+        except Exception:          # noqa: BLE001 -- a preload is an optimisation only
+            pass
+        return ctx
+    return mp.get_context("spawn")
+
+
 def _selftest():
     import struct
+    # worker processes: forkserver when available, else spawn; never fork
+    assert mp_context(["fork", "spawn", "forkserver"]).get_start_method() == "forkserver"
+    assert mp_context(["fork", "spawn"]).get_start_method() == "spawn"
+    assert mp_context(["spawn"]).get_start_method() == "spawn"
     from unicorn import UC_ARCH_X86, UC_MODE_64, Uc, UC_PROT_READ, UC_PROT_ALL
     from unicorn.x86_const import UC_X86_REG_RIP, UC_X86_REG_RSI, UC_X86_REG_RCX, UC_X86_REG_RSP
     # xor byte [rsi],0x5a ; add byte [rsi],3 ; inc rsi ; dec rcx ; jnz ; ret

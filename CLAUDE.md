@@ -229,7 +229,7 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   abandons anything it does not model exactly; `tests/test_opaque_differential.py` checks every
   claim against Unicorn on random blocks (0 false claims is the bar — never relax it).
 - **capstone is pinned `>=5,<6`** — the code uses `CS_ARCH_ARM64` (renamed in capstone 6). Don't bump.
-- **Unicorn + multiprocessing:** use `forkserver`, not `fork`. Forking after the parent has
+- **Unicorn + multiprocessing:** use `forkserver`, not `fork` -- take `emu_backend.mp_context()` (forkserver, else spawn; recover_emulate and fuzz_recover share it; a bare fork also aborts children on macOS, §86). Forking after the parent has
   instantiated Unicorn → "Could not allocate dynamic translator buffer".
 - **AArch64 musl cross-link** fails with the system `cc`; link with
   `-C linker=rust-lld -C link-self-contained=yes` (see `tests/test_opt_reverse.py`).

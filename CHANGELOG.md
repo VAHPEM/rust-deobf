@@ -26,6 +26,12 @@ before/after measured, a test that fails on the previous code.
   `recover_go.function_starts` gives the emulator Go's function starts (§84).
 
 ### Fixed
+- **macOS: parallel `recover` could abort** (SIGABRT, "crashed on child side of fork pre-exec")
+  on a large binary (workers > 1 and >= 2000 functions): the emulation workers were started with a
+  bare `fork`. They now use a forkserver (engines preloaded), else spawn -- never a bare fork, on
+  any OS (`emu_backend.mp_context`, shared with `fuzz_recover`). **Affects 0.1.0.** A script that
+  calls `recover()` in parallel needs an `if __name__ == "__main__":` guard, as with Python's
+  default spawn (§86).
 - `recover_async` found no state machine in a `panic=abort` build (the LTO profiles): 0 of 9 ->
   all but what LLVM inlines into the executor loop (§79).
 - `recover_rust_meta`: remapped registry paths (`--remap-path-prefix`) gave 0 crates (now 14 of
