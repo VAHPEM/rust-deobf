@@ -248,6 +248,74 @@ VARIANTS["litcrypt2"] = {
 # benign, indicator-shaped strings in exactly those places, and the build matrix adds the
 # size-optimised, fat-LTO, panic=abort profiles release malware tends to ship with, which change
 # the decoder idioms (inlining, loop shape, index wrap) the recoverers key on.
+# 2026 coverage round (VALIDATION §80): strings that are never plain UTF-8 bytes in the file or
+# in a Rust `&str` at run time. One canary per encoding; no crate, all hand-written except the
+# zlib stream (miniz_oxide, the inflater std's own backtrace code vendors):
+#   0  UTF-16LE, XOR'd per code unit, decoded and converted with String::from_utf16
+#   1  UTF-16LE, XOR'd per code unit, decoded and NEVER converted: written out as UTF-16 bytes
+#      (a Windows `W` API argument) -- in memory only as UTF-16
+#   2  base64 text in rodata, decoded at run time (the base64 is visible; the canary is not)
+#   3  hex text in rodata, decoded at run time
+#   4  a zlib stream, inflated at run time
+import base64 as _b64, zlib as _zlib
+_WK = 0x5A3C
+def _u16(c):
+    units = [int.from_bytes(c.encode("utf-16-le")[i:i + 2], "little") for i in range(0, 2 * len(c), 2)]
+    return "[" + ",".join(str(u ^ _WK) for u in units) + "]", len(units)
+_w0, _n0 = _u16(CANARIES[0])
+_w1, _n1 = _u16(CANARIES[1])
+_z = _zlib.compress(CANARIES[4].encode(), 9)
+VARIANTS["encodings"] = {
+    "deps": ['miniz_oxide = "0.8"'],
+    "header": "\n".join([
+        "use std::io::Write;",
+        f"static W0: [u16; {_n0}] = {_w0};",
+        f"static W1: [u16; {_n1}] = {_w1};",
+        f'static B64: &str = "{_b64.b64encode(CANARIES[2].encode()).decode()}";',
+        f'static HEX: &str = "{CANARIES[3].encode().hex()}";',
+        f"static Z: [u8; {len(_z)}] = [{','.join(str(b) for b in _z)}];",
+        "#[inline(never)]",
+        f"fn wide(enc: &[u16]) -> Vec<u16> {{ enc.iter().map(|u| u ^ {_WK:#x}).collect() }}",
+        "#[inline(never)]",
+        "fn b64(s: &str) -> String {",
+        "    let mut acc = 0u32; let mut n = 0; let mut out = Vec::new();",
+        "    for c in s.bytes() {",
+        "        let v = match c { b'A'..=b'Z' => c - b'A', b'a'..=b'z' => c - b'a' + 26,",
+        "                          b'0'..=b'9' => c - b'0' + 52, b'+' => 62, b'/' => 63, _ => continue };",
+        "        acc = (acc << 6) | v as u32; n += 6;",
+        "        if n >= 8 { n -= 8; out.push((acc >> n) as u8); }",
+        "    }",
+        "    String::from_utf8(out).unwrap()",
+        "}",
+        "#[inline(never)]",
+        "fn unhex(s: &str) -> String {",
+        "    let h = |c: u8| if c <= b'9' { c - b'0' } else { c - b'a' + 10 };",
+        "    String::from_utf8(s.as_bytes().chunks(2).map(|p| h(p[0]) << 4 | h(p[1])).collect()).unwrap()",
+        "}",
+        "#[inline(never)]",
+        "fn inflate(z: &[u8]) -> String {",
+        "    String::from_utf8(miniz_oxide::inflate::decompress_to_vec_zlib(z).unwrap()).unwrap()",
+        "}",
+        "#[inline(never)]",
+        "fn put_wide(w: &[u16]) {",
+        "    let bytes: Vec<u8> = w.iter().flat_map(|u| u.to_le_bytes()).collect();",
+        "    std::io::stdout().write_all(&bytes).unwrap();",
+        "    println!();",
+        "}",
+    ]),
+    "body": "\n".join([
+        "fn main() {",
+        "    println!(\"{}\", String::from_utf16(&wide(&W0)).unwrap());",
+        "    put_wide(&wide(&W1));",
+        "    println!(\"{}\", b64(B64));",
+        "    println!(\"{}\", unhex(HEX));",
+        "    println!(\"{}\", inflate(&Z));",
+        "}",
+    ]),
+    "build_rs": None, "env": None,
+}
+
+
 SCATTER = [
     "10.66.12.7:8443",                                              # struct field, ip:port
     "C:\\ProgramData\\NorthwindSvc\\state.db",                      # struct field, Windows path
@@ -400,7 +468,8 @@ for name, v in VARIANTS.items():
                    "obfstr":"xor","litcrypt":"xor","litcrypt2":"xor",
                    "cryptify":"xor-ish","cryptify_default":"xor-ish","tight_xor":"xor",
                    "muddy":"chacha20poly1305", "obfuse":"polymorphic-xor-add-sub-rot",
-                   "obfuse_aes":"aes-256-gcm", "obfuse_xor":"xor-mba", "obfany":"xor"}.get(name.replace("scatter_", "").replace("cryptify", "cryptify_default") if name.startswith("scatter_") else name, "?"),
+                   "obfuse_aes":"aes-256-gcm", "obfuse_xor":"xor-mba", "obfany":"xor",
+                   "encodings":"utf16-xor/base64/hex/zlib"}.get(name.replace("scatter_", "").replace("cryptify", "cryptify_default") if name.startswith("scatter_") else name, "?"),
     }
 # What each scatter program really holds at run time. litcrypt (v1) strips one character from
 # each end of the literal's *source text*, so a raw string r"C:\x" becomes `"C:\x` -- a crate

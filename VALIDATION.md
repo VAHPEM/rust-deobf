@@ -3385,3 +3385,62 @@ Not measured: MSVC targets, Mach-O and PE `.comment` (neither format has one), t
 real build.
 
 `./scripts/check.sh full` (macOS ARM64): 725 passed, 0 failed.
+
+## 80. Strings that are never plain UTF-8: UTF-16, base64, hex, zlib (Nov 2026)
+
+New benchmark crate `encodings` (`bench_src/gen_projects.py`, Cargo.lock committed): one canary
+per encoding, hand-written except the zlib stream (miniz_oxide).
+- 0: UTF-16LE, XOR'd per code unit, then String::from_utf16.
+- 1: the same, but **never converted**, written out as UTF-16 bytes (a Windows `W` argument).
+- 2: base64 text in rodata, decoded at run time.
+- 3: hex text, decoded at run time.
+- 4: a 38-byte zlib stream, inflated at run time.
+
+Built on Kali (rustc 1.99.1): elf-arm64, pe, pe32 × release, size-lto × strip, nostrip.
+
+Measured with `recover.run` defaults, 12 binaries, before:
+
+| canary | found |
+|---|---|
+| 0 UTF-16, converted | 12/12 |
+| 1 UTF-16 only | **0/12** (the capture saw only printable byte runs) |
+| 2 base64 | 6/12; the other 6 gave `.../data.bin>` or `...?` instead |
+| 3 hex | 12/12 |
+| 4 zlib | **0/12** (no tier inflates; recover_blobs never carves 38 bytes) |
+
+Fixes:
+- **UTF-16:** `_Writes.capture` also reads printable-ASCII UTF-16LE runs. No address is recorded:
+  the overlap rules assume one byte per character.
+- **base64 overrun:**
+  - What happened: a forced run of the decoder flipped its padding branch and passed the complete
+    string on with one byte more. The natural run of `main` had passed the right string. The prefix
+    rules then took the right string for an unfinished view of the longer one.
+  - Fix: such an overrun is dropped first, and only with a witness, a natural run that RETURNED
+    (`Emulator.returned` / `natural_done`, new) and passed the shorter string on.
+  - The extra 1-4 characters must be junk-class. A letter (`endpoint` → `endpoints`) is kept.
+- **zlib:** `recover_blobs.small_streams` finds zlib/gzip at its header at any size, accepted only
+  when the stream ends in a valid Adler-32 / CRC-32. It is `recover.run`'s new "compressed
+  strings" engine, applied to a text-like output (≥ 90% printable).
+
+After, the same 12 binaries: 5/5 exactly in every one.
+
+Precision:
+- `small_streams` over 1181 macOS system binaries and fixtures (491 MiB, 3.5 s): 3 streams. Two
+  are real zlib image data in `screencapture` (1% printable, not reported). The third is the
+  fixture's canary.
+- Golden emulation dump: identical (`natural_done` is stripped from the records).
+- Full benchmark on Kali (elf-arm64, pe, pe32, elf-arm64gnu; old tree vs new tree, same binaries):
+  of 472 tests common to both runs, **0** changed outcome; the 12 new `encodings` tests pass.
+- **elf (x86-64 Linux) NOT MEASURED** in this round (no amd64 build on the ARM64 lab); CI's elf
+  job is its first measurement.
+
+Tests:
+- `test_encodings_fixture_gives_exactly_the_canaries`, on the committed
+  `tests/fixtures/strenc/encodings.arm64` (355 KB, elf-arm64 size-lto, stripped; no canary in
+  plaintext).
+- `test_utf16_text_is_captured`.
+- `test_forced_overrun_of_a_complete_natural_decode_is_dropped`, plus two controls: no witness, and
+  a letter tail.
+- `test_encodings_by_pipeline` (benchmark).
+
+Three of these tests fail on the old code, for the stated reason.

@@ -141,7 +141,9 @@ single-byte-XOR (incl. XOR hiding a gzip/zlib/bz2/container stream), chained thr
 compressed layers on one MAX_OUT budget (+ containers nested in an output); also at exact starts:
 container magics, the PE/ELF overlay, and a bounded second-pass search for headerless streams
 (EOF tail, ends of zero padding, around >= 6.0-bit regions; <= 8192 starts/file) → annotate with
-recover_crypto's candidate primitives; honest that encrypted blobs need a key).
+recover_crypto's candidate primitives; honest that encrypted blobs need a key). Its
+`small_streams` (zlib/gzip at their header, any size, kept only when the Adler-32/CRC-32 checks)
+is also `recover.run`'s "compressed strings" engine (§80).
 Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `heldout_eval.py`,
 `measure_fp.py`, `measure_rust_meta.py`, `run_floss.py`, `parse_gallery.py`, `disasm.py`,
 `bench_emu.py` (emulation-engine benchmark: Unicorn vs optional icicle-emu, and Unicorn hook layouts, on
@@ -300,7 +302,8 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
 - **Benchmark crates** (`bench_src/gen_projects.py` → `manifest.json`; `build_all.sh` builds every
   `bench_src/*/`): hand-rolled xor/add/sub/tight_xor, obfstr, litcrypt, litcrypt2, cryptify
   (custom + default key), muddy, and the 2026 crates **obfuse** (default), **obfuse_aes**,
-  **obfuse_xor**, **obfany**. obfuse's *default* features list `aes-256-gcm`, but with
+  **obfuse_xor**, **obfany**, and **encodings** (§80: UTF-16 converted / never converted, base64,
+  hex, a 38-byte zlib stream; hand-written + miniz_oxide). obfuse's *default* features list `aes-256-gcm`, but with
   `polymorphic` on (default) the macro never uses the AEAD: each literal gets inline
   XOR/ADD/SUB/ROT layers in a flattened state machine. The real AES-256-GCM path is `obfuse_aes`
   (`default-features = false`). **Unseeded, obfuse/obfuse_aes/obfuse_xor and muddy draw fresh keys
@@ -316,6 +319,11 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   reads its neighbours too (`:gUn` + `metry-off` + `a`): `_drop_overlap_artifacts` drops x holding a
   used block AT its address with junk before it (k > 0 -- k = 0 is a byte-by-byte decoder's own
   prefix chain, e.g. cryptify; that version cost three scatter strings). §78.
+- **UTF-16 and forced overruns (§80):** `_Writes.capture` also reads printable-ASCII UTF-16LE runs
+  (no address recorded: the overlap rules do one-byte-per-character arithmetic on addresses). A
+  forced run that passes a complete natural decode on with 1-4 junk characters more (a flipped
+  base64 padding branch) is dropped only with a witness: a natural run that RETURNED (`returned`,
+  `natural_done`) and passed the shorter string on. `natural_done` is stripped from the records.
 - **Instruction budgets bind on software ciphers**: the `aes` crate on AArch64 has no AES
   instructions by default (soft fixsliced AES + GHASH, ~26k instructions per string). Callees get
   more budget only while running dense straight-line code (`Emulator._dense`, `DENSE` = 16

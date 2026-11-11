@@ -575,3 +575,77 @@ def test_byte_by_byte_decode_chain_keeps_the_whole_string():
     rows.append((s, 0x158d, [0x30000160], False))
     kept = {r["string"] for r in R._drop_overlap_artifacts(_records(rows))}
     assert s in kept, kept
+
+
+# --- strings that are not plain UTF-8 (VALIDATION §80) ---------------------------------------
+ENCODINGS = ROOT / "tests" / "fixtures" / "strenc" / "encodings.arm64"
+_B64 = "canary::charlie::/opt/app/resources/data.bin"
+# bench_src `encodings`, elf-arm64 size-lto (measured): main's natural run passes the base64
+# decode on at its length; a forced run of the decoder flips the padding branch and passes the same
+# buffer with one more byte on. Without the witness the overrun replaced the string.
+_B64_ROWS = [(_B64[:16], 0x2205ac, [0x30000050], True), (_B64[:32], 0x2205ac, [0x300000a0], True),
+             (_B64, 0x2205ac, [0x30000090, 0x30000100], True)]
+
+
+def _natural_done(rows, forced_tail):
+    recs = _records(rows)
+    for r in recs:
+        r["natural_done"] = True
+    recs.append({"string": _B64 + forced_tail, "function": 0x22044c, "method": "emulation",
+                 "forced": True, "addr": [0x30000100], "used": True})
+    return recs
+
+
+def test_forced_overrun_of_a_complete_natural_decode_is_dropped():
+    kept = {r["string"] for r in R._drop_overlap_artifacts(_natural_done(_B64_ROWS, ">"))}
+    assert _B64 in kept and _B64 + ">" not in kept, kept
+
+
+def test_forced_overrun_needs_a_completed_natural_run():
+    # no witness (the natural run was cut short): the forced run may be the one that finished the
+    # decode -- unchanged behaviour, the longer string stays
+    recs = _natural_done(_B64_ROWS, ">")
+    for r in recs:
+        r.pop("natural_done", None)
+    kept = {r["string"] for r in R._drop_overlap_artifacts(recs)}
+    assert _B64 + ">" in kept, kept
+
+
+def test_forced_extension_by_a_word_character_is_not_an_overrun():
+    # `endpoint` naturally, `endpoints` on another arm: a letter is not junk
+    kept = {r["string"] for r in R._drop_overlap_artifacts(_natural_done(_B64_ROWS, "s"))}
+    assert _B64 + "s" in kept, kept
+
+
+def test_utf16_text_is_captured():
+    # a UTF-16LE buffer (a Windows `W` string, never converted) has a zero byte between characters:
+    # no printable byte run sees it
+    from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
+    uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    uc.mem_map(0x10000, 0x1000)
+    w = R._Writes()
+    text = "canary::bravo::build-id-20261018"
+    data = b"\x01\x02" + text.encode("utf-16-le") + b"\x00\x00"
+    uc.mem_write(0x10100, data)
+    w.add(0x10100, len(data))
+    out = set()
+    w.capture(uc, out)
+    assert text in out, out
+    # short UTF-16 (under 6 characters) and alternating non-text are not strings
+    w2, out2 = R._Writes(), set()
+    uc.mem_write(0x10800, "abcde".encode("utf-16-le") + bytes([0x41, 0x01] * 8))
+    w2.add(0x10800, 26)
+    w2.capture(uc, out2)
+    assert out2 == set(), out2
+
+
+def test_encodings_fixture_gives_exactly_the_canaries():
+    # UTF-16 never converted (canary 1), base64 with the forced overrun (2), and a 38-byte zlib
+    # stream (4) were all missed before §80; 0 (UTF-16, converted) and 3 (hex) were found
+    import json
+    import recover
+    canaries = json.loads((ROOT / "bench_src" / "manifest.json").read_text())["canaries"]
+    res = recover.run(ENCODINGS, stackstrings=False, literals=False, time_budget=300)
+    got = {x["string"] for x in res["decoded"]}
+    assert got == set(canaries), (sorted(set(canaries) - got), sorted(got - set(canaries)))
+

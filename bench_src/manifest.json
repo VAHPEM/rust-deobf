@@ -116,6 +116,12 @@
       "suite": "canary",
       "cipher": "xor"
     },
+    "encodings": {
+      "crate": "miniz_oxide = \"0.8\"",
+      "env": null,
+      "suite": "canary",
+      "cipher": "utf16-xor/base64/hex/zlib"
+    },
     "scatter_xor_custom": {
       "crate": null,
       "env": null,

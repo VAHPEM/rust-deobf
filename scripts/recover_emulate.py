@@ -70,6 +70,9 @@ from emu_backend import fast_hook_add, release  # noqa: E402  (one Python frame 
 ROOT = Path(__file__).resolve().parent.parent
 _SIGS = Path(__file__).resolve().parent / "data" / "runtime_sigs.json"
 _PRINTABLE_RUN = re.compile(rb"[\x20-\x7e]{6,}")
+# the same text as UTF-16LE (a Windows `W` string, Rust's encode_utf16 / obfwide!): printable
+# ASCII code units only -- the zero high bytes break a byte run, so _PRINTABLE_RUN never sees it
+_UTF16_RUN = re.compile(rb"(?:[\x20-\x7e]\x00){6,}")
 _PRINTABLE_BYTE = re.compile(rb"[\x20-\x7e]")
 _CALL_KINDS = frozenset(("call", "icall", "icall_rip"))
 _MASK64 = (1 << 64) - 1
@@ -1142,6 +1145,11 @@ class _Writes:
                     out.add(piece)
                     if addrs is not None:
                         addrs.setdefault(piece, set()).add(addr)
+            if b"\x00" in data:
+                # no address recorded: the overlap rules do byte arithmetic on a text's address
+                # (one byte per character), which a UTF-16 buffer does not satisfy
+                for m in _UTF16_RUN.finditer(data):
+                    out.add(m.group()[::2].decode("ascii"))
 
     def _split(self, start, run):
         """Cut a printable run where it mixes writes of different ages.
@@ -2092,6 +2100,7 @@ class Emulator:
                 self._capture()          # a callee of the emulated function just finished
         else:
             self._capture()
+            self.returned = True         # the emulated function itself returned: a complete run
             self.uc.emu_stop()
 
     def _abandon(self):
@@ -2419,6 +2428,7 @@ class Emulator:
         self.count = 0
         self.nblocks = 0                    # basic blocks run (dense straight-line code: _dense)
         self.run_used = set()               # strings passed on at their length in THIS run
+        self.returned = False               # set when the function returns (not cut, no fault)
         self.plan = plan or {}
         self.forced = set()
         self.branches = set()
@@ -2435,6 +2445,8 @@ class Emulator:
             try:
                 self.fault = False
                 self.uc.emu_start(pc, RET_SENTINEL, timeout=timeout_us, count=max(1, budget - self.count))
+                if not self.fault and self.uc.reg_read(self.PC) == RET_SENTINEL:
+                    self.returned = True       # returned to the sentinel: the run is complete
                 if not self.fault:
                     # out of instructions while still writing text (a cipher decrypting one
                     # string after another, e.g. ChaCha20 at opt-level="z" with nothing
@@ -2501,6 +2513,7 @@ class Emulator:
         out = set(strings)
         addr_acc = {k: set(v) for k, v in self.straddr.items()}   # run() resets straddr each pass
         self.natural = set(strings)        # what the unforced run produced
+        self.natural_done = self.returned  # ... and whether that run reached the function's end
         all_cov = set(covered)
         queue = deque()
         tried = set()
@@ -2994,6 +3007,24 @@ def _drop_overlap_artifacts(records):
     to `canary::echo::schema-version-4`) -> drop it. Then pieces of a surviving string (a
     suffix or the middle, from out-of-order stores) go.
     """
+    # a forced path that ran a complete decode one step too far: a natural run returned after
+    # passing n on at its length (records keep one function per string, so not necessarily the
+    # forced run's own function); a forced run passed n plus a junk character or two on
+    # (`.../data.bin` + `>`: a base64 decoder's padding branch flipped). Only with that witness --
+    # a natural run cut short leaves a prefix that the forced run rightly completes, and a natural
+    # run's string is never dropped here. Removed before the prefix rules see it: there it would
+    # make n look like a view of an unfinished decode.
+    done = {r["string"] for r in records if r.get("natural_done") and r.get("used")}
+    overrun = set()
+    for r in records:
+        f = r["string"]
+        if r.get("forced") and r.get("used"):
+            for k in range(1, min(4, len(f) - 6) + 1):
+                if f[:-k] in done and any(c in _JUNK or c == "?" for c in f[-k:]):
+                    overrun.add(f)
+                    break
+    if overrun:
+        records = [r for r in records if r["string"] not in overrun]
     texts = {r["string"] for r in records}
     exact = {r["string"] for r in records if r.get("exact")}
     used = {r["string"] for r in records if r.get("used")}
@@ -3495,7 +3526,7 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
     tried_set, runs = set(), 0
     timed_out = False
 
-    def collect(fva, strs, natural, exact, used):
+    def collect(fva, strs, natural, exact, used, done=False):
         for st in sorted(strs):
             for c in canaries:
                 if c in st:
@@ -3514,6 +3545,8 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
                 rec["addr"] = sorted(set(rec.get("addr", ())) | seen)[:8]
             if st in natural:
                 rec.pop("forced", None)    # reached without forcing a branch, in some run
+                if done:
+                    rec["natural_done"] = True   # ... by a natural run that reached the end
             if st in used:
                 rec["used"] = True         # the code passed it on at exactly this length
             if st in exact:
@@ -3537,7 +3570,7 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
             tried_set.add(fva)
             if emu.count < QUICK:
                 complete.add(fva)          # ran to its end: a full single run would be the same
-            collect(fva, strs, strs, set(emu.exact), set(emu.used))
+            collect(fva, strs, strs, set(emu.exact), set(emu.used), emu.returned)
             if canaries and len(found) == len(canaries):
                 break
     # Pass 2: full budgets, and path exploration of decoder-like functions
@@ -3549,16 +3582,16 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
             break
         if explore and scores[fva] > 0:
             strs, n = emu.explore(fva, size, deadline=deadline)
-            natural = emu.natural
+            natural, done = emu.natural, emu.natural_done
         elif fva in complete:
             continue
         else:
             strs, _, _ = emu.run(fva, size)
             n = 1
-            natural = strs
+            natural, done = strs, emu.returned
         tried_set.add(fva)
         runs += n
-        collect(fva, strs, natural, set(emu.exact), set(emu.used))
+        collect(fva, strs, natural, set(emu.exact), set(emu.used), done)
     return by_string, tried_set, runs, timed_out, found
 
 
@@ -3582,7 +3615,7 @@ def _merge(into, other):
         elif rec and cur:
             if "forced" not in rec:
                 cur.pop("forced", None)
-            for flag in ("used", "exact"):
+            for flag in ("used", "exact", "natural_done"):
                 if rec.get(flag):
                     cur[flag] = True
             if rec.get("addr"):
@@ -3722,6 +3755,8 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
     records = [r for r in by_string.values() if r]
     records = _drop_junk_factories(records, img.file_bytes)
     records = _drop_overlap_artifacts(records)
+    for r in records:
+        r.pop("natural_done", None)       # an input of the overlap rules, not a result
     return {"functions_tried": tried, "functions_total": len(funcs), "runs": runs,
             "timed_out": timed_out, "recovered": sorted(found), "workers": workers,
             "ram_note": ram_note,

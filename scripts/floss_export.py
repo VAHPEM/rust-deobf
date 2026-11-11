@@ -56,6 +56,12 @@ def _decoded(record: dict) -> dict:
             "decoded_at": int(record.get("call") or 0),
             "decoding_routine": int(record.get("decoder") or 0),
         }
+    if record.get("method") in ("zlib", "gzip"):
+        # a compressed stream in the file: FLOSS addresses are virtual, the stream's position is a
+        # file offset (recover --json keeps it) -- so no address here rather than a wrong one
+        return {"address": 0, "address_type": "GLOBAL",
+                "string": record["string"], "encoding": "ASCII", "decoded_at": 0,
+                "decoding_routine": 0}
     fn = int(record.get("function") or 0)
     return {
         "address": 0,

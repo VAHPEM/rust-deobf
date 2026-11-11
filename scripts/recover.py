@@ -242,6 +242,30 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
             if e.get("ram_note"):
                 result["notes"].append(e["ram_note"])
 
+    # compressed strings: checksum-validated zlib/gzip streams at their headers, however short (an
+    # include_bytes!'d zlib string table inflated at run time; emulation does not get through an
+    # inflater within its budgets). Format-independent: a file scan.
+    def _compressed():
+        import recover_blobs as B
+        return list(B.small_streams(Path(path).read_bytes()))
+    t0 = time.monotonic()
+    zs = _engine(result, "compressed strings (recover_blobs)", _compressed)
+    if zs is not None:
+        known = {x["string"] for x in result["decoded"]}
+        comp = []
+        for z in zs:
+            t = z["out"].decode("latin-1")
+            # a string table, not a binary asset: almost all printable
+            if sum(1 for c in t if " " <= c <= "~" or c in "\t\r\n") < 0.9 * len(t):
+                continue
+            for m in re.finditer(r"[ -~]{%d,}" % min_len, t):
+                if m.group() not in known:
+                    known.add(m.group())
+                    comp.append({"string": m.group(), "method": z["method"], "offset": z["offset"]})
+        result["decoded"].extend(comp)
+        result["engines"].append({"engine": "compressed strings (recover_blobs)", "strings": len(comp),
+                                  "streams": len(zs), "seconds": round(time.monotonic() - t0, 1)})
+
     if stackstrings and static_ok:
         def _stack():
             import recover_stackstrings as S
@@ -329,6 +353,8 @@ def print_text(result: dict, all_literals: bool = False) -> None:
                 where = f"cryptify key {x['key']!r}  call {_hex(x['call'])}  data {_hex(x['blob'])}"
             elif x.get("method", "").startswith("static"):
                 where = f"decoder {_hex(x['decoder'])}  call {_hex(x['call'])}  data {_hex(x['blob'])}"
+            elif x.get("method") in ("zlib", "gzip"):
+                where = f"{x['method']} stream at file offset {_hex(x['offset'])}"
             else:
                 where = f"function {_hex(x['function'])}  (emulation)"
             print(f"  {x['string']}{_tags(x)}\n      {where}")

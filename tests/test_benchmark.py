@@ -91,6 +91,19 @@ def test_2026_crates_by_emulation(crate, fmt, ext, strip):
     assert not got - set(CANARIES), sorted(got - set(CANARIES))
 
 
+@pytest.mark.parametrize("profile", ["release", "size-lto"])
+@pytest.mark.parametrize("strip", ["nostrip", "strip"])
+@pytest.mark.parametrize("fmt,ext", EMU_FORMATS)
+def test_encodings_by_pipeline(fmt, ext, strip, profile):
+    # strings that are never plain UTF-8 (VALIDATION §80): UTF-16 converted / never converted,
+    # base64 and hex decoded at run time, a 38-byte zlib stream -- the five canaries exactly
+    import recover
+    res = recover.run(binary("encodings", fmt, ext, strip, profile), stackstrings=False,
+                      literals=False, time_budget=300)
+    got = {x["string"] for x in res["decoded"]}
+    assert got == set(CANARIES), (sorted(set(CANARIES) - got), sorted(got - set(CANARIES)))
+
+
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])
 @pytest.mark.parametrize("crate", ["xor_custom", "add_custom", "sub_custom", "litcrypt", "litcrypt2",
                                    "cryptify_default", "plaintext", "cryptify"] + RANDOM_KEY)

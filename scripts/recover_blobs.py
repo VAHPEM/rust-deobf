@@ -555,6 +555,39 @@ def recover(path) -> dict:
     }
 
 
+# zlib (RFC 1950: CMF 0x78 = deflate + 32 KiB window, FLG with FCHECK) and gzip (RFC 1952) headers.
+# Both streams end in a checksum of their output (Adler-32 / CRC-32) that Python's zlib verifies, so
+# a short stream is still proof of itself -- unlike headerless deflate, which needs _MIN_STREAM.
+_SMALL_HDR = re.compile(rb"\x78[\x01\x5e\x9c\xda]|\x1f\x8b\x08")
+SMALL_MAX_OUT = 1 << 16          # output cap per small stream (a string table, not a payload)
+SMALL_MAX_TRIES = 20000          # header candidates tried per file (each fails within bytes)
+
+
+def small_streams(data: bytes, max_tries=SMALL_MAX_TRIES):
+    """Checksum-validated zlib/gzip streams at their headers, at ANY size (a 38-byte zlib string
+    that recover() never carves: below the entropy grid and _MIN_STREAM). Yields
+    {offset, size (bytes consumed), method, out}; only streams that end in a valid checksum."""
+    import zlib
+    tries = 0
+    for m in _SMALL_HDR.finditer(data):
+        tries += 1
+        if tries > max_tries:
+            return
+        off = m.start()
+        gz = data[off] == 0x1f
+        if not gz and ((data[off] << 8) | data[off + 1]) % 31:
+            continue                         # FCHECK: CMF*256 + FLG must be a multiple of 31
+        d = zlib.decompressobj(31 if gz else 15)
+        try:
+            out = d.decompress(data[off:off + 4 * SMALL_MAX_OUT], SMALL_MAX_OUT)
+        except zlib.error:
+            continue                         # includes "incorrect data check": not a stream
+        if not d.eof or not out:
+            continue
+        size = min(len(data) - off, 4 * SMALL_MAX_OUT) - len(d.unused_data)
+        yield {"offset": off, "size": size, "method": "gzip" if gz else "zlib", "out": out}
+
+
 def _describe(k) -> str:
     if not k:
         return "opaque (encrypted?); no keyless recovery"
@@ -619,8 +652,19 @@ def _selftest():
 
     # 5. key 0 is not a decode: a plain ELF is "plain", never "xor8 key=0"
     assert _keyless(elf) == {"method": "plain", "magic": "elf"}, _keyless(elf)
+
+    # 6. a tiny zlib / gzip string inside other bytes is found at its header; a corrupted
+    #    checksum and random bytes yield nothing
+    import zlib
+    z = zlib.compress(b"canary::small-zlib-string", 9)
+    g = gzip.compress(b"canary::small-gzip-string", mtime=0)
+    blob = rng.randbytes(300) + z + rng.randbytes(77) + g + rng.randbytes(50)
+    got = [(x["method"], x["out"]) for x in small_streams(blob)]
+    assert got == [("zlib", b"canary::small-zlib-string"), ("gzip", b"canary::small-gzip-string")], got
+    assert not list(small_streams(z[:-1] + bytes([z[-1] ^ 1])))
+    assert not list(small_streams(rng.randbytes(1 << 16)))
     print("selftest OK: gzip payload decompressed; XOR-1 PE & ELF payloads recovered by magic; "
-          "random and plain text stay opaque (no false decode)")
+          "random and plain text stay opaque (no false decode); small zlib/gzip strings by checksum")
 
 
 def main(argv=None):
