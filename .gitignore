@@ -31,3 +31,6 @@ premium/build/
 premium/dist/
 build/lib/
 build/bdist.*/
+
+# Claude Code local settings (machine-specific paths)
+.claude/settings.local.json

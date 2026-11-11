@@ -13,15 +13,15 @@ injection-API regexes here — keep detection tables compact and neutral).
 
 ## Save tokens: cheap-test-first workflow
 
-Running the full suite costs ~3.5 min / 234 tests and a lot of output tokens. Don't do it on every
-edit. Instead:
+Running the fast CI subset costs ~4.5 min / ~750 tests (measured on a 2-vCPU x86-64 Linux cloud
+runner, Nov 2026) and a lot of output tokens. Don't do it on every edit. Instead:
 
 | When | Command | Cost |
 |------|---------|------|
 | After editing any `scripts/*.py` | `./scripts/check.sh` (selftests + doc-drift guard) | **~8s, 36 tests** |
 | Just one module | `python3 scripts/<name>.py --selftest` (prints `selftest OK`) | <1s |
 | One module's full test | `python3 -m pytest tests/test_<name>.py -q` | seconds |
-| Before committing/pushing | the fast CI subset (below) | ~3.5 min |
+| Before committing/pushing | the fast CI subset (below) | ~4.5 min |
 | After touching packaging (`pyproject.toml`, `setup.py`, `cli.py`, `__init__.py`) | `RUST_DEOBF_PACKAGING=1 python3 -m pytest tests/test_packaging.py` (needs `pip install build`; `RUST_DEOBF_PACKAGING_OFFLINE=1` reuses local deps) | ~1 min |
 | Never locally | `benchmark`/`precision` jobs (need a Rust build) | CI only |
 
@@ -117,7 +117,6 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `decompress.py` | strict pure-Python LZ4 (frame/legacy/block), aPLib (raw/AP32), BriefLZ (raw/blzpack), LZNT1 decoders: output-capped, linear, never raise; headerless decodes need an encoder signature (no literal runs/zero literals a compressor never emits), full consumption, expansion (waived for magic / >= 64 B text) and "interesting" output (validated magic / text / literal-entropy drop / repetitive). Test encoders in `tests/_compress.py`; reference vectors (jibsen BriefLZ, apultra, lz4_flex) in `tests/fixtures/compress/` |
 | `recover_idioms.py` | Rust idioms in stripped binaries: fmt macro sites → `println!("…")` text (newer rustc template encoding (1.97 and 1.99.1 measured) + older pieces array) with each placeholder's trait (`{:?}` `{:x}` …) from its formatter fn (symbol, else debug-builder / radix / quote / debug-hex-flag anchors), `write!(f, "lit")` lowered to a `dyn fmt::Write` vtable `write_str`, panic / safety-check call sites (kind, `Location` file:line:col, guarding branch), drop / `__rust_dealloc` calls, enum-like (Option/Result?) returns; helpers named by symbols / libfuncs / message anchors; per-function register+stack dataflow (x86-64 SysV/Win64, i386 incl. stdcall callee-pops and PE32 start seeding, AArch64); `--eval <unstripped> <stripped>` measures P/R; → `ghidra_annotate.py` (`idioms`) |
 | `recover_async.py` | async state machines (`async fn`/blocks): anchored on the "resumed after completion/panicking" panics; a concrete dispatch interpreter (jump tables + compare chains, no premium import) maps state → target, a pointer/const dataflow locates the state field (self / stack / register) and its pending write-backs; suspend points → inner poll (direct / `dyn` slot / inlined) nesting graph, source `Location`, vtable size, runtime crate. x86-64 + AArch64 + i386, ELF + PE + Mach-O; rustc 1.70 (inline `panic("...")`) to 1.99 (panic_const; 1.99 inlines a bare top-level future into the executor) |
-| `recover_embedded.py` | embedded artifacts: nested exes/archives (magic), high-entropy blobs, base64 payloads (file offsets) |
 | `gen_runtime_sigs.py` / `gen_rust_versions.py` | generate C-runtime sigs / rustc→release table |
 
 ### scripts/ — front ends, export, orchestration
@@ -182,11 +181,19 @@ carry a format version, and must ignore + rebuild a cache of another format, nev
 bytecode to a listing) · `opt_reverse.py` (reverse compiler optimizations: un-switch jump tables,
 unrolled loops; x86 + AArch64).
 
-## Toolchain available in this environment
-rustc 1.97 stable + nightly-2024-06-15 (LLVM 18.1.7); targets incl. `aarch64-unknown-linux-musl`;
-clang/clang++/g++/cmake/llvm-18-dev; go1.24.7. libRustCloak.so built at
-`/home/user/rustcloak/build/`. Python deps: lief≥0.16, capstone≥5&lt;6, unicorn≥2.1&lt;3, z3-solver,
-pyelftools (optional; DWARF enum/niche names in recover_enums.py), pytest.
+## Toolchain this toolkit needs (host-dependent — check, don't assume)
+Python deps (`requirements.txt`): lief≥0.16, capstone≥5&lt;6, unicorn≥2.1&lt;3, z3-solver, pyyaml,
+pyelftools (optional; DWARF enum/niche names in recover_enums.py), pytest. Analysis and the fast CI
+subset need nothing else.
+Only the **benchmark/obfuscation builds** need a compiler toolchain: rustc stable (1.97 measured;
+1.99.1 on the ARM64 lab VM) with the targets `build_all.sh` asks for
+(`x86_64-pc-windows-gnu`, `i686-pc-windows-gnu`, `aarch64-unknown-linux-musl`,
+`aarch64-unknown-linux-gnu`), the matching linkers (mingw-w64 x86-64/i686, `gcc-aarch64-linux-gnu`),
+llvm/clang and go. CI installs these per job (`.github/workflows/ci.yml`); a given host may have
+none of them — run `scripts/check.sh` and let the skips tell you.
+`redblue_loop.py` needs a **built** RustCloak (`libRustCloak.so`/`.dylib`) and takes its path from
+the environment or `--plugin`; the repo is a sibling checkout (the maintainer's is
+`~/Documents/rustcloak`, unbuilt by default) — never hard-code a build path.
 
 ## Test matrix (measured — say which targets you ran, never assume an untested one)
 The maintainer's lab (see the project's `dual-vm-ai-agent/CLAUDE.md`): **ARM64 Kali** (native ELF /
@@ -243,8 +250,11 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   plain `&'static str`) instead of `{pieces, fmt, args}` slices. `recover_idioms` decodes both; don't key new fmt code on a `pieces` array alone.
 - **recover_libfuncs v0 labels:** short labels used to drop the last v0 segment of non-generic
   symbols (`panic_bounds_check` → `core::panicking`); fixed (labels are re-derived from each entry's
-  `sym`). The bundled DB is rustc 1.97 only (x86-64 ELF + the std layer for AArch64 ELF and x86-64
-  PE); any other rustc needs a per-binary DB (`gen_sigdb.py`), it is never borrowed from another.
+  `sym`, as recover_idioms does via `_readable`). The bundled DBs are **rustc 1.97 only** and differ
+  in coverage: the crate layer (`data/libfunc_sigs.json`) is x86-64 only (277 sigs), the prebuilt-std
+  layer (`data/libfunc_sigs_std.json.gz`) covers aarch64-elf (1750), x86_64-elf (1642) and
+  x86_64-pe (1597) — so AArch64 ELF and x86-64 PE *do* get std hits; **i386 gets none**. Any other
+  rustc needs a per-binary DB (`gen_sigdb.py`); a DB is never borrowed from another toolchain.
 - **Emulation time is Python hooks, not the engine** (bench_emu.py): recover_emulate's run ~2% engine,
   unpack_emulate's UPX run ~4%. A faster engine (icicle-emu: 5-14x on hook-free loops) buys ~1%;
   cut hook cost instead (`emu_backend.fast_hook_add`, narrower hook ranges, page-protection write
@@ -286,9 +296,6 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `ret` starts from the body frame (sp / ebp / PIC ebx) as a *speculative* state, never an empty
   real one (it poisoned the next join); x86 linear sweep can desynchronise inside a function, so
   `analyze_function` decodes by recursive descent first (`_resync`).
-- **recover_libfuncs' short labels drop the last v0 segment** of non-generic symbols
-  (`panic_bounds_check` → `core::panicking`); relabel from the match's `sym` (recover_idioms does
-  via `_readable`). Its signature DB is rustc-1.97 x86-64 only — AArch64 / i386 / PE get no hits.
 - **VALIDATION.md** uses numbered round sections; append the next `§N` rather than editing old ones.
 - **Benchmark crates** (`bench_src/gen_projects.py` → `manifest.json`; `build_all.sh` builds every
   `bench_src/*/`): hand-rolled xor/add/sub/tight_xor, obfstr, litcrypt, litcrypt2, cryptify
