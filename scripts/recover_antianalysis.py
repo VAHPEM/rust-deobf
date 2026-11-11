@@ -107,6 +107,32 @@ def _count_insns(img, skip=None):
     return counts
 
 
+def _text_blob(data: bytes, b) -> bytes:
+    """The file bytes with compressed sections zeroed: their content is a zlib/zstd stream, never a
+    string, and at ~3 bytes a key matches it by chance (measured: Go 1.24.13 cgo, built with the CI
+    runner's GOROOT path, read `\nkvm?` inside the compressed .debug_info -> a benign program
+    reported as sandbox/vm). ELF SHF_COMPRESSED (0x800) sections and GNU `.zdebug_*` ones."""
+    spans = []
+    try:
+        import lief
+        for s in b.sections:
+            name = s.name if isinstance(s.name, str) else ""
+            flags = int(getattr(s, "flags", 0) or 0)
+            elf = b.format == lief.Binary.FORMATS.ELF
+            if (elf and flags & 0x800) or name.startswith(".zdebug"):
+                off, size = int(s.offset), int(s.size)
+                if size and 0 <= off < len(data):
+                    spans.append((off, min(len(data), off + size)))
+    except Exception:
+        return data
+    if not spans:
+        return data
+    buf = bytearray(data)
+    for lo, hi in spans:
+        buf[lo:hi] = bytes(hi - lo)
+    return bytes(buf)
+
+
 def _blob_hits(blob: bytes, key: str, go: bool, word: int = 8, api: bool = False,
                glued: bool = False) -> bool:
     """Does `key` occur in the (lower-cased) file bytes as a string of its own -- not inside a longer
@@ -233,7 +259,7 @@ def evasion(path) -> dict:
         pass
     if is_go:
         names = [n for n in names if not _go_std(n)]
-    blob = Path(path).read_bytes().lower()
+    blob = _text_blob(Path(path).read_bytes(), b).lower()
     word = 4 if img.x32 else 8
     found_apis = {}
     for cat, keys in _EVASION_APIS.items():

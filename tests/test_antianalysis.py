@@ -206,3 +206,23 @@ def test_go_packed_tracerpid_check_is_found(tmp_path):
     assert e["evasion_apis"].get("anti-debug-artifact") == ["/proc/self/status", "tracerpid"], e
     # ... while the same packing still proves nothing for an identifier-shaped API name
     assert "anti-debug" not in e["evasion_apis"], e
+
+
+@pytest.mark.parametrize("compressed", [True, False])
+def test_key_inside_a_compressed_section_is_not_text(tmp_path, compressed):
+    # CI windows/ubuntu run: Go 1.24.13 cgo (runner GOROOT) carried `\nkvm?` inside its zlib-
+    # compressed .debug_info -- chance bytes, reported as sandbox/vm. A compressed section's content
+    # is never a string; the same bytes in an ordinary section still count (control).
+    import lief
+    sys.path.insert(0, str(ROOT / "tests"))
+    from _mkelf import mkelf
+    elf, _, _ = mkelf(b"\xc3")
+    b = lief.ELF.parse(list(elf))
+    sec = lief.ELF.Section(".debug_info" if compressed else ".comment")
+    sec.content = list(b"\xd4\xcfn\x99\xa5\xfe\nkvm?;59(\xae\x14u)w2=")   # the measured bytes
+    sec.flags = 0x800 if compressed else 0
+    b.add(sec, loaded=False)
+    p = tmp_path / "z.elf"
+    p.write_bytes(b.write_to_bytes())
+    e = A.evasion(p)
+    assert ("sandbox/vm" in e["evasion_apis"]) is (not compressed), e["evasion_apis"]
