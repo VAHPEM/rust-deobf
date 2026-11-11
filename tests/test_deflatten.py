@@ -7,6 +7,7 @@ start state to a terminal (return) state with XOR-consistent transitions. Skips 
 binary cannot be built (no cargo).
 """
 import platform
+import sys
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,6 +19,31 @@ import lief
 import deobf_deflatten as D
 
 GOLD = ROOT / "obf_src" / "goldberg_cff"
+
+
+def _text_section(b):
+    """The code section: `.text` (ELF/PE) or `__text` (Mach-O; CI macos-15-intel)."""
+    return next(s for s in b.sections if s.name in (".text", "__text"))
+
+
+def _function(b, match):
+    """(start, size) of the symbol whose name -- without Mach-O's leading `_` -- satisfies `match`.
+    Mach-O symbols carry no size: the next function start in the same section bounds it."""
+    text = _text_section(b)
+    lo, hi = text.virtual_address, text.virtual_address + text.size
+    starts = sorted({s.value for s in b.symbols if lo <= s.value < hi})
+    for sym in b.symbols:
+        name = sym.name if isinstance(sym.name, str) else ""
+        if not (lo <= sym.value < hi) or not match(name[1:] if b.format == lief.Binary.FORMATS.MACHO
+                                                   and name.startswith("_") else name):
+            continue
+        size = sym.size
+        if not size:
+            later = [a for a in starts if a > sym.value]
+            size = (later[0] if later else hi) - sym.value
+        if size:
+            return sym.value, size
+    return None
 
 
 def _debug_binary():
@@ -37,13 +63,12 @@ def test_deflatten_band():
     if bin_ is None:
         pytest.skip("goldberg debug build unavailable (no cargo)")
     b = lief.parse(str(bin_))
-    text = next(s for s in b.sections if s.name == ".text")
+    text = _text_section(b)
     code, tbase = bytes(text.content), text.virtual_address
-    band = [s for s in b.symbols if "band" in s.name and getattr(s, "is_function", False) and s.size]
+    band = _function(b, lambda n: "band" in n)
     assert band, "band() is not a standalone symbol in the debug build"
-    s = band[0]
 
-    r = D.deflatten(code, tbase, s.value, s.size)
+    r = D.deflatten(code, tbase, *band)
     assert r["flattened"], r
     assert r["num_states"] >= 5, r
     assert r["state_slot_disp"] and r["update_slot_disp"], r
@@ -235,14 +260,30 @@ def test_deflatten_ollvm_direct_assignment():
     binp = _ollvm_binary()
     if binp is None:
         pytest.skip("clang unavailable to build the OLLVM-fla target")
-    b = lief.parse(str(binp))
-    text = next(s for s in b.sections if s.name == ".text")
-    code, tbase = bytes(text.content), text.virtual_address
-    dec = [s for s in b.symbols if s.name == "decode" and s.size]
-    assert dec, "decode() symbol not found"
-    s = dec[0]
+    _check_ollvm(binp)
 
-    r = D.deflatten(code, tbase, s.value, s.size)
+
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("clang"),
+                    reason="Apple clang -arch x86_64 cross-build")
+def test_deflatten_ollvm_macho_x86_64(tmp_path):
+    """The same worked example as an x86-64 Mach-O (CI macos-15-intel): `__text`, not `.text`, and
+    `_decode` without a symbol size -- the lookup used to raise StopIteration there."""
+    binp = tmp_path / "fla"
+    r = subprocess.run(["clang", "-arch", "x86_64", "-O0", "-fno-inline", "-o", str(binp),
+                        str(OLLVM / "fla.c")], capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip("clang -arch x86_64 failed: " + r.stderr[-200:])
+    _check_ollvm(binp)
+
+
+def _check_ollvm(binp):
+    b = lief.parse(str(binp))
+    text = _text_section(b)
+    code, tbase = bytes(text.content), text.virtual_address
+    dec = _function(b, lambda n: n == "decode")
+    assert dec, "decode() symbol not found"
+
+    r = D.deflatten(code, tbase, *dec)
     assert r["flattened"], r
     assert r["num_states"] == 6, r
     # direct-assignment form: there is NO xor update slot (that is what distinguishes it from
