@@ -3229,3 +3229,86 @@ The failing builds are kept as deterministic inputs (sha256 prefix): elf-arm64 #
 
 Also measured: under x64 emulation on the Windows VM one obfuse_aes pe run took 256 s, close to
 the test's 300 s wall-clock `time_budget`. A slow host could be cut by time, not by code.
+
+## 78. B1: an AEAD block read with its neighbours; the deterministic gate (Nov 2026)
+
+**Every recall/precision figure in earlier sections that came from ONE build of obfuse, obfuse_aes,
+obfuse_xor or muddy is n = 1 of a distribution (§77), not a property of the code.** Capability
+figures for those crates should come from many builds (the measurement job below, not yet built).
+
+**B1, recovery bug (`f8c431b`).** It does not depend on the randomness: the key only decides which
+piece leaks.
+- obfuse_aes decrypts the last partial GCM block in a 16-byte stack scratch at 0x7f00000ffde0 and
+  uses it from there. That is a `used` record: `metry-off`, `hema-version-4`.
+- A capture also read the scratch's neighbours, at 0x7f00000ffddc: keystream or stale stack,
+  printable by chance. Build #12 gave `:gUn` + `metry-off` + `a`; build #22 gave `9(dF` +
+  `hema-version-4`.
+- CI #122's ` ` + `metry-off` + `}.o@ ` has the same shape. The CI binary was not kept, so its
+  addresses are not known.
+- The content-only "one cipher block" rule (size-lto, §70s) took junk AFTER the piece only.
+
+The new rule is address-anchored. An unused, non-exact string x is dropped when:
+- x holds a used string u at the address the code used u;
+- u is a piece of a longer used string;
+- x has junk before u (k > 0) and at most 8 extra characters;
+- x is not text of a used string.
+
+A first version without k > 0 lost three whole strings of `scatter_cryptify` size-lto, pe and
+elf-arm64 (`Software\Northwind\Agent\Settings`, the beacon URL, `nw-agent::stage=collect`).
+cryptify decodes byte by byte, so every prefix is a used string at one address, and the whole
+string holds the last of them at offset 0. That is caught by a test now.
+
+The comparison below ran with the dropped version too. The run that exposed the loss is the reason
+it is reported here.
+
+Recall, on fixed inputs only: one prebuilt benchmark set (elf via an x86-64 cross container, pe,
+pe32, elf-arm64), plus elf-arm64gnu from §77 build 1. Kali, unicorn 2.1.4 (= CI);
+`tests/test_benchmark.py` + `tests/test_scatter.py`:
+
+| input | old code | first fix (k >= 0) | final fix |
+|---|---|---|---|
+| prebuilt set, 5 formats | 2 failed / 415 passed | 4 failed / 413 passed (+2 scatter_cryptify size-lto recall) | 2 failed / 415 passed (same 2: obfuse pe precision, pre-existing, §75) |
+| obfuse_aes elf-arm64 build #12 | 2 failed | 3 passed | 3 passed |
+| obfuse_aes elf-arm64 build #22 | 2 failed | 3 passed | 3 passed |
+| obfuse_aes pe build #5 (`/yuSYuS/`) | 2 failed | 2 failed | 2 failed (not B1, below) |
+
+Golden equivalence is unchanged. `./scripts/check.sh full` (macOS ARM64): 716 passed, 0 failed.
+
+Deterministic tests, each run 3 times with the same result:
+- the measured records of builds #12/#22 (fails on the old code);
+- two controls: the address off by one keeps x; a block that is not a piece of a longer used string
+  keeps x;
+- the cryptify chain (fails on the k >= 0 version);
+- the committed build #12 binary end to end, `tests/fixtures/aead/obfuse_aes_leak.arm64` (410 KB,
+  stripped). This is in line with the 345-460 KB fixtures already in `tests/fixtures`. On the old
+  code it yields extra `:gUnmetry-offa`.
+
+**The gate (`2bd0640`), as decided by the maintainer:** the per-push gate is deterministic and
+capability is measured separately.
+- `bench_src/*/Cargo.lock` committed (22 projects).
+- obfuse / obfuse_aes / obfuse_xor: `seed=` per literal from sha256(crate/literal). The seeds were
+  fixed up front; no seed was tried and discarded.
+- Measured on Kali: 3 clean builds × 4 formats give identical binaries (PE modulo
+  timestamp/checksum). No canary or seed text is in the binaries. Recovery is 5/5 exactly in every
+  cell, except obfuse_aes elf-arm64gnu (Kali native link, §77; not a format of
+  `test_2026_crates_by_emulation`).
+- muddy cannot be seeded. It leaves the per-push parametrisations and runs when
+  `RUST_DEOBF_RANDOM_KEYS=1`, which the weekly schedule sets: 157 benchmark tests per push, 165
+  weekly.
+- The seeded keys are fixed for a given obfuse version and rustc. A rustc or crate bump can still
+  change the binaries, deliberately: that is what the weekly drift run is for.
+
+**Deferred: the measurement job** (N rebuilds of the random-key crates, mean/min/max recall and
+precision per crate and format, a loose floor at most). It was not built in this round. rc2 does
+not need it, and §77's method (`build_all.sh` N times + the test's `recover.run` call) is the
+template. Until it exists, muddy has the weekly single build only.
+
+**Open, not B1:**
+- `/yuSYuS/`, obfuse_aes pe build #5 (sha256 ea7a25d6...). It is not a canary piece. It is
+  captured in `main` (0x1570) at 0x7f00000ff100, below main's frame, in the decrypt callee's
+  scratch (the AES-NI path under unicorn 2.1.4). Key-dependent bytes are printable by chance: a
+  false positive of crypto scratch, not a truncated canary. Unchanged by the B1 fix. The
+  pre-existing obfuse pe `HEmBEF-c` (§75) may be the same class. To be investigated separately.
+- `ENDPOINT` (CI #123) is **not reproduced**: none of 35 Kali builds produced it. It is
+  `endpoint` with bit 0x20 flipped, a mid-decode state. Believed to be the same class (scratch
+  read mid-decode). Not claimed fixed; watch for recurrence.

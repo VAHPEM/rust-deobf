@@ -302,13 +302,20 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   (custom + default key), muddy, and the 2026 crates **obfuse** (default), **obfuse_aes**,
   **obfuse_xor**, **obfany**. obfuse's *default* features list `aes-256-gcm`, but with
   `polymorphic` on (default) the macro never uses the AEAD: each literal gets inline
-  XOR/ADD/SUB/ROT layers in a flattened state machine, with **fresh random keys every build** (no
-  `seed`) -- so a result can differ between rebuilds; measure several. The real AES-256-GCM path is
-  `obfuse_aes` (`default-features = false`).
+  XOR/ADD/SUB/ROT layers in a flattened state machine. The real AES-256-GCM path is `obfuse_aes`
+  (`default-features = false`). **Unseeded, obfuse/obfuse_aes/obfuse_xor and muddy draw fresh keys
+  every build and the test verdict followed the key** (§77): the per-push gate pins obfuse with
+  `seed=` (one per literal, from a hash, never searched for a passing one) and commits
+  `bench_src/*/Cargo.lock`; muddy (no seed option) runs only in the weekly schedule
+  (`RUST_DEOBF_RANDOM_KEYS=1`). A one-build recall/precision figure is n=1 of a distribution.
 - **AEAD in-place decrypt leaves the 16-byte tag after the plaintext** with the same write age when
   copy + decrypt run in one callee; `Emulator._static_tag_after` lets a (ptr, len) the code passed
   mark the string complete when that tail is non-text and found verbatim in the file. Without it
   any printable first tag byte (95 of 256 values) glued on (`...20261018)`) and cost the string.
+  The last PARTIAL block is decrypted in a 16-byte stack scratch and used from there; a capture
+  reads its neighbours too (`:gUn` + `metry-off` + `a`): `_drop_overlap_artifacts` drops x holding a
+  used block AT its address with junk before it (k > 0 -- k = 0 is a byte-by-byte decoder's own
+  prefix chain, e.g. cryptify; that version cost three scatter strings). §78.
 - **Instruction budgets bind on software ciphers**: the `aes` crate on AArch64 has no AES
   instructions by default (soft fixsliced AES + GHASH, ~26k instructions per string). Callees get
   more budget only while running dense straight-line code (`Emulator._dense`, `DENSE` = 16

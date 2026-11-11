@@ -30,6 +30,14 @@ Python 3.10 (release run 42976295297), so neither distribution reached PyPI.
   native ARM64 Python, which has no wheels) also matched x64 Python 3.14 on Windows-on-ARM --
   `platform_machine` is the host CPU there -- so pip left both out of the recommended setup.
   Native ARM64 Python now fails at `pip install` instead (README: use x64 Python).
+- **Emulation: an AEAD's last block with its scratch neighbours** is no longer reported as a string
+  (`:gUnmetry-offa` next to `...telemetry-off`; obfuse_aes on AArch64).
+
+### Changed
+- **The benchmark gate is deterministic.** Four benchmark crates draw fresh keys per build, and the
+  per-push verdict followed the key (VALIDATION §77). `bench_src/*/Cargo.lock` is committed, obfuse
+  / obfuse_aes / obfuse_xor are built with a fixed `seed=` per literal, and muddy (unseedable) runs
+  in the weekly schedule only. Earlier one-build recall/precision figures are single samples.
 
 ## [0.1.0rc1] - 2026-11-11
 
