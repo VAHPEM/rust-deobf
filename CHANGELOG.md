@@ -45,12 +45,11 @@ Release candidate for 0.1.0: the first end-to-end run of the release pipeline --
 installed-wheel tests on four operating systems, and Trusted Publishing to PyPI for both
 distributions. The content is the 0.1.0 section below.
 
-## [0.1.0] - not yet released
+## [0.1.0] - 2026-11-11
 
-Planned first packaged release (`pip install rust-deobf` / `pipx install rust-deobf` once it is on
-PyPI; until then install from git, see the README). The section was prepared 2026-10-29; no `v0.1.0`
-tag has been pushed, so nothing is on PyPI yet -- the date is set when the tag is. Everything below
-was developed in the open before packaging and is summarised by theme.
+First packaged release on PyPI (`pip install rust-deobf` / `pipx install rust-deobf`; premium
+modules via `pip install "rust-deobf[premium]"`). Everything below was developed in the open
+before packaging and is summarised by theme.
 
 ### Added
 - **Packaging and the `rust-deobf` command.** One console command dispatching to every tool
