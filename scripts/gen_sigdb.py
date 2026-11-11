@@ -387,12 +387,14 @@ def binary_facts(path: Path, meta: dict | None = None) -> dict:
     rel = meta.get("rust_release") if isinstance(meta.get("rust_release"), dict) else {}
     tgt = detect_target(Path(path))
     ev = crate_evidence(Path(path))
-    commit, version, date = meta.get("rustc_commit"), rel.get("version"), rel.get("date")
+    from_paths = meta.get("rustc_commit") if meta.get("rustc_source", "panic paths") == "panic paths" else None
+    commit, version, date = from_paths, rel.get("version") if from_paths else None, \
+        rel.get("date") if from_paths else None
     com = ev.get("comment")
     if com and not version and not commit:          # no /rustc/<hash>/ path survived
         version, commit, date = com["version"], com["commit"], com["date"]
     facts = {"rustc_commit": commit, "rust_version": version, "rust_date": date,
-             "rustc_source": ("panic paths" if meta.get("rustc_commit") else
+             "rustc_source": ("panic paths" if from_paths else
                               ".comment" if com and commit else None),
              "is_rust": meta.get("is_rust"), "target": tgt, "triple": tgt.get("triple"),
              "crates": crate_list(meta, ev), "evidence": {

@@ -41,6 +41,19 @@ RE_CARGO = re.compile(
 # name with its trailing checkout hash stripped; there is no version in the path (a git rev instead).
 RE_CARGO_GIT = re.compile(
     r"(?:[\\/]|^)\.?cargo[\\/]git[\\/]checkouts[\\/](?P<repo>[A-Za-z0-9_.-]+?)-[0-9a-f]{8,}[\\/]")
+# a registry checkout whose prefix was remapped (`--remap-path-prefix`, a CI image's CARGO_HOME):
+# the index directory -- `index.crates.io-<16 hex>` (sparse) or `github.com-<16 hex>` (git index)
+# -- still names it, whatever stands before it
+RE_CARGO_REMAPPED = re.compile(
+    r"(?:[\\/]|^)(?:index\.crates\.io|github\.com)-[0-9a-f]{16}[\\/]"
+    r"(?P<crate>[A-Za-z0-9_.-]+?)-(?P<ver>" + _SEMVER + r")[\\/]")
+# cargo `trim-paths` maps a registry dependency's root to `<crate>-<version>/` -- matched only on
+# a path a Location record bounds exactly (a regex hit can have rodata glued onto its front)
+RE_CARGO_TRIMMED = re.compile(r"^(?P<crate>[A-Za-z][A-Za-z0-9_-]*?)-(?P<ver>" + _SEMVER + r")[\\/]src[\\/]")
+# rustc's ELF `.comment` ("rustc version 1.99.1 (58cf8f9c3 2026-10-13)"); GNU strip keeps it, and
+# it survives the builds that leave no panic path at all (panic=immediate-abort)
+RE_COMMENT = re.compile(rb"rustc version (\d+\.\d+\.\d+)(?:-[0-9A-Za-z.]+)? \(([0-9a-f]{7,12}) "
+                        rb"(\d{4}-\d\d-\d\d)\)")
 RE_RUSTC = re.compile(r"/rustc/(?P<hash>[0-9a-f]{7,40})/")
 # crates vendored into the standard library itself (gimli, addr2line, miniz_oxide, ...):
 # their panic paths read `/rust/deps/<crate>-<ver>/src/...` and are not the author's code
@@ -74,6 +87,9 @@ def rust_release(commit):
         matches = [v for h, v in _RUST_VERSIONS.items() if h.startswith(commit)]
         hit = matches[0] if len(matches) == 1 else None
     return hit
+_MAX_SCAN = 512 << 20          # bytes of the file searched for rustc's .comment
+
+
 RE_PANIC_MSG = re.compile(
     rb"thread '[^']{0,64}' panicked|called `(?:Option|Result)::unwrap\(\)`|"
     rb"attempt to [a-z ]+ with overflow|index out of bounds|capacity overflow")
@@ -319,16 +335,24 @@ def find_location_structs(secs, ptr, src_by_va, relocs=None, with_va=False):
     return uniq
 
 
-def fingerprint_crates(paths, raw_text, strong_rust):
+def _registry_crate(p, exact=()):
+    """(crate, version) of a registry dependency's source path, or None."""
+    m = RE_CARGO.search(p) or RE_CARGO_REMAPPED.search(p)
+    if m is None and exact and p.replace("\\", "/") in exact:     # `exact`: "/"-separated
+        m = RE_CARGO_TRIMMED.match(p.replace("\\", "/"))
+    return (m.group("crate"), m.group("ver")) if m else None
+
+
+def fingerprint_crates(paths, raw_text, strong_rust, exact=()):
     """Map .cargo registry paths -> {crate: version}. Raw-marker fallback crates are
     added only when the binary is already confirmed Rust, to avoid false positives on
     C/C++ binaries (e.g. a bare 'ring' matching 'string')."""
     crates = {}
     rustc = None
     for p in paths:
-        m = RE_CARGO.search(p)
+        m = _registry_crate(p, exact)
         if m:
-            crates.setdefault(m.group("crate"), set()).add(m.group("ver"))
+            crates.setdefault(m[0], set()).add(m[1])
         g = RE_CARGO_GIT.search(p)
         if g:
             # a git dependency: list the crate (version unknown -- the path carries a rev, not a semver)
@@ -377,15 +401,28 @@ def recover(path: Path):
     # Strong Rust evidence = structure only a Rust build produces: a cargo-registry path,
     # a /rustc/<hash>/ path, a recovered Location record, or a mangled Rust symbol. Generic
     # panic-ish substrings and loose markers do NOT count (they false-positive on C/C++).
-    has_cargo = any(RE_CARGO.search(p) for p in src)
+    exact = {f.replace("\\", "/") for f, _, _ in locs}
+    has_cargo = any(_registry_crate(p, exact) for p in src)
     std_deps = {}
     for p in src:
         m = RE_STD_DEP.search(p)
         if m:
             std_deps.setdefault(m.group("crate"), set()).add(m.group("ver"))
     has_rustc = any(RE_RUSTC.search(p.replace("\\", "/")) for p in src)
-    strong_rust = has_cargo or has_rustc or bool(locs) or bool(rust_syms)
-    crates, rustc = fingerprint_crates(src.keys(), raw_text, strong_rust)
+    comment = None
+    try:
+        with open(path, "rb") as fh:
+            cm = RE_COMMENT.search(fh.read(_MAX_SCAN))
+        if cm:
+            comment = {"version": cm.group(1).decode(), "commit": cm.group(2).decode(),
+                       "date": cm.group(3).decode()}
+    except OSError:
+        pass
+    strong_rust = has_cargo or has_rustc or bool(locs) or bool(rust_syms) or comment is not None
+    crates, rustc = fingerprint_crates(src.keys(), raw_text, strong_rust, exact)
+    rustc_source = "panic paths" if rustc else None
+    if rustc is None and comment:
+        rustc, rustc_source = comment["commit"], ".comment"
     panic_msgs = sorted({m.group(0).decode("latin-1")
                          for _, d in secs for m in RE_PANIC_MSG.finditer(d)}) if strong_rust else []
     caps = {}
@@ -397,12 +434,26 @@ def recover(path: Path):
     # cleaned of rodata strings glued on by the absence of a null separator.
     # Location records carry the exact path length, so a path they name is exact; a regex hit
     # that merely ends with it had rodata glued on (`valuesrc/main.rs` from "...an `Err` value")
-    exact = {f.replace("\\", "/") for f, _, _ in locs}
     own = set()
+    notes = []
+    if strong_rust and not locs:
+        # say why the panic-path tiers came back empty instead of returning a silent nothing
+        notes.append("no panic Location records: built with -Zlocation-detail=none or "
+                     "panic=immediate-abort (or not Rust's panic machinery); crates and own "
+                     "source files cannot be read from panic paths")
+    elif strong_rust and all("/rustc/" in f or RE_STD_LIB.match(f) or RE_STD_DEP.search(f)
+                             for f in exact):
+        # an observation, not a verdict: a dependency-free single-file program (`rustc x.rs`)
+        # looks the same as a cargo build with -Zlocation-detail=none (measured, §79)
+        notes.append("every panic Location found is the prebuilt standard library's (no "
+                     "registry crate, no own source path): a build with -Zlocation-detail=none, "
+                     "or a dependency-free program whose own paths were not found")
+    if comment and not (has_cargo or has_rustc or locs or rust_syms):
+        notes.append("Rust only by rustc's .comment (" + comment["version"] + ")")
     if strong_rust:
         for p in src:
             q = p.replace("\\", "/")
-            if ("/rustc/" in q or RE_CARGO.search(p) or RE_CARGO_GIT.search(p)
+            if ("/rustc/" in q or _registry_crate(p, exact) or RE_CARGO_GIT.search(p)
                     or RE_STD_DEP.search(p) or RE_STD_LIB.match(q)):
                 continue  # a dependency (registry, git, vendored std) or rustc-internal, not own code
             tail = next((e for e in exact if e != q and q.endswith(e)), None)
@@ -413,7 +464,11 @@ def recover(path: Path):
     return {
         "is_rust": strong_rust,
         "rustc_commit": rustc,
-        "rust_release": rust_release(rustc),
+        "rust_release": rust_release(rustc) or (
+            {"version": comment["version"], "date": None} if comment else None),
+        "rustc_source": rustc_source,
+        "rustc_comment": comment,
+        "notes": notes,
         "std_vendored_crates": {c: sorted(v) for c, v in sorted(std_deps.items())},
         "own_source_files": own,
         "crates": {c: sorted(v) for c, v in sorted(crates.items())},
