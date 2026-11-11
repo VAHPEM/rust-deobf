@@ -314,9 +314,11 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   more budget only while running dense straight-line code (`Emulator._dense`, `DENSE` = 16
   instructions/block; normal callees that overrun are <= 11) and a run only while dense or still
   decoding strings at a steady pace (`run_used`) -- all bounded. Don't raise the global budgets.
-  x86 too: Unicorn's CPUID reports no AES-NI/PCLMUL, so x86-64 / i386 builds also run the
-  software path; their dense callees need up to 12 half-budget extensions (rustc 1.99.1), hence
-  `DENSE_EXT` = 16. A cut cipher callee returns 0 -> GCM tag fails -> the program panics: the
+  x86 too: Unicorn **2.1.2**'s CPUID reports no AES-NI/PCLMUL, so x86-64 / i386 builds run the
+  software path there; their dense callees need up to 12 half-budget extensions (rustc 1.99.1),
+  hence `DENSE_EXT` = 16. Unicorn **2.1.4** (what CI's `pip install` gets) DOES report AES-NI +
+  PCLMUL: the same binary takes the hardware path (~3k instructions per string instead of ~20k).
+  Results can therefore differ by Unicorn version -- say which one you measured (§75). A cut cipher callee returns 0 -> GCM tag fails -> the program panics: the
   symptom is the panic message among the strings plus canaries cut at a 16-byte block (§73).
 - **i386 Linux**: libc system calls go through `call *%gs:0x10`; the emulator points it at the
   binary's own `int $0x80; ret` (`Emulator._vsyscall`). Stripped static musl builds need the
@@ -351,6 +353,31 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   and identifier neighbours do not end one either (1.26: `archive/zipTracerPid:\t0illegal seek`).
 - **Case-insensitive file-blob matching sees pointers as text:** `KvM\0\0\0\0\0` (pointer 0x4d764b)
   read as `kvm`. A short key in the low bytes of an aligned, otherwise-zero word is a number.
+- **Every run starts from the power-on CPU context** (`Emulator._ctx0`, `context_save` in
+  `_fresh`, `context_restore` in `_reset`). Writing the general registers one by one left x87
+  (stack, tags), SSE, MXCSR and EFLAGS from the previous run: one explored PE32 function filled the
+  x87 stack and the next function's i386 `fild`/`fistp` 64-bit loads read garbage -- obfuse_aes
+  3/5, only in the worker that happened to run that function first (results depended on the
+  worker count; CI = 4). If results change with `RUST_DEOBF_WORKERS`, suspect state that survives
+  `_reset`, and bisect the worker's share in one process (`_worker(path, share, ...)`).
+- **x86-64 Mach-O** (CI macos-15-intel; reproducible on Apple silicon with `clang -arch x86_64` /
+  `rustc --target x86_64-apple-darwin`): C++ RTTI is weak, so vtable typeinfo slots are
+  `<weak-def-coalesce>` binds to the image's own `__ZTI*` (Image resolves a bind whose symbol the
+  image exports to that symbol, not to a trampoline); switch jump tables sit inside `__text`.
+- **Compressed sections are not text**: SHF_COMPRESSED / `.zdebug_*` bytes are zlib; a 3-byte key
+  matches them by chance (`\nkvm?` in Go 1.24's .debug_info). recover_antianalysis zeroes them.
+- **Windows: never `subprocess.run(["bash", ...])`** -- CreateProcess searches the app dir and
+  System32 before PATH, so it starts WSL's `bash.exe` stub even when `shutil.which` finds Git Bash.
+  Tests use `conftest.bash_exe()` (absolute path). MinGW gcc writes `-o bin` as `bin.exe`.
+- **MSVC-target PE is NOT measured -- every PE path here is MinGW** (bundled std sigs
+  x86_64-pc-windows-gnu, runtime sigs i686-pc-windows-gnu, CI pe/pe32 via mingw-w64). Tests that
+  build their own fixtures pin the GNU target on Windows (`conftest.CLANG_TARGET` /
+  `RUSTC_TARGET`; windows-latest's default clang/rustc are MSVC). The gap is bounded: C++
+  RTTI/vtables (recover_types reads Itanium only), DWARF-based paths (recover_enums variant names;
+  MSVC debug info is PDB, which nothing here reads) and exception tables (recover_idioms' landing-pad
+  drop glue keys on `_Unwind_Resume`; MSVC uses `__CxxFrameHandler3` funclets). Rust's own
+  mangling and vtables are ABI-independent. `gen_sigdb._pe_abi` detects MSVC; nothing else uses it
+  yet, and recover_libfuncs keys the std layer by arch+format only (§75).
 - **UPX's x86-64 ELF stub ends in an escape hatch** (`syscall; pop rdx; ret` written right after
   the program's text): code the stub produced in the image that is NOT the OEP; unpack_emulate
   records it under `hatches`. `syscall` ends a Unicorn block, so match the hatch's whole span.

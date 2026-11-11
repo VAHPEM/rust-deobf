@@ -2997,3 +2997,120 @@ has not been run.
 | Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 672 passed / 90 skipped |
 
 x86-64 Linux (CI) not run here.
+
+## 75. CI run #119 (edc38ea): what was still red, and why (Nov 2026)
+
+Full red list taken from the run's logs (42860995005, via the maintainer's signed-in browser:
+the API needs auth for logs). Already green and not touched: test_unpack_upx_native,
+tight_xor pe32, native ubuntu-24.04-arm and macos-latest.
+
+**A. selftest: `test_benign_go_not_flagged[True]` -> sandbox/vm** (`4ffb8cd`). Not one of the
+§73 causes. The runner image changed (20261101: Go 1.24.13 / 1.25.14 / 1.26.10).
+- Reproduced on Kali with the runner's GOROOT path (`/opt/hostedtoolcache/go/1.24.13/x64`) and
+  pytest tmp path: Go 1.24.13 cgo amd64 carries `\nkvm?` at file offset 0x273e88.
+- That offset is inside `.debug_info`, which is SHF_COMPRESSED (zlib): chance bytes with
+  printable neighbours. The label came from the file-blob key match, not from
+  instruction_counts (all 0, as the log showed).
+- Fix: compressed sections (SHF_COMPRESSED, `.zdebug_*`) are zeroed before key matching.
+- 18 Go builds (apt 1.21-1.26 plus CI-path 1.24.13 / 1.25.14 / 1.26, cgo and not): only the
+  CI-shaped 1.24.13 cgo build changes, to clean.
+- Regression test: the measured bytes in a compressed section (fails on the old code), and the
+  same bytes in a plain section as a control (still flagged).
+- **Where the test ran with a real `go`** (it is `skipif(not go)`, so a go-less host proves
+  nothing): Kali container, Go 1.24.13, native arm64 and GOARCH=amd64 (cgo via
+  x86_64-linux-gnu-gcc). 2 passed, not skipped, new and old code alike: the chance hit needs
+  CI's exact GOROOT / tmp paths. The CI-path binary reproduction is the evidence for the bug.
+- macOS/Windows lab hosts have no go: the test SKIPS there.
+
+**B. pe32: `obfuse_aes` recall 3/5** (missing `delta`, `echo`). The xfail was removed in
+`013188e` (§73), measured with unicorn 2.1.2 only. That claim was wrong for CI.
+- CI installs **unicorn 2.1.4**, whose CPUID reports AES-NI + PCLMUL (2.1.2: ecx=80002001, no
+  AES; 2.1.4: ecx=ced82203). The crate takes the hardware path, about 3k instructions per
+  string instead of about 20k.
+- Root cause: `_reset` restored only the general registers. x87 (stack, tags), SSE, MXCSR and
+  EFLAGS carried over between runs.
+- Bisecting the 4-worker share (687 functions) found that exploring `0x1e10` leaves the x87
+  stack full. `main` run after it on the same Unicorn instance decoded 3/5 (i386 `fild`/`fistp`
+  64-bit loads read garbage); on a fresh instance it decoded 5/5. Results depended on the worker
+  count (1-2 workers: 5/5; 4, like CI and Kali: 3/5).
+- Fix (`40d337b`): context_save once per instance, context_restore at every reset.
+- Regression test dirties x87 / SSE / MXCSR / EFLAGS (fails on the old reset). Golden
+  equivalence is unchanged.
+
+Full benchmark on Kali (640 binaries: elf via an x86-64 cross container, pe, pe32, elf-arm64;
+`tests/test_benchmark.py`, 4 workers):
+
+| code | unicorn | result |
+|---|---|---|
+| before 40d337b | 2.1.4 (= CI) | 4 failed / 161 passed: obfuse_aes pe32 x2 (recall 3/5), obfuse pe x2 (precision) |
+| after | 2.1.4 | 2 failed / 163 passed: obfuse pe x2 only; obfuse_aes pe32 5/5 |
+| after | 2.1.2 | 165 passed |
+
+No test went from pass to fail.
+
+The `obfuse pe` failure (an extra `HEmBEF-c`) appears with unicorn 2.1.4, on the old and new code
+alike, and on this build only. obfuse draws fresh keys per build, and CI's own pe build passed in
+run #119. This is an open, pre-existing precision issue under 2.1.4; not investigated here.
+
+**C1. native windows-latest: five tests built MSVC binaries** (`72a41b8`; the maintainer chose
+option 1, pin the fixtures to the GNU ABI). The five: test_cpp_vtables_and_rtti,
+test_null_drop_vtable_of_copy_type, test_rust_plus_c_ffi_is_mixed, test_cpp_detected and
+test_deflatten_ollvm_direct_assignment (test_deflatten_band shares the build path).
+- On Windows the tests add `--target=x86_64-w64-mingw32` (clang/clang++) or `--target
+  x86_64-pc-windows-gnu` (rustc/cargo). They keep their compilers: g++ was tried and emits no
+  vtable for the base class `Animal` at all, which would change the binary under test.
+- Address-to-name maps use `Image.function_symbols()`: COFF values are section-relative.
+- ci.yml (Windows only): MinGW-w64 gcc from the preinstalled MSYS2 on PATH, plus `rustup target
+  add x86_64-pc-windows-gnu`, plus a smoke build.
+- Verified with the Windows branch switched on, in a Kali container (Ubuntu clang 18,
+  mingw-w64, rustc 1.99.1): the tests' own build commands produced GNU PE files and all six
+  passed. An earlier pytest-driven simulation was invalid (pytest re-imported conftest and the
+  tests built ELF) and is not counted.
+- **windows-latest itself: not measured** until the next push.
+
+**MSVC-target PE: not measured, and not supported in places.**
+- Every PE path is MinGW: bundle-std x86_64-pc-windows-gnu, gen_runtime_sigs
+  i686-pc-windows-gnu, CI pe/pe32 via mingw-w64.
+- `gen_sigdb._pe_abi` recognises MSVC (Rich header, VC/UCRT imports) and
+  `triple_from("PE", "x86", "msvc")` exists, but nothing else uses them. recover_libfuncs keys
+  the std layer by arch+format only.
+- No code reads PDB (`grep -i pdb`: 0). The open-source `lief.pdb` reports "Debug info not
+  available for this build" (it needs LIEF Extended).
+- The gap is bounded: C++ RTTI/vtables (Itanium only), DWARF-based paths (recover_enums variant
+  names) and exception tables (recover_idioms' landing-pad drop glue keys on `_Unwind_Resume`;
+  MSVC uses `__CxxFrameHandler3` funclets). Rust's mangling and vtables are ABI-independent.
+- Planned separately on `feature/msvc-support`.
+
+**C2. native windows-latest, the other four:**
+- 3 tests ran `["bash", ...]`, which CreateProcess resolved to WSL's System32 stub ("no installed
+  distributions"); `8942133` uses an absolute bash path. Reproduced on the Windows VM with a
+  stand-in bash.exe beside python.exe: 3 failed old, 3 passed new.
+- `test_c_source_file_names_are_not_go` read `bin` while MinGW gcc writes `bin.exe` (KeyError),
+  fixed in `fc547fe`. Not measured on Windows; there is no gcc on the VM.
+- Not the existing Windows gotcha family (/tmp, resource, fork, NamedTemporaryFile).
+
+**D. native macos-15-intel, 4 tests.** Reproduced on Apple silicon with `clang -arch x86_64` /
+`rustc --target x86_64-apple-darwin`; an Intel host was not run.
+- `8f514a1`: x86-64 Mach-O C++ RTTI is weak. Typeinfo slots are `<weak-def-coalesce>` binds to
+  the image's own `__ZTI*`, which used to resolve to import trampolines, so no vtable was found.
+- `8737760`: jump tables sit inside `__text`. 53 fixtures give identical output.
+- `4bd0860`: the deflatten tests looked for `.text` and a sized `decode`.
+
+**E. windows-11-arm canary:** `pip install` fails (no win_arm64 wheels), as expected. Left alone.
+
+Also in this round:
+- `582ed62`: release.yml publishes each project from its own environment, `pypi` (core) and
+  `pypi-premium`, because PyPI refuses two pending publishers with the same environment. Checked:
+  separate builds, twine --strict, test_packaging on the merged dist (17 passed). The workflow
+  itself has not run.
+- `573e7dc`: the maintainer's pending CLAUDE.md / .gitignore edits.
+
+`./scripts/check.sh full` after all of it (tree 72a41b8, `lab_matrix.py`):
+
+| target | result |
+|---|---|
+| macOS 15.5 ARM64 (local, Python 3.12.5, unicorn 2.1.4) | 0 failed / 709 passed / 60 skipped |
+| ARM64 Kali (native aarch64, Python 3.14.7, unicorn 2.1.2) | 0 failed / 733 passed / 36 skipped |
+| Windows 11, x64 Python 3.14.7 on the ARM64 host | 0 failed / 676 passed / 93 skipped |
+
+x86-64 Linux, windows-latest and macos-15-intel (CI): not run here.
