@@ -8,7 +8,7 @@ sections, not the symbol/reloc metadata that otherwise yields absurd false vtabl
 import sys
 
 import pytest
-from conftest import ROOT
+from conftest import CLANG_TARGET, ROOT, RUSTC_TARGET, exe
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import recover_types as RT  # noqa: E402
@@ -76,7 +76,7 @@ def test_no_cpp_vtables_in_rust_binary():
     assert RT.recover(FIXTURE)["cpp_vtables"] == []
 
 
-_ARCH_FLAGS = {"host": [], "macho-x86_64": ["-arch", "x86_64"]}
+_ARCH_FLAGS = {"host": CLANG_TARGET, "macho-x86_64": ["-arch", "x86_64"]}   # host: GNU ABI on Windows
 
 
 @pytest.mark.skipif(not __import__("shutil").which("clang++"), reason="clang++ not available")
@@ -96,7 +96,7 @@ def test_cpp_vtables_and_rtti(tmp_path, target):
         "extern \"C\" int pick(int n){Animal*a=(n&1)?(Animal*)new Dog():(Animal*)new Bird();"
         "int r=a->sound()+a->legs();delete a;return r;}\n"
         "int main(){return pick(1);}\n")
-    binp = tmp_path / "v"
+    binp = exe(tmp_path / "v") if target == "host" else tmp_path / "v"
     r = subprocess.run(["clang++", *_ARCH_FLAGS[target], "-O1", "-fno-inline", str(src), "-o", str(binp)],
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -144,19 +144,18 @@ def test_null_drop_vtable_of_copy_type(tmp_path):
     """A `dyn Trait` vtable for a type without drop glue has drop_in_place == 0; it must be found,
     and the adjacent vtable (Named, real drop) must stay separate rather than be swallowed."""
     import subprocess
-    import lief
     src = tmp_path / "vt.rs"
     src.write_text(_VT_SRC)
-    out = tmp_path / "vt"
-    r = subprocess.run(["rustc", "-O", "-C", "symbol-mangling-version=v0", "-o", str(out), str(src)],
-                       capture_output=True, text=True)
+    out = exe(tmp_path / "vt")
+    r = subprocess.run(["rustc", "-O", *RUSTC_TARGET, "-C", "symbol-mangling-version=v0", "-o", str(out),
+                        str(src)], capture_output=True, text=True)
     if r.returncode != 0:
         pytest.skip("rustc failed: " + r.stderr[-200:])
-    binary = lief.parse(str(out))          # keep a reference: iterating a temporary's symbols segfaults
-    # skip ELF mapping symbols ($x / $d): on AArch64 they share each function's address and would
-    # overwrite its name in this address -> name map (the test then "missed" a vtable it found)
-    syms = {s.value: s.name for s in binary.symbols
-            if s.value and s.name and not s.name.startswith("$")}
+    # address -> function name in the toolkit's own address space (Image.function_symbols: COFF values
+    # are section-relative, CI windows-latest with the GNU target; ELF mapping symbols $x/$d, which
+    # share each function's address on AArch64, are not functions and stay out)
+    import recover_emulate as E
+    syms = dict(E.Image(str(out)).function_symbols())
     res = RT.recover(out)
     by_method = {}
     for vt in res["vtables"]:

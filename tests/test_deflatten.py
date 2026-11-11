@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import ROOT
+from conftest import CLANG_TARGET, ROOT, RUSTC_TARGET, exe
 
 import lief
 import deobf_deflatten as D
@@ -26,33 +26,40 @@ def _text_section(b):
     return next(s for s in b.sections if s.name in (".text", "__text"))
 
 
-def _function(b, match):
-    """(start, size) of the symbol whose name -- without Mach-O's leading `_` -- satisfies `match`.
-    Mach-O symbols carry no size: the next function start in the same section bounds it."""
+def _function(b, match, path):
+    """(start, size) of the function whose name -- without Mach-O's leading `_` -- satisfies `match`.
+    Starts come from recover_emulate.Image.function_symbols(), which handles every format (a COFF
+    symbol's value is an offset into its section, CI windows-latest with the GNU target; Mach-O
+    reports no function flag). Mach-O and COFF symbols carry no size: the next function start (or
+    the end of the code section) bounds it."""
+    import recover_emulate as E
     text = _text_section(b)
-    lo, hi = text.virtual_address, text.virtual_address + text.size
-    starts = sorted({s.value for s in b.symbols if lo <= s.value < hi})
-    for sym in b.symbols:
-        name = sym.name if isinstance(sym.name, str) else ""
-        if not (lo <= sym.value < hi) or not match(name[1:] if b.format == lief.Binary.FORMATS.MACHO
-                                                   and name.startswith("_") else name):
+    hi = text.virtual_address + text.size
+    syms = sorted(E.Image(str(path)).function_symbols())
+    sizes = {sym.name: sym.size for sym in b.symbols if isinstance(sym.name, str) and sym.size}
+    starts = sorted({a for a, _ in syms})
+    for va, name in syms:
+        bare = name[1:] if b.format == lief.Binary.FORMATS.MACHO and name.startswith("_") else name
+        if not match(bare):
             continue
-        size = sym.size
+        size = sizes.get(name, 0)
         if not size:
-            later = [a for a in starts if a > sym.value]
-            size = (later[0] if later else hi) - sym.value
-        if size:
-            return sym.value, size
+            later = [a for a in starts if a > va]
+            size = (later[0] if later else hi) - va
+        if size > 0:
+            return va, size
     return None
 
 
 def _debug_binary():
-    bin_ = GOLD / "target" / "debug" / "goldberg_cff"
+    # Windows: the GNU target (CI windows-latest), not the host's default MSVC one -- see conftest
+    sub = ("x86_64-pc-windows-gnu",) if RUSTC_TARGET else ()
+    bin_ = exe(GOLD.joinpath("target", *sub, "debug", "goldberg_cff"))
     if bin_.is_file():
         return bin_
     if shutil.which("cargo") is None:
         return None
-    subprocess.run(["cargo", "build"], cwd=GOLD, capture_output=True)
+    subprocess.run(["cargo", "build", *RUSTC_TARGET], cwd=GOLD, capture_output=True)
     return bin_ if bin_.is_file() else None
 
 
@@ -65,7 +72,7 @@ def test_deflatten_band():
     b = lief.parse(str(bin_))
     text = _text_section(b)
     code, tbase = bytes(text.content), text.virtual_address
-    band = _function(b, lambda n: "band" in n)
+    band = _function(b, lambda n: "band" in n, bin_)
     assert band, "band() is not a standalone symbol in the debug build"
 
     r = D.deflatten(code, tbase, *band)
@@ -107,12 +114,12 @@ def _ollvm_binary():
     post-flattening form (switch var, dispatcher, DIRECT-assignment transitions `sv = next_const`)
     compiled by a real compiler -- the direct-assignment form OLLVM uses, which goldberg's
     XOR-delta transitions never exercise."""
-    binp = OLLVM / "fla"
+    binp = exe(OLLVM / "fla")
     if binp.is_file():
         return binp
     if shutil.which("clang") is None:
         return None
-    subprocess.run(["clang", "-O0", "-fno-inline", "-o", str(binp), str(OLLVM / "fla.c")],
+    subprocess.run(["clang", *CLANG_TARGET, "-O0", "-fno-inline", "-o", str(binp), str(OLLVM / "fla.c")],
                    capture_output=True)
     return binp if binp.is_file() else None
 
@@ -280,7 +287,7 @@ def _check_ollvm(binp):
     b = lief.parse(str(binp))
     text = _text_section(b)
     code, tbase = bytes(text.content), text.virtual_address
-    dec = _function(b, lambda n: n == "decode")
+    dec = _function(b, lambda n: n == "decode", binp)
     assert dec, "decode() symbol not found"
 
     r = D.deflatten(code, tbase, *dec)

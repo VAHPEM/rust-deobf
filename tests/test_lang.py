@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import ROOT
+from conftest import CLANG_TARGET, ROOT, RUSTC_TARGET, exe
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import recover_lang as L  # noqa: E402
@@ -36,15 +36,17 @@ def test_committed_rust_binary():
 @pytest.mark.skipif(not (shutil.which("rustc") and shutil.which("clang")), reason="need rustc+clang")
 def test_rust_plus_c_ffi_is_mixed(tmp_path):
     (tmp_path / "c.c").write_text("int c_square(int x){return x*x;}\n")
-    subprocess.run(["clang", "-c", "-O2", str(tmp_path / "c.c"), "-o", str(tmp_path / "c.o")], check=True)
+    subprocess.run(["clang", *CLANG_TARGET, "-c", "-O2", str(tmp_path / "c.c"), "-o", str(tmp_path / "c.o")],
+                   check=True)
     (tmp_path / "r.rs").write_text(
         'extern "C" { fn c_square(x: i32) -> i32; }\n'
         'fn main(){ println!("{}", unsafe { c_square(std::env::args().count() as i32) }); }\n')
-    r = subprocess.run(["rustc", "-O", str(tmp_path / "r.rs"), "-o", str(tmp_path / "bin"),
+    out = exe(tmp_path / "bin")
+    r = subprocess.run(["rustc", "-O", *RUSTC_TARGET, str(tmp_path / "r.rs"), "-o", str(out),
                         "-C", f"link-arg={tmp_path / 'c.o'}"], capture_output=True, text=True)
     if r.returncode != 0:
         pytest.skip("build failed: " + r.stderr.strip()[-200:])
-    res = L.recover(tmp_path / "bin")
+    res = L.recover(out)
     assert res["mixed"] and {"rust", "c"} <= set(res["languages_present"])
     assert res["dominant"] == "rust"
     assert "go" not in res["languages_present"]      # no false Go
@@ -55,11 +57,12 @@ def test_cpp_detected(tmp_path):
     (tmp_path / "x.cpp").write_text(
         "#include <string>\nstruct S{virtual int f(){return 1;}};struct T:S{int f()override{return 2;}};\n"
         "int main(){S*p=new T();return p->f()+(int)std::string(\"hi\").size();}\n")
-    r = subprocess.run(["clang++", "-O2", str(tmp_path / "x.cpp"), "-o", str(tmp_path / "bin")],
+    out = exe(tmp_path / "bin")
+    r = subprocess.run(["clang++", *CLANG_TARGET, "-O2", str(tmp_path / "x.cpp"), "-o", str(out)],
                        capture_output=True, text=True)
     if r.returncode != 0:
         pytest.skip("build failed")
-    res = L.recover(tmp_path / "bin")
+    res = L.recover(out)
     assert "cpp" in res["languages_present"]
 
 
@@ -88,7 +91,7 @@ def test_c_source_file_names_are_not_go(tmp_path):
     (tmp_path / "net.c").write_text("int helper_n(int x){return x+1;}\n")
     # MinGW gcc on Windows writes `-o bin` as bin.exe; reading `bin` then hit a missing file
     # (recover -> {"error"} -> KeyError, CI windows-latest). Name the output what gcc writes.
-    out = tmp_path / ("bin.exe" if sys.platform == "win32" else "bin")
+    out = exe(tmp_path / "bin")
     r = subprocess.run([_cc(), "-O1", "-o", str(out), str(tmp_path / "main.c"), str(tmp_path / "net.c")],
                        capture_output=True, text=True)
     if r.returncode != 0:

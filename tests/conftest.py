@@ -10,6 +10,23 @@ BUILD = Path(os.environ.get("RUST_DEOBF_BUILD", ROOT / "build"))   # scripts/bui
 CANARIES = json.loads((ROOT / "bench_src" / "manifest.json").read_text())["canaries"]
 
 
+# Host-built fixtures are pinned to the GNU ABI on Windows: the default clang / rustc there target
+# MSVC (symbols in a .pdb, MSVC C++ RTTI), which changes the BINARY under test, not just the host.
+# Pinned, every host builds the same kind of binary and only the host varies -- what the native CI
+# job measures (CI windows-latest installs MinGW-w64 and the Rust windows-gnu target for this).
+# MSVC-target PE is a separate, unmeasured capability (VALIDATION §75).
+WIN = sys.platform == "win32"
+CLANG_TARGET = ["--target=x86_64-w64-mingw32"] if WIN else []
+RUSTC_TARGET = ["--target", "x86_64-pc-windows-gnu"] if WIN else []
+
+
+def exe(path):
+    """The output name the GNU toolchains write on Windows (`-o bin` -> bin.exe)."""
+    from pathlib import Path
+    p = Path(path)
+    return p.with_name(p.name + ".exe") if WIN and not p.suffix else p
+
+
 def bash_exe():
     """An absolute path to a real bash, or None. Pass it to subprocess instead of the bare name: on
     Windows CreateProcess searches System32 BEFORE PATH, so `["bash", ...]` runs WSL's bash.exe stub

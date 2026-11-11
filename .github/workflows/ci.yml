@@ -37,8 +37,9 @@ jobs:
     # the same fast subset (`./scripts/check.sh full` -- its ignore list is the one
     # tests/test_docs_current.py keeps equal to the selftest job's) on native hosts other than
     # x86-64 Linux, so the toolkit itself is tested where it runs, not only on ubuntu-latest.
-    # No Rust toolchain: nothing here builds the benchmark. Committed benign fixtures only; the
-    # one test that executes a sample stays off (RUST_DEOBF_DYNAMIC is not set).
+    # No benchmark build here (Windows only adds the GNU target for the tests' own small
+    # fixtures). Committed benign fixtures only; the one test that executes a sample stays off
+    # (RUST_DEOBF_DYNAMIC is not set).
     # windows-11-arm is a canary (continue-on-error): unicorn and capstone<6 ship no win_arm64
     # wheels yet, so it is expected to fail at `pip install`; the day it goes green, they do.
     strategy:
@@ -77,6 +78,26 @@ jobs:
             python -c "import platform, sys; sys.exit(platform.machine() != 'ARM64')"
           fi
       - run: python -m pip install -r requirements.txt pytest
+      # Host-built test fixtures are pinned to the GNU ABI on Windows (tests/conftest.py:
+      # CLANG_TARGET / RUSTC_TARGET): the default clang / rustc there target MSVC, which changes the
+      # binary under test instead of the host. clang --target=x86_64-w64-mingw32 needs a MinGW-w64
+      # sysroot (MSYS2 is preinstalled, not on PATH) and rustc the windows-gnu std.
+      - name: GNU-target toolchain for host-built fixtures (Windows)
+        if: runner.os == 'Windows' && matrix.canary != true
+        shell: pwsh
+        run: |
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-gcc"
+          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          rustup target add x86_64-pc-windows-gnu
+      - name: GNU-target toolchain check (Windows)
+        if: runner.os == 'Windows' && matrix.canary != true
+        run: |
+          gcc -dumpmachine
+          echo 'int main(void){return 0;}' > t.c
+          clang --target=x86_64-w64-mingw32 t.c -o t.exe && ./t.exe && echo "clang mingw OK"
+          echo 'fn main(){}' > t.rs
+          rustc --target x86_64-pc-windows-gnu t.rs -o t2.exe && ./t2.exe && echo "rustc windows-gnu OK"
+          rm -f t.c t.exe t.rs t2.exe
       - name: Fast subset (check.sh full) on a native host
         run: ./scripts/check.sh full
 
