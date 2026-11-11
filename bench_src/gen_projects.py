@@ -167,12 +167,24 @@ VARIANTS["muddy"] = {
 #    `polymorphic` on (the default) the macro does NOT use the AEAD: each literal gets its own
 #    inline closure that undoes 2-4 random XOR/ADD/SUB/ROL/ROR layers whose 32-byte keys are
 #    derived at run time from 4-8 constants, inside a flattened state machine with opaque
-#    predicates; decrypted lazily into a OnceLock. No seed: a fresh random layer stack per build,
-#    as the crate is used in the field.
+#    predicates; decrypted lazily into a OnceLock.
+#    SEEDED (VALIDATION §77/§78): without `seed = "..."` every build draws fresh keys (getrandom at
+#    macro expansion) and the benchmark verdict followed the key, not the code. The per-push gate
+#    therefore pins one seed per literal, chosen up front (crate + literal), never searched for a
+#    passing one; behaviour under random keys is measured separately, over many builds.
+#    (The seed names the literal by a hash, never by its text: a seed is a macro argument and is
+#    not emitted, but the plaintext must not be able to reach the binary by any route.)
+def obfuse_seeded(crate):
+    def wrap(c):
+        tag = hashlib.sha256(f"{crate}/{c}".encode()).hexdigest()[:16]
+        return f'obfuse!("{esc(c)}", seed = "rust-deobf-bench-{tag}").as_str()'
+    return wrap
+
+
 VARIANTS["obfuse"] = {
     "deps": ['obfuse = "1"'],
     "header": "use obfuse::obfuse;",
-    "body": main_body(lambda c: f'obfuse!("{esc(c)}").as_str()'),
+    "body": main_body(obfuse_seeded("obfuse")),
     "build_rs": None, "env": None,
 }
 # 7b. obfuse without `polymorphic`: the real AES-256-GCM path (ObfuseStr: ciphertext+tag in
@@ -180,14 +192,14 @@ VARIANTS["obfuse"] = {
 VARIANTS["obfuse_aes"] = {
     "deps": ['obfuse = { version = "1", default-features = false, features = ["aes-256-gcm"] }'],
     "header": "use obfuse::obfuse;",
-    "body": main_body(lambda c: f'obfuse!("{esc(c)}").as_str()'),
+    "body": main_body(obfuse_seeded("obfuse_aes")),
     "build_rs": None, "env": None,
 }
 # 7c. obfuse `xor` mode: XOR with a 32-byte key through Mixed Boolean-Arithmetic (MBA) expressions
 VARIANTS["obfuse_xor"] = {
     "deps": ['obfuse = { version = "1", default-features = false, features = ["xor"] }'],
     "header": "use obfuse::obfuse;",
-    "body": main_body(lambda c: f'obfuse!("{esc(c)}").as_str()'),
+    "body": main_body(obfuse_seeded("obfuse_xor")),
     "build_rs": None, "env": None,
 }
 

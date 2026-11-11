@@ -3,15 +3,23 @@
 Tests for binaries that have not been built are skipped, so `pytest` works on a partial build.
 The matrix is the README claim: release builds, stripped and not, ELF/PE x86-64 and AArch64.
 """
+import os
+
 import pytest
 from conftest import BUILD, CANARIES
+
+# Crates that draw fresh keys at every build and cannot be pinned (muddy: OsRng key + nonce, no
+# seed option). Their verdict follows the build, not the code (VALIDATION §77), so they are not
+# part of the per-push gate; the weekly scheduled run sets RUST_DEOBF_RANDOM_KEYS=1 and includes
+# them. (obfuse / obfuse_aes / obfuse_xor are pinned with seed= in bench_src/gen_projects.py.)
+RANDOM_KEY = ["muddy"] if os.environ.get("RUST_DEOBF_RANDOM_KEYS") == "1" else []
 
 FORMATS = [("elf", ""), ("pe", ".exe"), ("elf-arm64", "")]
 # 32-bit PE (build_all.sh FORMATS=pe32): emulated only -- the static call-site, cryptify, literal
 # and disassembly checks below are x86-64/AArch64 engines, so it joins the emulation tests
 EMU_FORMATS = FORMATS + [("pe32", ".exe")]
 STATIC = ["xor_custom", "add_custom", "sub_custom", "litcrypt", "litcrypt2"]
-NO_STRINGS = ["plaintext", "muddy"]   # nothing obfuscated / AEAD: no static decoder to read
+NO_STRINGS = ["plaintext"] + RANDOM_KEY   # nothing obfuscated / AEAD: no static decoder to read
 
 
 def binary(crate, fmt, ext, strip, profile="release"):
@@ -85,7 +93,7 @@ def test_2026_crates_by_emulation(crate, fmt, ext, strip):
 
 @pytest.mark.parametrize("strip", ["nostrip", "strip"])
 @pytest.mark.parametrize("crate", ["xor_custom", "add_custom", "sub_custom", "litcrypt", "litcrypt2",
-                                   "cryptify_default", "muddy", "plaintext", "cryptify"])
+                                   "cryptify_default", "plaintext", "cryptify"] + RANDOM_KEY)
 def test_pe32_canaries_by_pipeline(crate, strip):
     # 32-bit PE through the default pipeline (emulation): the five canaries exactly; the plain
     # program and cryptify with a custom key (not in the binary) give nothing
@@ -165,7 +173,7 @@ def test_rust_literals(fmt, ext):
 
 
 @pytest.mark.parametrize("fmt,ext", FORMATS)
-@pytest.mark.parametrize("crate", STATIC + ["obfstr", "cryptify_default", "muddy"] + EMULATED_2026)
+@pytest.mark.parametrize("crate", STATIC + ["obfstr", "cryptify_default"] + RANDOM_KEY + EMULATED_2026)
 def test_literals_do_not_leak_obfuscated_canaries(crate, fmt, ext):
     import recover_rust_strings
     r = recover_rust_strings.recover(binary(crate, fmt, ext, "strip"), min_len=4)

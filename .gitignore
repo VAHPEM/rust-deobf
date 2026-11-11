@@ -5,7 +5,7 @@ build/obfstr__*
 build/litcrypt__* 
 build/muddy__* 
 bench_src/*/target/
-bench_src/*/Cargo.lock
+# bench_src/*/Cargo.lock IS committed: the benchmark's crate versions are part of the gate (VALIDATION §78)
 __pycache__/
 *.pyc
 build/*_arm64

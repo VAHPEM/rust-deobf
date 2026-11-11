@@ -137,6 +137,10 @@ jobs:
       # a binary of this job's format that the tests need but the build did not produce is a
       # FAILURE, not a skip (otherwise a broken build passes CI with every test skipped)
       RUST_DEOBF_REQUIRE_BUILD: ${{ matrix.format }}
+      # crates that draw fresh keys per build and cannot be pinned (muddy) are not part of the
+      # per-push gate -- their verdict follows the build's key (VALIDATION §77/§78); the weekly
+      # scheduled run includes them
+      RUST_DEOBF_RANDOM_KEYS: ${{ github.event_name == 'schedule' && '1' || '' }}
     steps:
       - uses: actions/checkout@v4
 
