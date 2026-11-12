@@ -26,10 +26,14 @@ before/after measured, a test that fails on the previous code.
   `recover_go.function_starts` gives the emulator Go's function starts (§84).
 
 ### Fixed
-- **macOS: parallel `recover` could abort** (SIGABRT, "crashed on child side of fork pre-exec")
-  on a large binary (workers > 1 and >= 2000 functions): the emulation workers were started with a
-  bare `fork`. They now use a forkserver (engines preloaded), else spawn -- never a bare fork, on
-  any OS (`emu_backend.mp_context`, shared with `fuzz_recover`). **Affects 0.1.0.** A script that
+- **Parallel `recover` started its emulation workers with a bare `fork`** (workers > 1 and
+  >= 2000 functions). A fork without exec is unsafe on macOS once the caller has touched system
+  frameworks, and on Linux after the caller created a Unicorn engine. Workers now use a forkserver
+  (engines preloaded), else spawn -- never a bare fork, on any OS (`emu_backend.mp_context`, shared
+  with `fuzz_recover`). **0.1.0 has the bare fork**; no crash from it was reproduced (macOS 15.5,
+  Python 3.12.5: 0.1.0 and the fix both 0 dead workers in 6 runs each on a 2430-function binary).
+  The macOS "crashed on child side of fork pre-exec" report that prompted this was test_fuzz's
+  deliberate `os.abort()` in a fuzz isolation child, not recover. Behaviour change: a script that
   calls `recover()` in parallel needs an `if __name__ == "__main__":` guard, as with Python's
   default spawn (§86).
 - `recover_async` found no state machine in a `panic=abort` build (the LTO profiles): 0 of 9 ->
