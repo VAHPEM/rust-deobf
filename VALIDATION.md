@@ -3669,60 +3669,77 @@ job. Not measured: other garble versions, Go versions other than 1.24, `-control
 Tests: `test_wasm_module_is_named_and_unsupported` and
 `test_unknown_architecture_is_named_and_no_runtime_hint` (both fail on the old code).
 
-## 86. Parallel recover() used a bare fork: macOS child aborts (affects 0.1.0) (Nov 2026)
+## 86. Parallel recover() used a bare fork; the macOS "fork pre-exec" abort was a test (Nov 2026)
 
-**Symptom (reported):**
-- The run aborts with SIGABRT on macOS, "crashed on child side of fork pre-exec".
-- It happens only on recover_emulate's parallel path: workers > 1 and a binary with at least
-  `PARALLEL_MIN` (2000) functions. Hence intermittent.
-- 0.1.0 has it.
+**Report:** SIGABRT on macOS 15.5 (python.org Python 3.12.5), "crashed on child side of fork
+pre-exec", attributed to recover_emulate's parallel path (workers > 1 and >= `PARALLEL_MIN` = 2000
+functions), which in 0.1.0 started its workers with `mp.get_context("fork")`.
 
-**Cause:** `recover()` took `mp.get_context("fork")` wherever fork existed. A fork without exec
-copies the caller as it is:
-- On macOS that is unsafe once the process has loaded system frameworks or runs threads. This is
-  why Python's default there has been spawn since 3.8.
-- On Linux, a fork after the caller created a Unicorn engine fails with "Could not allocate
-  dynamic translator buffer" (CLAUDE.md gotcha).
+**What the crash reports show (measured, the reporting Mac):** six `Python-*.ips` in
+`~/Library/Logs/DiagnosticReports`, 2026-11-11 22:33 to 2026-11-12 00:29, all identical:
+- faulting stack `abort <- os_abort_impl <- os_abort <- _PyEval_EvalFrameDefault <- run_mod <-
+  PyRun_SimpleStringFlags <- Py_RunMain`: Python code calling `os.abort()`, in a process whose main
+  program is a `-c` string, forked from a Python parent and not exec'd. "crashed on child side of
+  fork pre-exec" is only libsystem_c's annotation for *any* abort in such a child, not an
+  Objective-C or framework diagnosis.
+- the only `os.abort()` in the repo is `tests/fuzz_helpers.native_abort`, used by
+  `test_fuzz.py::test_isolated_native_crash_is_attributed`. That test kills a fuzz_recover isolation
+  child ON PURPOSE. fuzz_recover has used a forkserver since 192c2ab (Oct 2026), and a forkserver
+  child is a fork of `python -c "from multiprocessing.forkserver import main; ..."`: exactly the
+  stack above. A bare-fork child of `recover` would carry the caller's main (a script, or pytest's
+  `run_module`), not `PyRun_SimpleStringFlags`.
+- each report precedes a commit by minutes (3615fbb, 3059894, 3dd43f7, 943ddda; the last, 00:29:41,
+  precedes ecfae96 at 00:30:01): the pre-commit `check.sh full`, which includes test_fuzz.py.
+- re-running that one test's call today wrote a 7th report with the identical stack and annotation.
 
-Nothing needed fork's semantics. `_worker` takes the path and re-parses the Image itself, so no
-parent state is shared, and no test relied on it (none patches the module for workers). fuzz_recover
-already did the right thing.
+So the reported abort is the expected, deliberate crash of a passing test, surfaced by macOS's
+crash reporter. It was never recover's bare fork.
 
-A dead worker did not fail the run: BrokenProcessPool is caught and the share re-runs in the
-parent. So the user-visible cost could also be a silent serial run after paying for the pool.
+**Before/after on the real path (macOS 15.5 ARM64, python.org 3.12.5 framework build, unicorn
+2.1.4, lief 1.0.0, capstone 5.0.7; RUST_DEOBF_WORKERS unset, workers=4):** `meta_probe` built
+natively (rustc 1.91.1, aarch64-apple-darwin Mach-O, release), 2430 functions, so the parallel path
+runs. Old = `rust-deobf==0.1.0` from PyPI in a venv of the same interpreter (bare fork); new =
+editable checkout (ecfae96). A driver counted the parent's `_emulate` calls (a dead worker shows
+only as its share re-running in the parent) and new crash reports.
 
-**Fix:** one helper, `emu_backend.mp_context()`: forkserver with lief / capstone / unicorn
-preloaded, else spawn; never a bare fork on any OS. `recover_emulate` (parallel path) and
-`fuzz_recover._isolation_ctx` both use it.
+| code | runs | Objective-C runtime set up in the parent first | dead workers / parent re-runs | crash reports | wall time |
+|------|------|------|------|------|------|
+| 0.1.0 (fork) | 3 | no | 0 | 0 | 4.4-4.7 s |
+| 0.1.0 (fork) | 3 | yes (`platform.mac_ver()`, `urllib.request.getproxies()`) | 0 | 0 | 4.5-5.5 s |
+| new (forkserver) | 3 | no | 0 | 0 | 4.9-5.2 s |
+| new (forkserver) | 3 | yes | 0 | 0 | 4.9-5.0 s |
+
+The earlier session's 8 runs (elf-arm64 `meta_probe`, 2668 functions, plus two LIEF threads during
+the fork) were 0 too. **There is no "old crashes, new does not" pair**: the bare fork did not
+crash on this machine, and the abort that was reported had another source.
+
+**Why the change stays anyway:** a fork without exec is still the wrong primitive here.
+Python's own macOS default has been spawn since 3.8 because a forked child that touches
+Objective-C classes the parent had not initialised aborts; 3.12 warns on fork with threads; and
+on Linux a fork after the caller created a Unicorn engine fails ("Could not allocate dynamic
+translator buffer", CLAUDE.md gotcha). Nothing needed fork's semantics: `_worker` takes the path
+and re-parses the Image itself. Fix: one helper, `emu_backend.mp_context()` -- forkserver with
+lief / capstone / unicorn preloaded, else spawn, never a bare fork on any OS; `recover_emulate`
+(parallel path) and `fuzz_recover._isolation_ctx` both use it. Cost measured above: ~0.4 s per run
+(forkserver start + child imports) on a 5 s run.
 
 Consequences, reviewed:
-- Children re-import the caller's `__main__`, exactly like Python's default spawn on macOS and
-  Windows. A script that calls recover() in parallel needs the usual `if __name__ == "__main__":`
-  guard; recover.py, cli.py and mcp_server.py have it.
+- Children re-import the caller's `__main__` (as with Python's default spawn on macOS and
+  Windows): a script calling recover() in parallel needs `if __name__ == "__main__":`; recover.py,
+  cli.py and mcp_server.py have it, and pip's console-script wrapper does.
 - The forkserver process lives as long as the caller.
-- A worker that dies still yields BrokenProcessPool, and its share still re-runs in the parent
-  (unchanged). The pool is a context manager, so its workers are joined.
+- **A dead worker** (new test `test_dead_worker_share_reruns_in_parent_and_leaves_no_process`,
+  a worker SIGKILLed as by the OOM killer): BrokenProcessPool, the run still completes with the
+  same strings as one process, and no worker process is left (`multiprocessing.active_children()`
+  empty). Measured cost: BrokenProcessPool fails *every* pending future, so the surviving worker's
+  share is discarded too and all 732 functions re-ran in the parent -- one dead worker turns the
+  run serial. Unchanged from 0.1.0; worth a change only if worker deaths are seen in practice.
+- `tests/test_parallel_workers.py` (6 tests) passes 3/3 on the machine above; the dead-worker test
+  fails when the parent's re-run of failed shares is disabled.
 
-**Measured, macOS 15.5 ARM64 (python.org Python 3.12.5, unicorn 2.1.4):**
-- **Before: the crash was NOT reproduced.** Old code, `meta_probe` elf-arm64 release (2668
-  functions), workers=4, 8 runs under three conditions:
-  - plain;
-  - Objective-C runtime initialised in the parent first (`urllib.request.getproxies()`,
-    `platform.mac_ver()`);
-  - the same plus two threads parsing with LIEF during the fork.
+**Side effect, not fixed:** every `check.sh full` on macOS writes one crash report (and may show
+"Python quit unexpectedly") from test_fuzz's deliberate `os.abort()`. It tests a real path
+(a native crash in an isolation child is attributed, not lost), so it stays.
 
-  All 8 runs: 0 worker errors, 0 shares re-run in the parent. "Unicorn created in the parent
-  first, then the large binary" was 0 too, on macOS and on Kali. The report is not contradicted
-  (the trigger is environment-dependent), but this machine did not show it, so there is no
-  before/after for the crash itself.
-- **After:**
-  - `tests/test_parallel_workers.py` passes. It goes through the real parallel path with real child
-    processes (PARALLEL_MIN lowered in the parent: no committed fixture reaches 2000 functions, and a
-    larger one would break the fixture-size rule). It checks: the start method is not fork; no
-    share re-ran in the parent; the result equals workers=1. It fails on the old code (no helper).
-  - Forced parallel (workers=4) against one process on 4 benchmark binaries (encodings: elf-arm64
-    release / size-lto, pe32 size-lto, pe release): same decoded strings in all 4, 0 shares re-run
-    in the parent.
-  - **NOT MEASURED:** `meta_probe` at the native threshold with the new code (the run was stopped
-    before it reached it), the rest of the local benchmark binaries, and lab_matrix with this
-    change on Kali and Windows. The last lab run (943ddda) is from before it.
+**NOT MEASURED:** lab_matrix (Kali, Windows) with this change; the last lab run (943ddda) predates
+it.
