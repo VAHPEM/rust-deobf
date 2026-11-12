@@ -3741,8 +3741,13 @@ Consequences, reviewed:
 "Python quit unexpectedly") from test_fuzz's deliberate `os.abort()`. It tests a real path
 (a native crash in an isolation child is attributed, not lost), so it stays.
 
-**NOT MEASURED:** lab_matrix (Kali, Windows) with this change; the last lab run (943ddda) predates
-it.
+**Lab (lab_matrix, later the same day):** Kali ARM64 green on ebd577e except the §87 test.
+**Windows (x64 Python 3.14.7 on ARM64) was red, 3 tests, from this change itself:** the decision
+was tested as `mp_context(["fork", "spawn", "forkserver"])`, which creates a forkserver context, and
+Windows has none (`ValueError: cannot find context for 'forkserver'`, verified on the VM). The real
+path was fine there (`get_all_start_methods()` is `['spawn']`). The decision is now a pure
+`emu_backend.start_method(methods)`, checked for every platform's list on any host, plus
+`mp_context()` on the host itself; same expectations. After: Windows 0 failed / 711 passed.
 
 ## 87. Constructor-decrypted strings: red on Kali, green on macOS by accident (Nov 2026)
 
@@ -3781,6 +3786,25 @@ reads `__init_offsets` (target = the segment at file offset 0 + offset, kept onl
 - `meta_probe` (Mach-O, 2430 functions): 0 constructors, 0 -> 0 strings. That tells nothing about
   precision on binaries with constructors.
 
-**Not measured:** precision on real binaries with many constructors (C++ static initialisers,
-Rust `ctor`), where constructor-written text not in the file will now be reported; Windows/PE
-(constructors are not replayed there at all); x86-64 ELF and the CI native matrix with this change.
+**x86-64 ELF** (built in the arm64 `rdbug-wingo` container with the x86-64 cross toolchain,
+analysed natively on Kali): clang -O2, clang -Os, gcc -O2 PIE, gcc -O2 -no-pie. Old: 2 constructors
+found, 0 strings in all 4. New: both strings in all 4. So the test would be red on CI's x86-64 Linux
+too, not only on ARM64.
+
+**Precision on real binaries with many constructors** (Kali system binaries, recover_emulate old
+= ebd577e vs new, time_budget 120, workers=1):
+
+| binary | constructors | strings old | strings new | added |
+|---|---|---|---|---|
+| eqn | 20 | 0 | 0 | 0 |
+| troff | 23 | 0 | 0 | 0 |
+| libaspell.so.15.3.1 | 45 | 0 | 0 | 0 |
+| libnl-route-3.so.200.26.0 | 76 | 0 | 0 | 0 |
+| upx-ucl | 62 | 2 | 0, rerun 2 | 0 |
+
+upx-ucl's two strings are junk (`/4/4/4/73737373`, `lCvCvevevev...`) and hit the 120 s budget. They
+depend on the time-bounded second pass, not on this change: the first pair of runs gave 2 -> 0, a
+rerun 2 -> 2. No constructor-written text was added on any of the five.
+
+**Not measured:** Rust `ctor`-crate binaries; Windows/PE (constructors are not replayed there at
+all); the CI native matrix with this change.
