@@ -34,7 +34,10 @@ CANARIES = json.loads((ROOT / "bench_src" / "manifest.json").read_text())["canar
     (["spawn"], "spawn"),                                 # Windows
 ])
 def test_mp_context_is_forkserver_else_spawn_never_fork(methods, want):
-    assert emu_backend.mp_context(methods).get_start_method() == want
+    # the decision for each platform's method list, checked on any host (Windows cannot create a
+    # forkserver context at all), and the context this host really gets
+    assert emu_backend.start_method(methods) == want
+    assert emu_backend.mp_context().get_start_method() == emu_backend.start_method() != "fork"
 
 
 def test_fuzz_recover_and_recover_emulate_share_the_choice(monkeypatch):

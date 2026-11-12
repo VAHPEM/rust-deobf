@@ -160,35 +160,43 @@ def release(uc):
 MP_PRELOAD = ("lief", "capstone", "unicorn")
 
 
-def mp_context(methods=None):
+def start_method(methods=None):
+    """The start method for emulation workers: "forkserver" where the platform has one, else
+    "spawn" -- never "fork". `methods` overrides mp.get_all_start_methods() (tests: the decision
+    is checked for every platform's method list on any host; a context for a method this host
+    lacks cannot be created -- Windows raises ValueError for "forkserver")."""
+    import multiprocessing as mp
+    methods = mp.get_all_start_methods() if methods is None else methods
+    return "forkserver" if "forkserver" in methods else "spawn"
+
+
+def mp_context():
     """The multiprocessing context for emulation workers: a forkserver (preloading MP_PRELOAD)
-    where the platform has one, else spawn -- NEVER a bare fork, on any OS. A bare fork copies the
-    caller as it is: after the caller created a Unicorn engine the child fails with "Could not
-    allocate dynamic translator buffer" (Linux), and on macOS a fork without exec from a process
-    that loaded system frameworks or runs threads can abort in the child ("crashed on child side
-    of fork pre-exec"). A forkserver forks from its own clean process; spawn starts a fresh
-    interpreter (Windows has only spawn). `methods` overrides mp.get_all_start_methods() (tests).
+    where the platform has one, else spawn -- NEVER a bare fork, on any OS (`start_method`). A bare
+    fork copies the caller as it is: after the caller created a Unicorn engine the child fails with
+    "Could not allocate dynamic translator buffer" (Linux), and on macOS a fork without exec from a
+    process that loaded system frameworks or runs threads is unsafe. A forkserver forks from its
+    own clean process; spawn starts a fresh interpreter (Windows has only spawn).
     Both re-import the caller's __main__ in the child (as Python's default spawn on macOS and
     Windows already does): a script calling recover() in parallel needs the usual
     `if __name__ == "__main__":` guard. (VALIDATION §86)"""
     import multiprocessing as mp
-    methods = mp.get_all_start_methods() if methods is None else methods
-    if "forkserver" in methods:
-        ctx = mp.get_context("forkserver")
+    ctx = mp.get_context(start_method())
+    if ctx.get_start_method() == "forkserver":
         try:
             ctx.set_forkserver_preload(list(MP_PRELOAD))
         except Exception:          # noqa: BLE001 -- a preload is an optimisation only
             pass
-        return ctx
-    return mp.get_context("spawn")
+    return ctx
 
 
 def _selftest():
     import struct
     # worker processes: forkserver when available, else spawn; never fork
-    assert mp_context(["fork", "spawn", "forkserver"]).get_start_method() == "forkserver"
-    assert mp_context(["fork", "spawn"]).get_start_method() == "spawn"
-    assert mp_context(["spawn"]).get_start_method() == "spawn"
+    assert start_method(["fork", "spawn", "forkserver"]) == "forkserver"     # Linux, macOS
+    assert start_method(["fork", "spawn"]) == "spawn"                        # never fork
+    assert start_method(["spawn"]) == "spawn"                                # Windows
+    assert mp_context().get_start_method() == start_method() != "fork"       # this host
     from unicorn import UC_ARCH_X86, UC_MODE_64, Uc, UC_PROT_READ, UC_PROT_ALL
     from unicorn.x86_const import UC_X86_REG_RIP, UC_X86_REG_RSI, UC_X86_REG_RCX, UC_X86_REG_RSP
     # xor byte [rsi],0x5a ; add byte [rsi],3 ; inc rsi ; dec rcx ; jnz ; ret
