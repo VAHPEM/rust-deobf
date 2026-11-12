@@ -3771,8 +3771,9 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
     parallel_ok = False
     if workers > 1 and len(order) >= PARALLEL_MIN:
         import concurrent.futures as cf
-        # forkserver (engines preloaded), else spawn -- never a bare fork: it aborted children on
-        # macOS and inherits Unicorn state on Linux (emu_backend.mp_context, VALIDATION §86)
+        # forkserver (engines preloaded), else spawn -- never a bare fork: unsafe on macOS once the
+        # caller touched system frameworks, inherits Unicorn state on Linux (emu_backend.mp_context,
+        # VALIDATION §86)
         ctx = mp_context()
         shares = [[f for f, _ in order[i::workers]] for i in range(workers)]
         by_string, tried, runs, timed_out, found = {}, 0, 0, False, set()
