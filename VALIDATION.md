@@ -3743,3 +3743,44 @@ Consequences, reviewed:
 
 **NOT MEASURED:** lab_matrix (Kali, Windows) with this change; the last lab run (943ddda) predates
 it.
+
+## 87. Constructor-decrypted strings: red on Kali, green on macOS by accident (Nov 2026)
+
+`test_hikari_constructor_strings` (§82) was red on ARM64 Kali (lab_matrix, ebd577e: 1 failed /
+774 passed) and green on macOS. Same source (`obf_src/hikari_strenc/hikari_ctor.c`: two XOR'd
+strings in .data, decrypted in place by one constructor).
+
+**Two bugs, measured:**
+1. **ELF (Kali, clang 21.1.8, AArch64 PIE, unicorn 2.1.2):** `constructor_vas()` found both
+   `.init_array` entries (frame_dummy 0x7a0, hikari_decrypt 0x7a8) and priming ran them: S0 read
+   `canary::hikari::config-path-a91f` in emulated memory afterwards. But `prime_constructors`
+   discarded the strings its runs captured and baked the plaintext into the restore baseline. No
+   later run writes it again, and the sweep's own run of hikari_decrypt XORs the primed plaintext
+   back to ciphertext. `recover_emulate.recover`: 0 records; `recover.run`: 0 decoded.
+2. **Mach-O (macOS 15.5, Apple clang, arm64 + x86-64):** ld-prime (Xcode 15+) writes constructors
+   to `__init_offsets` (32-bit offsets from the mach header), not `__mod_init_func`.
+   `constructor_vas()` read only the latter: **0 constructors, priming silently off on current
+   macOS**. The test was green only because of that -- unprimed, the sweep ran hikari_decrypt over
+   ciphertext and captured the plaintext it wrote.
+
+**Fix (recover_emulate):** `prime_constructors` keeps each constructor run's strings
+(`primed_strings`) and `_emulate` collects them before the sweep, attributed to the constructor,
+through the same filters as any run (text-like, not explained by static text). `constructor_vas`
+reads `__init_offsets` (target = the segment at file offset 0 + offset, kept only inside .text).
+
+**After:**
+- Kali: `recover.run` decodes both strings (function 0x7a8 = hikari_decrypt); test_ollvm_shapes
+  4/4.
+- macOS arm64 and x86-64: 1 constructor found (was 0), both strings recovered.
+- `test_hikari_constructor_strings` now also asserts the constructor is found; on macOS that
+  fails on the old code (2 failed).
+- lab_matrix, working tree on top of ebd577e: macOS 15.5 ARM64 (Python 3.12.5) 0 failed / 756
+  passed; Kali ARM64 (Python 3.14.7) 0 failed / 775 passed.
+- `test_emu_equivalence` (golden recover() / explore / unpack outputs on 525 functions + the
+  fixtures) unchanged, so no committed fixture's results moved.
+- `meta_probe` (Mach-O, 2430 functions): 0 constructors, 0 -> 0 strings. That tells nothing about
+  precision on binaries with constructors.
+
+**Not measured:** precision on real binaries with many constructors (C++ static initialisers,
+Rust `ctor`), where constructor-written text not in the file will now be reported; Windows/PE
+(constructors are not replayed there at all); x86-64 ELF and the CI native matrix with this change.

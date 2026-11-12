@@ -251,7 +251,8 @@ class Image:
         (a marker a constructor sets, left 0, poisons a key). Replaying the constructors first
         restores that state. ELF `.init_array`/`.ctors`: a PIE stores each target as the addend of
         a relative relocation on the slot, a non-PIE stores it inline. Mach-O `__mod_init_func`
-        holds pointers already correct at slide 0. (PE CRT constructors are not replayed yet.)"""
+        holds pointers already correct at slide 0; `__init_offsets` (ld-prime) 32-bit offsets from the
+        mach header. (PE CRT constructors are not replayed yet.)"""
         b = self.binary
         ptr = self.ptr
         if self.macho:
@@ -283,6 +284,22 @@ class Image:
             pass
         mask = (1 << (8 * ptr)) - 1
         out = []
+        if self.macho:
+            # ld-prime (Xcode 15+) emits __init_offsets instead of __mod_init_func: 32-bit offsets
+            # from the mach header, no relocation. Unread, the replay was silently off on macOS.
+            try:
+                hdr = min(sg.virtual_address for sg in b.segments
+                          if sg.file_offset == 0 and sg.file_size)
+            except (ValueError, Exception):
+                hdr = 0
+            for s in b.sections:
+                if s.name != "__init_offsets":
+                    continue
+                raw = bytes(s.content)
+                for (off,) in struct.iter_unpack("<I", raw[:len(raw) // 4 * 4]):
+                    target = hdr + off
+                    if off and self.text_va <= target < self.text_end:
+                        out.append(target)
         for s in secs:
             raw = bytes(s.content)
             n = len(raw) // ptr
@@ -1381,6 +1398,7 @@ class Emulator:
         k = img.code.find(b"\xcd\x80\xc3") if img.x32 and not img.pe else -1
         self._vsyscall = BASE + img.text_va + k if k >= 0 else 0
         self._primed = None      # writable-memory baseline after constructor priming (or None)
+        self.primed_strings = []  # (ctor va, strings, exact, used, returned) per primed constructor
         self._primed_heap = None  # (heap_top, heap bytes, sizes) after priming: a ctor's malloc'd
         #                           block and allocator cursor, so later runs do not reuse its address
         self._md_lite = Cs(CS_ARCH_X86, CS_MODE_32 if self.x32 else CS_MODE_64)
@@ -1664,8 +1682,14 @@ class Emulator:
             if time.monotonic() > ctor_deadline:
                 break
             try:
-                self.run(va, 0x4000, budget=CTOR_BUDGET, timeout_us=_CTOR_TIMEOUT_US)
+                strs, _, _ = self.run(va, 0x4000, budget=CTOR_BUDGET, timeout_us=_CTOR_TIMEOUT_US)
                 ran += 1
+                # what it decoded is baked into the baseline below, so no later run WRITES it (and
+                # a sweep re-run of an in-place XOR constructor turns it back into ciphertext):
+                # keep it here, or Hikari-style eager decryption is never reported (VALIDATION §87)
+                if strs:
+                    self.primed_strings.append((va, set(strs), set(self.exact), set(self.used),
+                                                self.returned))
             except Exception:
                 pass
             self._capture_primed()     # keep this ctor's writes for the next ctor and the sweep
@@ -3612,6 +3636,9 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
             if st in exact:
                 rec["exact"] = True        # ... and what followed it in memory was stale
 
+    # strings the loader's constructors decrypted while priming (natural runs: no branch forced)
+    for fva, strs, exact, used, done in emu.primed_strings:
+        collect(fva, strs, strs, exact, used, done)
     # Pass 1, only with a time budget: every function once, unforced, with a small instruction
     # budget, in score order, using at most 40% of the time. A large binary (gdb: 15,760
     # functions, 1,400 of them decoder-like) used to spend the whole budget exploring the first

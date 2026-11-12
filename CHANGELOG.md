@@ -36,6 +36,11 @@ before/after measured, a test that fails on the previous code.
   deliberate `os.abort()` in a fuzz isolation child, not recover. Behaviour change: a script that
   calls `recover()` in parallel needs an `if __name__ == "__main__":` guard, as with Python's
   default spawn (§86).
+- **Strings a global constructor decrypts were never reported** (Hikari/OLLVM-style eager
+  decryption): constructor priming discarded what its runs captured, and on macOS the
+  constructors were not even found -- ld-prime's `__init_offsets` was unread, so the replay was
+  off. Both fixed in `recover_emulate`; the test that was red on Linux now passes on Linux and
+  macOS (§87). **Affects 0.1.0.**
 - `recover_async` found no state machine in a `panic=abort` build (the LTO profiles): 0 of 9 ->
   all but what LLVM inlines into the executor loop (§79).
 - `recover_rust_meta`: remapped registry paths (`--remap-path-prefix`) gave 0 crates (now 14 of

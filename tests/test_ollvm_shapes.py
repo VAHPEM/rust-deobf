@@ -74,7 +74,11 @@ def test_bcf_guards_are_opaque(tmp_path, label, flags, opt):
 @pytest.mark.parametrize("label,flags", _targets())
 def test_hikari_constructor_strings(tmp_path, label, flags):
     import recover
+    import recover_emulate
     exe = _build(tmp_path, HIKARI, "2", flags, "hikari")
+    # the decrypting constructor must be FOUND and replayed (Mach-O ld-prime: __init_offsets);
+    # its strings are reported from the replay, not only from a sweep run over ciphertext (§87)
+    assert recover_emulate.Image(exe).constructor_vas(), label
     res = recover.run(exe, stackstrings=False, literals=False, time_budget=120)
     got = {x["string"] for x in res["decoded"]}
     assert HIKARI_STRINGS <= got, (label, sorted(got))
