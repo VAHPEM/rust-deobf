@@ -26,7 +26,7 @@ run() {
   "$@"
 }
 
-# test files for a module: an explicit map for the ones whose test is not named after the module,
+# test files for a module (space-separated): an explicit map for the ones whose test is not named after the module,
 # then the conventional names (test_<name>.py, minus a recover_/deobf_ prefix).
 tests_for() {
   local name="$1" t
@@ -40,8 +40,9 @@ tests_for() {
     redblue_loop)     echo tests/test_redblue_loop.py; return ;;
     heldout_eval)     echo tests/test_heldout_scoring.py; return ;;
     evaluate_all|measure_fp) echo tests/test_eval_tools.py; return ;;
+    recover_callsite) echo tests/test_static_regressions.py tests/test_recover_callsite_errors.py; return ;;
     recover_apihash|recover_stackstrings|recover_rust_meta|recover_rust_strings|recover_artifacts|\
-    recover_callsite|recover_arm64)
+    recover_arm64)
                       echo tests/test_static_regressions.py; return ;;
   esac
   for t in "tests/test_${name}.py" "tests/test_${name#recover_}.py" "tests/test_${name#deobf_}.py"; do
@@ -106,13 +107,14 @@ case "${1:-gate}" in
       echo "== $script --selftest =="
       run "$PY" "$script" --selftest || rc=1
     fi
-    testfile="$(tests_for "$name")"
-    if [ -n "$testfile" ] && [ -f "$testfile" ]; then
+    found=0
+    for testfile in $(tests_for "$name"); do    # a module may map to several (space-separated)
+      [ -f "$testfile" ] || continue
+      found=1
       echo "== $testfile =="
       run "$PY" -m pytest "$testfile" -q || rc=1
-    else
-      echo "(no test file for $name)"
-    fi
+    done
+    [ "$found" = 1 ] || echo "(no test file for $name)"
     exit "$rc"
     ;;
 esac

@@ -35,6 +35,8 @@ PRINT = set(bytes(string.printable, "ascii")) - set(b"\x0b\x0c")
 
 def load(path):
     b = lief.parse(str(path))
+    if b is None:   # missing, unreadable or not an ELF/PE/Mach-O: say so (was an AttributeError)
+        raise ValueError(f"cannot parse {path} as a binary (missing, unreadable or unknown format)")
     text = next((s for s in b.sections if s.name == ".text"), None)
     if text is None: return None
     return b, bytes(text.content), text.virtual_address
@@ -484,7 +486,7 @@ def recover(path, canaries):
     def func_entry(xaddr):
         i = idx.get(xaddr)
         if i is None: return None
-        for j in range(i, max(0, i-400), -1):
+        for j in range(i, max(-1, i-400), -1):   # -1: insn 0 can be the prologue
             if insns[j].mnemonic == "push" and insns[j].op_str in ("rbp","r15") and j+1<len(insns):
                 # heuristic prologue; good enough to match call targets below
                 # walk further back while still contiguous prologue pushes/sub rsp
@@ -612,9 +614,16 @@ def recover(path, canaries):
             "recovered": sorted(found), "recall": len(found), "n": len(canaries)}
 
 def main():
-    man = json.loads((ROOT/"bench_src"/"manifest.json").read_text()); can = man["canaries"]
+    if "--selftest" in sys.argv[1:]:
+        return _selftest()
     as_json = "--json" in sys.argv
     targets = [a for a in sys.argv[1:] if a != "--json"]
+    unknown = [a for a in targets if a.startswith("--")]
+    if unknown:     # a flag must never be taken for a target path (and overwrite the results file)
+        print(f"unknown option(s): {' '.join(unknown)}\n"
+              "usage: recover_callsite.py [--json] [binary ...] | --selftest", file=sys.stderr)
+        return 2
+    man = json.loads((ROOT/"bench_src"/"manifest.json").read_text()); can = man["canaries"]
     if not targets:
         targets = [f"build/xor_custom__{f}__{p}__{s}" + (".exe" if f=="pe" else "")
                    for f in ("elf","pe") for p in ("debug","release") for s in ("nostrip","strip")]
@@ -654,6 +663,92 @@ def _resolve_target(t) -> Path:
     if p.is_absolute() or p.exists():
         return p
     return ROOT / p
+
+def _selftest_elf(key: bytes, plains: list, pad: int = 16) -> bytes:
+    """A minimal x86-64 ELF (sections only, no segments: it is parsed, never run) holding one
+    repeating-key XOR decoder -- `and eax, keylen-1` + `xor r8b, [r9+rax]` with the key from a
+    `lea r9, [rip+key]` -- and one SysV call site per ciphertext (`lea rsi` blob, `mov edx` len)."""
+    import struct
+    TEXT, RODATA = 0x1000, 0x2000
+    blobs = [bytes(b ^ key[i % len(key)] for i, b in enumerate(p)) for p in plains]
+    rodata = key + b"".join(blobs) + bytes(64)          # + 64 bytes of output buffer
+    out_va = RODATA + len(rodata) - 64
+    blob_va, va = [], RODATA + len(key)
+    for b in blobs:
+        blob_va.append(va); va += len(b)
+
+    def rel32(at_end, target):
+        return struct.pack("<i", target - at_end)
+
+    t = bytearray(b"\xcc" * pad)                        # int3 padding before the decoder
+    dec_va = TEXT + len(t)
+    t += b"\x55\x48\x89\xe5\x31\xc9"                    # push rbp; mov rbp,rsp; xor ecx,ecx
+    loop = len(t)
+    t += b"\x89\xc8" + b"\x83\xe0" + bytes([len(key) - 1])  # mov eax,ecx; and eax,keylen-1
+    t += b"\x44\x0f\xb6\x04\x0e"                          # movzx r8d, byte [rsi+rcx]
+    t += b"\x4c\x8d\x0d"; t += rel32(TEXT + len(t) + 4, RODATA)   # lea r9, [rip+key]
+    t += b"\x45\x32\x04\x01"                              # xor r8b, byte [r9+rax]
+    t += b"\x44\x88\x04\x0f"                              # mov [rdi+rcx], r8b
+    t += b"\x48\xff\xc1\x48\x39\xd1"                      # inc rcx; cmp rcx,rdx
+    t += b"\x72" + struct.pack("<b", loop - (len(t) + 2))  # jb loop
+    t += b"\x5d\xc3"                                      # pop rbp; ret
+    t += b"\x53"                                          # caller: push rbx
+    for bva, p in zip(blob_va, plains):
+        t += b"\x48\x8d\x3d"; t += rel32(TEXT + len(t) + 4, out_va)   # lea rdi, [rip+out]
+        t += b"\x48\x8d\x35"; t += rel32(TEXT + len(t) + 4, bva)      # lea rsi, [rip+blob]
+        t += b"\xba" + struct.pack("<I", len(p))                      # mov edx, len
+        t += b"\xe8"; t += rel32(TEXT + len(t) + 4, dec_va)           # call decoder
+    t += b"\x5b\xc3"                                      # pop rbx; ret
+
+    shstr = b"\0.text\0.rodata\0.shstrtab\0"
+    off_text = 0x40
+    off_ro = off_text + len(t)
+    off_sh = off_ro + len(rodata)
+    off_shdr = (off_sh + len(shstr) + 7) & ~7
+    ehdr = (b"\x7fELF\x02\x01\x01" + bytes(9)
+            + struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, TEXT, 0, off_shdr, 0, 64, 56, 0, 64, 4, 3))
+
+    def shdr(name, typ, flags, addr, off, size, align):
+        return struct.pack("<IIQQQQIIQQ", name, typ, flags, addr, off, size, 0, 0, align, 0)
+    shdrs = (bytes(64) + shdr(1, 1, 6, TEXT, off_text, len(t), 16)
+             + shdr(7, 1, 2, RODATA, off_ro, len(rodata), 1)
+             + shdr(15, 3, 0, 0, off_sh, len(shstr), 1))
+    img = ehdr + bytes(t) + rodata + shstr
+    return img + bytes(off_shdr - len(img)) + shdrs
+
+
+def _selftest():
+    import tempfile
+    lief.logging.disable()
+    key = b"\x5a\x13\xc7\x2e\x91\x4b\x08\xe6"
+    plains = [b"hello from the call-site selftest", b"a second string decoded by the same key"]
+    with tempfile.TemporaryDirectory() as d:
+        elf = Path(d) / "xor_decoder.elf"
+        elf.write_bytes(_selftest_elf(key, plains))
+        r = recover(elf, ["call-site selftest", "second string"])
+        assert r["decoders"] == 1, r
+        got = sorted(rec["string"] for rec in r["records"])
+        assert got == sorted(p.decode() for p in plains), got
+        assert r["recall"] == 2 and all(rec["decoder"] == 0x1010 for rec in r["records"]), r
+        # a decoder that is the very first instruction of .text (func_entry used to skip insn 0)
+        elf.write_bytes(_selftest_elf(key, plains, pad=0))
+        assert recover(elf, [])["records"] and recover(elf, [])["records"][0]["decoder"] == 0x1000
+        # one call site is not corroboration: a lone clean decode is not reported
+        elf.write_bytes(_selftest_elf(key, plains[:1]))
+        assert recover(elf, [])["records"] == [], "single call site must not be reported"
+        # an input LIEF cannot parse is a clear error, not an AttributeError
+        bad = Path(d) / "not_a_binary.txt"
+        bad.write_bytes(b"this is not a binary\n")
+        for p in (bad, Path(d) / "missing.bin"):
+            try:
+                load(p)
+                raise AssertionError(f"load({p.name}) did not fail")
+            except ValueError as e:
+                assert "cannot parse" in str(e), e
+    print("selftest OK: XOR decoder + key (and/lea-rip idiom) found, 2/2 call-site strings "
+          "decoded, lone call site rejected, unparseable/missing input -> clear error")
+    return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
