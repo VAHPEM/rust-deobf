@@ -8,6 +8,8 @@ distributions always share one version.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-13
+
 Coverage of more obfuscation techniques (VALIDATION §79-§85). Each item: a benign fixture,
 before/after measured, a test that fails on the previous code.
 
@@ -53,6 +55,13 @@ before/after measured, a test that fails on the previous code.
 - `recover.run` names an architecture it does not emulate (`ELF/riscv`, not `ELF/?`), says
   "WebAssembly module" for a wasm input, and gives the dynamic-analysis hint only when emulation
   actually ran (§85).
+
+### Known limitations
+- **Windows / Portable Executable (PE): global constructors are not replayed**, so a string that a
+  constructor decrypts in place is not recovered on PE (ELF and Mach-O do replay constructors; §87).
+- **Rust `ctor`-crate binaries: measured on ELF AArch64 only** (constructor found, both strings
+  recovered, no false strings; §88). x86-64 ELF, Mach-O and PE for the `ctor` crate specifically are
+  not yet in the measured matrix.
 
 ## [0.1.0rc2] - 2026-11-11
 
