@@ -1,0 +1,18 @@
+[package]
+name = "rust_ctor"
+version = "0.1.0"
+edition = "2021"
+
+# benign: see src/main.rs. Depends on the `ctor` crate (the real-world Rust constructor path).
+[dependencies]
+ctor = "0.2"
+
+[profile.release]
+opt-level = 3
+
+[profile.size-lto]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

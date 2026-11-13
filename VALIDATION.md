@@ -3806,5 +3806,37 @@ upx-ucl's two strings are junk (`/4/4/4/73737373`, `lCvCvevevev...`) and hit the
 depend on the time-bounded second pass, not on this change: the first pair of runs gave 2 -> 0, a
 rerun 2 -> 2. No constructor-written text was added on any of the five.
 
-**Not measured:** Rust `ctor`-crate binaries; Windows/PE (constructors are not replayed there at
-all); the CI native matrix with this change.
+**Not measured (see §88):** Rust `ctor`-crate binaries -- now ELF AArch64 measured (§88); x86-64
+ELF, Mach-O and PE for the `ctor` crate not yet. Windows/PE: constructors are not replayed there at
+all. The CI native matrix with this change.
+## 88. Rust `ctor`-crate binary: constructor-decrypted strings recovered on ELF AArch64 (Nov 2026)
+
+New benign fixture `obf_src/rust_ctor` (Rust counterpart of `hikari_ctor.c`): two canary strings
+sit XOR-encrypted in a mutable `static` (.data) and one `#[ctor]` constructor (the `ctor` crate --
+the real-world Rust path) decrypts them in place before `main`. The §87 fix was measured on
+hand-written C and on system binaries; this closes the "Rust `ctor`-crate binaries" gap §87 left,
+for ELF AArch64.
+
+**Build (bridge Ubuntu aarch64, rustc 1.100.0, ctor 0.2.9, release, stripped):** the plaintext is
+absent from the binary (`strings | grep -c canary` = 0), so a static scan recovers nothing; only a
+constructor replay reaches it.
+
+**Measured (unicorn 2.1.4, lief 1.0.0, capstone 5.0.7; `recover.run(exe, stackstrings=False,
+literals=False, time_budget=120)`):**
+- `recover_emulate.Image(exe).constructor_vas()` -> 5 constructors, including 0x8730 (the Rust
+  `#[ctor]` function).
+- `decoded`: exactly 2 records, both attributed to function 0x8730, `method="emulation"`:
+  `canary::rustctor::string-one::7f3a` and `canary::rustctor::string-two::9d21`. Precision clean:
+  2 of 2, 0 false strings.
+
+**Reproduce:**
+
+    cd obf_src/rust_ctor && CARGO_TARGET_DIR=/tmp/rc cargo build --release
+    strip -o /tmp/rc_elf /tmp/rc/release/rust_ctor
+    python3 -c "import sys; sys.path.insert(0,'scripts'); import recover; \
+    print([d['string'] for d in recover.run('/tmp/rc_elf', stackstrings=False, literals=False, time_budget=120)['decoded']])"
+
+**Not measured here:** x86-64 ELF, Mach-O and PE for the `ctor` crate (the bridge VM has no clang /
+mingw / macOS cross-toolchain); PE constructors are not replayed at all (§87). `build_obf.sh` builds
+`rust_ctor` across elf / pe / elf-arm64 like any fixture, so the lab/CI matrix exercises those
+targets' *builds*; the emulation precision above is the ELF AArch64 figure.
