@@ -31,9 +31,8 @@ but some target was NOT MEASURED; 2 usage error; 130 interrupted (running jobs a
 
 labhand (the lab-control package, formerly dualvm) is imported lazily (only for kali/win): install
 it (`pip install -e <labhand checkout>`) or point --labhand-path / $LABHAND_PATH at its checkout
-(the pre-rename --dualvm-path / $DUALVM_PATH still work; a checkout from before the rename that
-only has `dualvm` is used too). Needs a git checkout of this repo (source-only:
-not shipped in the wheel).
+(the pre-rename --dualvm-path / $DUALVM_PATH still work). Needs a git checkout of this repo
+(source-only: not shipped in the wheel).
 """
 import argparse
 import hashlib
@@ -527,10 +526,7 @@ def _labhand(path=None):
     if p and p not in sys.path:
         sys.path.insert(0, p)
     try:
-        try:
-            from labhand import jobs, remote, shell   # noqa: PLC0415 (optional, lab only)
-        except ImportError:                           # a checkout from before the rename
-            from dualvm import jobs, remote, shell    # noqa: PLC0415
+        from labhand import jobs, remote, shell       # noqa: PLC0415 (optional, lab only)
     except Exception as e:                            # ImportError, or a broken host inventory
         raise LabError(f"labhand unavailable ({type(e).__name__}: {e})") from None
     return jobs, remote, shell
