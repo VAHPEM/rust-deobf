@@ -542,7 +542,7 @@ The CI job on GitHub's runner (other versions of these programs) measured 32 on 
 <summary><b>Second machine, second toolchain</b></summary>
 
 Everything was re-run outside the development container, on the two ARM64 VMs driven by
-[labhand](https://github.com/VAHPEM/dual-vm-ai-agent) (formerly dualvm):
+[labhand](https://github.com/VAHPEM/labhand) (formerly dualvm):
 
 - **Kali Linux, rustc 1.99.1** (current stable): both suites rebuilt for PE, AArch64 musl and a
   new target, **AArch64 glibc** (dynamically linked, the default Linux target), every profile.
