@@ -252,13 +252,14 @@ class Image:
         restores that state. ELF `.init_array`/`.ctors`: a PIE stores each target as the addend of
         a relative relocation on the slot, a non-PIE stores it inline. Mach-O `__mod_init_func`
         holds pointers already correct at slide 0; `__init_offsets` (ld-prime) 32-bit offsets from the
-        mach header. (PE CRT constructors are not replayed yet.)"""
+        mach header. PE (MinGW): the `__CTOR_LIST__` the linker script places inside `.text`
+        (`_pe_ctor_list`); returned as RVAs, like every PE address here."""
         b = self.binary
         ptr = self.ptr
         if self.macho:
             secs = [s for s in b.sections if s.name == "__mod_init_func"]
         elif self.pe:
-            secs = []
+            return self._pe_ctor_list()
         else:
             rank = {".init_array": 0, ".ctors": 1}
             secs = sorted((s for s in b.sections if s.name in rank), key=lambda s: rank[s.name])
@@ -312,6 +313,55 @@ class Image:
                 if self.text_va <= target < self.text_end:   # a real code address, not a data ptr
                     out.append(target)
         return out
+
+    def _pe_ctor_list(self):
+        """MinGW's global constructors, as RVAs in the order `__do_global_ctors` runs them.
+
+        MinGW-w64's default PE linker script has no section of its own for the constructor table:
+        `__CTOR_LIST__ = .; (-1); *(.ctors) *(.ctors.*); (0);` immediately followed by
+        `__DTOR_LIST__ = .; (-1); *(.dtors) ...; (0)` (pointer-sized words; i686 too). GNU ld up to
+        2.41 (Ubuntu 24.04) emits it inside `.text`; 2.47 (MSYS2 / Arch, Nov 2026) inside `.rdata`
+        -- so executable sections are searched first, then the other loaded, non-debug sections.
+        Each slot holds an ABSOLUTE VA (ImageBase + RVA, base-relocated) -- with x86-64's default
+        ImageBase 0x140000000 a slot read as an RVA lands far outside the image, so subtract
+        `self.imagebase`. The symbol is gone in a stripped image, so the table is found by that
+        layout: -1, ptrs to code, 0, then the -1 that opens the DTOR list; where the image has
+        base relocations, every pointer slot must carry one (the loader patches them). The CRT
+        calls the list from the last entry back to the first; that order is returned."""
+        ptr, ib = self.ptr, self.imagebase
+        mask = (1 << (8 * ptr)) - 1
+        fmt = "<I" if ptr == 4 else "<Q"
+        relocs = set()
+        try:
+            for blk in self.binary.relocations:
+                for e in blk.entries:
+                    if str(e.type).endswith(("DIR64", "HIGHLOW")):
+                        relocs.add(e.address)
+        except Exception:
+            relocs = set()
+        ones = b"\xff" * ptr
+        word = struct.Struct(fmt)
+        others = sorted((s.virtual_address, s.virtual_address + len(s.content))
+                        for s in self.binary.sections
+                        if s.virtual_address and len(s.content) and not self._exec_sec(s)
+                        and not str(s.name).startswith((".debug", ".reloc")))
+        for lo, hi in sorted(self.exec_ranges) + others:
+            data = self.read_any(lo, hi - lo)
+            p = data.find(ones)              # any offset: the script aligns it, do not depend on it
+            while p >= 0:
+                q, found = p + ptr, []
+                while q + ptr <= len(data):
+                    (v,) = word.unpack_from(data, q)
+                    if v in (0, mask) or not (self.executable(v - ib)
+                                              and (not relocs or lo + q in relocs)):
+                        break
+                    found.append(v - ib)
+                    q += ptr
+                if (found and data[q:q + ptr] == bytes(ptr)
+                        and data[q + ptr:q + 2 * ptr] == ones):
+                    return found[::-1]
+                p = data.find(ones, p + 1)
+        return []
 
     def _code_fallback(self, b):
         """The executable section (or, with no section table, the executable ELF segment) that holds

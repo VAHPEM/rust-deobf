@@ -104,3 +104,25 @@ def test_selftest_writes_nothing_under_build():
     assert out.returncode == 0, out.stdout + out.stderr
     assert "selftest OK" in out.stdout
     assert _results_state() == before
+
+
+@pytest.mark.parametrize("kind", ["directory", "device"])
+def test_non_file_never_reaches_parser_bad_alloc(tmp_path, monkeypatch, kind):
+    """Root cause of the Linux-only `MemoryError: std::bad_alloc` (CI selftest, lief 1.0.0):
+    LIEF opens a directory as a stream on Linux, takes its seek-to-end offset (~2**63) for the
+    file size and allocates it; on macOS the same call returns None. A path that is not a regular
+    file must be refused BEFORE the native parser, on every platform -- so the parser is replaced
+    by one that fails the way Linux does, and must never be called."""
+    import recover_callsite
+    if kind == "device":
+        target = os.devnull                      # a character device: no file size either
+        if not os.path.exists(target) or os.path.isfile(target):
+            pytest.skip(f"{target} is not a device here")
+    else:
+        target = tmp_path
+
+    def native_parse(path, *a, **k):
+        raise MemoryError("std::bad_alloc")      # what lief.parse(<directory>) does on Linux
+    monkeypatch.setattr(recover_callsite.lief, "parse", native_parse)
+    with pytest.raises(ValueError, match="cannot parse"):
+        recover_callsite.load(target)

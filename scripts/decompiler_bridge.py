@@ -639,15 +639,21 @@ class HttpClient:
         q = urllib.parse.urlencode(query) if query else ""
         return urllib.parse.urlunsplit((u.scheme, u.netloc, p, q, ""))
 
+    def _throttle(self):
+        """Space requests at least `min_interval` apart. perf_counter, not monotonic: Windows'
+        time.monotonic ticks every ~15.6 ms, so a gap that straddles a tick read up to one tick
+        long and the limiter slept that much too little (0.188 s for 4 gaps of 0.05 s, CI)."""
+        if self.min_interval:
+            now = time.perf_counter()
+            if self._last is not None and now - self._last < self.min_interval:
+                time.sleep(self.min_interval - (now - self._last))
+            self._last = time.perf_counter()
+
     def request(self, method: str, path: str | None, params: dict | None = None,
                 json_body=None, headers: dict | None = None):
         """-> (status, headers, body bytes). Form-encodes POST params (UTF-8), puts GET params in
         the query string. Raises BridgeError(EXIT_BACKEND) when the server cannot be reached."""
-        if self.min_interval:
-            now = time.monotonic()
-            if self._last is not None and now - self._last < self.min_interval:
-                time.sleep(self.min_interval - (now - self._last))
-            self._last = time.monotonic()
+        self._throttle()
         hdrs = dict(headers or {})
         data = None
         if json_body is not None:
