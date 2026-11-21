@@ -95,6 +95,13 @@ def test_budget_exhaustion_is_not_reported_as_return(tmp_path, monkeypatch):
     assert res["stopped"] == "budget", res["stopped"]
 
 
+def test_hlt_is_reported_as_hlt_not_budget(tmp_path):
+    # glibc's _start ends `call __libc_start_main; hlt`: a run ending there stopped after a few
+    # instructions and was reported as "budget" (as if the instruction budget had run out)
+    res = U.recover(_write(tmp_path, "hlt.elf", mkelf(b"\x90\x90\xf4\xcc")[0]))   # nop; nop; hlt
+    assert res["stopped"] == "hlt", res["stopped"]
+
+
 def test_code_run_then_overwritten_is_not_unpacking(tmp_path):
     # 16 nops run, then `rep stosb` wipes those already-executed bytes, then ret: no byte runs AFTER
     # being written, so nothing was unpacked
@@ -205,3 +212,67 @@ def test_rust_written_packer_stage2_is_carved():
         ({k: res.get(k) for k in ("stopped", "oep")}, [r["_bytes"][:16].hex() for r in carved])
     assert res["oep"] == carved[0]["va"]
     assert "VirtualAlloc" in res["import_calls"]
+
+
+GLIBC_ELF = ROOT / "tests" / "fixtures" / "deflatten" / "rustcloak_tree.x64"   # gcc, glibc, dynamic
+
+
+def test_glibc_libc_start_main_runs_main():
+    # every glibc ELF's _start ends in __libc_start_main(main, argc, argv, ...), which never
+    # returns. It used to return 0, leaving _start at its `hlt`: the run stopped after one import
+    # and no program code (a Rust-written packer's stub on x86-64 glibc, test_obf) ever ran.
+    up = U._Unpacker(U.Image(GLIBC_ELF))
+    up.run(up.img.binary.entrypoint - up.img.imagebase)
+    assert up.stopped == "exit", up.stopped
+    assert up.import_calls[0] == "__libc_start_main" and "puts" in up.import_calls, up.import_calls
+    assert up.import_calls[-1] == "libc.so.6!exit"           # main returned into exit()
+    tp = up.uc.reg_read(U.X.UC_X86_REG_FS_BASE)              # thread pointer for std's TLS reads
+    assert tp and struct.unpack("<Q", bytes(up.uc.mem_read(tp, 8)))[0] == tp
+
+
+def _call_import(up, api, *args):
+    regs = [U.X.UC_X86_REG_RDI, U.X.UC_X86_REG_RSI, U.X.UC_X86_REG_RDX]
+    for r, v in zip(regs, args):
+        up.uc.reg_write(r, v)
+    sp = U.STACK + U.STACK_SIZE - 0x1000
+    up.uc.mem_write(sp, struct.pack("<Q", 0x1234))
+    up.uc.reg_write(up.SP, sp)
+    up._import(api, api)
+    assert up.uc.reg_read(up.PC) == 0x1234
+    return up.uc.reg_read(U.X.UC_X86_REG_RAX)
+
+
+def test_libc_memory_imports_do_the_work_and_count_as_writes():
+    # a glibc Rust program calls memcpy/memset/sysconf through the PLT; returning 0 handed std a
+    # NULL destination and uncopied data (std then panicked before main). A model's copy is also a
+    # write the unpacker must see: code copied by libc memcpy and then run is unpacked code.
+    up = U._Unpacker(U.Image(GLIBC_ELF))
+    src, dst = U.HEAP + 0x10, U.HEAP + 0x2ffc               # dst straddles a page boundary
+    up.uc.mem_write(src, b"\x90" * 40 + b"\xc3")
+    assert _call_import(up, "memcpy", dst, src, 41) == dst
+    assert bytes(up.uc.mem_read(dst, 41)) == b"\x90" * 40 + b"\xc3"
+    assert all(up._written(dst + i) for i in range(41)) and not up._written(dst + 41)
+    assert _call_import(up, "memset", src, 0x41, 3) == src
+    assert bytes(up.uc.mem_read(src, 4)) == b"AAA\x90"
+    assert _call_import(up, "sysconf", 30) == 0x1000         # _SC_PAGESIZE
+    assert _call_import(up, "memcmp", src, dst, 3) != 0
+    assert _call_import(up, "strlen", src) == 41            # "AAA", 37 NOPs, ret, then zeroed heap
+
+
+def test_process_stack_does_not_depend_on_host_path(tmp_path):
+    # AT_EXECFN / argv[0] used to be the sample's resolved host path, so every address on the
+    # initial stack (and a glibc program's stack-derived values, e.g. an import slot) moved with
+    # the checkout's path length: the emu-equivalence golden differed between machines.
+    data = GLIBC_ELF.read_bytes()
+    short = tmp_path / "a" / "s.x64"
+    deep = tmp_path / ("d" * 57) / ("e" * 31) / "s.x64"
+    outs = []
+    for p in (short, deep):
+        p.parent.mkdir(parents=True)
+        p.write_bytes(data)
+        up = U._Unpacker(U.Image(p))
+        sp = up._process_stack(up.img.binary.entrypoint)
+        argv0 = struct.unpack("<Q", bytes(up.uc.mem_read(sp + 8, 8)))[0]
+        outs.append((sp, argv0, bytes(up.uc.mem_read(argv0, 16))))
+    assert outs[0] == outs[1], outs
+    assert outs[0][2].startswith(b"/sample/s.x64\0")

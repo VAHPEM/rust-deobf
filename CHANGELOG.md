@@ -8,6 +8,40 @@ distributions always share one version.
 
 ## [Unreleased]
 
+### Added
+- `recover.run` reports a compressed stream that is one whole JSON/XML/HTML document under
+  `compressed_documents` (plus a note) instead of splitting it into "decoded" lines (§89).
+
+### Fixed
+- **rustc 1.100** (§89): `recover_libfuncs` picks signature groups by toolchain identity (release
+  and/or commit), so a stripped binary of a rustc newer than `rust_versions.json` matches its
+  reference / per-binary DB again (0 functions identified before); short AArch64 data accessors
+  (1.100's `type_id`) no longer name a function alone; std's vendored crates under
+  `/cargo/registry/<16 hex>/` are not reported as the author's source files. `rust_versions.json`
+  gains 1.100.0.
+- **Precision** (§89, CI corpus 805 -> 0 false positives): compressed DWARF is not inflated as
+  strings; the emulator no longer captures text stored into read-only data or NULL-based pages, and
+  its static-text filter recognises emulator-made values (clock, CPUID vendor, its own pointers,
+  zeros, hashes, temp-file names), static data read word by word, and static text joined or
+  mutated at run time.
+- **Precision on the Ubuntu 26.04 runner** (§91; `ubuntu-latest` moved to 26.04):
+  a PIE's loader metadata at address 0 (.interp, notes, .dynsym) reads as zeros in emulation like
+  any other NULL-based page; consecutive static strings rewritten character by character, and a
+  string table copied in long blocks out of order, are recognised as static; an emulator pointer
+  printed as a decimal integer and a counter stored word by word are not decoded text.
+- `gen_rust_versions.py` no longer overwrites the table after a failed (offline) fetch; it exits 1.
+- `unpack_emulate` runs glibc programs past `_start` (§90): `__libc_start_main` calls `main` with
+  the process stack's argc/argv/envp and a thread pointer, and libc's `mmap` / `write` / memory
+  primitives (`memcpy` ... `strlen`, `sysconf`) are modelled -- before, every glibc ELF stopped at
+  `_start`'s `hlt`, so a Rust-written packer on x86-64 glibc was never followed to its stage-2.
+  A run ending on `hlt` reports `stopped="hlt"` (was "budget").
+  The emulated process sees its own path as `/sample/<name>` (AT_EXECFN, argv[0], readlink of
+  `/proc/self/exe`), not the host path: the path's length moved every initial-stack address, so
+  results depended on the checkout location.
+- `tests/test_obf.py` asserts `rust_ctor`'s constructor-decrypted strings on ELF (its
+  `expected.json` has no `strings`: KeyError on every format); PE skips them (constructors are
+  not replayed there, §87).
+
 ## [0.2.0] - 2026-11-13
 
 Coverage of more obfuscation techniques (VALIDATION §79-§85). Each item: a benign fixture,

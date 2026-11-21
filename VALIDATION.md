@@ -3840,3 +3840,184 @@ literals=False, time_budget=120)`):**
 mingw / macOS cross-toolchain); PE constructors are not replayed at all (§87). `build_obf.sh` builds
 `rust_ctor` across elf / pe / elf-arm64 like any fixture, so the lab/CI matrix exercises those
 targets' *builds*; the emulation precision above is the ELF AArch64 figure.
+
+## 89. rustc 1.100.0: library functions and source paths drifted; the precision job made green (Nov 2026)
+
+The weekly benchmark (CI 43869999822, `rustc 1.100.0 (0ef1bc386 2026-11-09)`, was 1.99.1) failed on
+all five formats: `test_libfuncs.py:66` (0 library functions identified: elf-arm64, pe),
+`test_libfuncs.py:132` (per-binary DB `(0, 0)`: elf, elf-arm64gnu, pe, pe32) and
+`test_benchmark.py:156` (own source files = std's vendored crates). The `precision` job
+(continue-on-error) reported 805 false positives.
+
+**What changed in 1.100 and the fixes (reproduced in an ubuntu:24.04 linux/amd64 container with
+rustup 1.100.0 and the targets/linkers ci.yml installs):**
+- **Toolchain key.** `rust_versions.json` ended at 1.99.1, so a stripped 1.100 binary was known only
+  by its commit (`commit-0ef1bc386059`, from `/rustc/<hash>/` paths) while its unstripped reference
+  (`.comment` names the release) and gen_sigdb's per-binary DB were `rustc-1.100.0`;
+  `match_binary` compared key strings and consulted no signature. It now compares toolchain
+  **identity** (version and/or commit, `gen_sigdb.match_quality`); `generate()` records each
+  group's version and commit (`__toolchains__`), gen_sigdb's `__meta__.built` is read the same
+  way. The table was also refreshed (`gen_rust_versions.py`: +1.100.0, no other entry changed),
+  but recovery no longer depends on it being current.
+- **AArch64 `type_id`.** 1.100 loads the 128-bit TypeId from .rodata
+  (`adrp x9; add x9, x9, :lo12:; ldr q0, [x9]; str q0, [x8]; ret`), identical for every `T` once
+  the page address is masked; a StringError signature named `core::any::Any::type_id` in another
+  program. A whole-function AArch64 pattern of <= 24 bytes with a masked word no longer names a
+  start alone. Measured, 4 directed pairs x 5 formats: 0 wrong, 0 at non-functions; correct elf
+  276-281, pe 975-978, elf-arm64 268-271, elf-arm64gnu 252-258, pe32 1378-1382.
+- **std's vendored crates** moved from `/rust/deps/<crate>-<ver>/` to
+  `/cargo/registry/<16 hex>/<crate>-<ver>/`; `RE_STD_DEP` (and soc_triage's benign filter)
+  classify both; a user's `~/.cargo/registry/src/<index>-<hash>/` checkout is not matched.
+
+**Benchmark step (`test_benchmark` + `test_scatter` + `test_libfuncs` +
+`test_formats::test_detect_64bit_still_emulates` + `test_soc_triage`), rustc 1.100 builds, amd64
+container, per-format build view, `RUST_DEOBF_REQUIRE_BUILD=<fmt>`:** elf 128 passed, pe 125,
+elf-arm64 123, elf-arm64gnu 76, pe32 110 -- 0 failed each.
+
+**Obfuscation step (`build_obf.sh` + `test_obf.py`; elf / pe / elf-arm64):** builds OK, tests
+4 / 2 / 2 failed -- NOT caused by 1.100: `rust_ctor/expected.json` has no `strings` key (KeyError on
+every format) and the x86-64 glibc `rust_packer` stops at `__libc_start_main`, which
+unpack_emulate does not model. Both fixtures came after the last green CI run (b227bfb ran only
+goldberg_cff) and the obf step never ran since (the benchmark step failed first); recorded as a
+separate problem.
+
+**Precision job (`measure_fp.py --pipeline --corpus --time-budget 60`).** Reproduced in an
+ubuntu:24.04 linux/amd64 container that mirrors the GitHub runner's corpus: apt's C tools, docker
+28.0.4, kubectl 1.37.2, gh 2.103.3, go 1.24.13 and rustup 1.99.1 (the runner image's toolchain:
+rustfmt/cargo-fmt/cargo/rustdoc are its real binaries); same `pip install` (unicorn 2.1.4,
+lief 1.0.0). cargo-fmt's 5 FPs reproduced byte for byte. CI 43869999822: 805 FP. Causes, each
+fixed where it arises (regression tests `tests/test_ci_fp.py`: 30 fail on the base code, all pass):
+- **compressed DWARF** (docker 653, rustfmt 70): the compressed-strings engine (§80) inflated
+  `.debug_*`/`.zdebug_*`/SHF_COMPRESSED sections -- valid, checksummed zlib. Debug spans skipped.
+- **a gzip'd document** (kubectl 50): kustomize's OpenAPI schema split into lines. A stream that is
+  one whole JSON/XML/HTML document is reported under `compressed_documents`.
+- **stores a real process cannot make** (cargo-fmt `ptions]...`): a PIE is mapped at its own VAs,
+  so clap's usage text "written" at 0x10 landed in `.interp`/`.dynsym`. Text stored into read-only
+  data sections or NULL-based on-the-fly pages is not captured (emu golden regenerated: only such
+  captures disappear).
+- **static data read word by word** (cargo-fmt, 4): std's backtrace symbolizer on a forced path
+  read the first 8 bytes of each slot of a .rodata string table; forwards, 0x10-0x18 apart, and
+  over 160 characters (where only 16-byte windows were tried).
+- **emulator-made values**: the clock (`session \`19700101T000000000Z-\``, later a TSC-derived
+  `19701122T063448000Z`), the CPUID vendor id (`GenuntelineI`), emulated stack pointers
+  (`entersyscall inconsistent sp 0x0 [..,0x7f00000ffaf8]`), zeros (`Ints: 0 0 0`, `0.0.0.0:0`),
+  a hash in a template (`metabuild--2f7afcdcf57ab8e9.rs`), tempfile's 6 random characters
+  (`@/tmp/cargo-argfile.ANmKoZ`).
+- **static text joined or mutated at run time**: path components (`lib/rustlib/src/rust/`),
+  identifiers (`File/Glob.pm`, `SV_YES:UNDEF`, `print/prolog.ps`), scattered bit flips over
+  .dynstr names (`OYObject_CallFwnctionOcj@Rgs`: every 4-byte anchor and the aligned suffix are
+  tried now), short copies of `.interp` with 3 bytes changed (`LIninux-`), and the rest of a
+  function whose forced outputs were mostly explained as static (`PyGIL\`EmSure`).
+Recall is unchanged: the benchmark step was re-run on all five formats with the final code
+(below).
+
+**Final measurements (code as committed):**
+- Precision, the CI command unchanged (`RUST_DEOBF_FP_STRICT=1`), amd64 mirror container:
+  **21/21 binaries with zero FP, 0 FP total, exit 0** (gdb 3144, cmake 5912, docker 6314, cargo 7303
+  functions emulated within the budgets -- cargo more than CI's 2698). A linux/arm64-hosted run at
+  `--time-budget 120` (more functions everywhere, cargo 18330) found only git `ll_Poion` /
+  `ll_poion`, which the base code produces as well and which appear only in some runs (a
+  wall-clock-bound function), and the temp names now handled.
+- Recall, benchmark step on all five 1.100 formats with the final code (linux/arm64-hosted
+  analysis of the amd64-built binaries): elf 125, pe 122, elf-arm64 120, pe32 107, elf-arm64gnu
+  73 passed -- the same counts as before the precision work; re-run in the amd64 container with
+  the final code: 128/125/123/76/110 passed, 0 failed (these include the cargo-dependent libfuncs
+  tests).
+- Fast subset: macOS arm64 838 passed (this run caught a Mach-O regression of the read-only-page
+  rule -- Mach-O section flags are not SHF_WRITE; it now reads the segment's protection, with a
+  test). In the amd64 container 839 passed; 3 tests fail there on the base code too (Rosetta
+  cannot run LIEF on a directory: SIGTRAP / "could not find free space for allocation"; PID 1 is
+  not an init, so a killed grandchild stays a zombie) and pass on macOS and natively.
+- `gen_rust_versions.py` run offline used to write `{}` over the table; it now exits 1 and keeps
+  it (tests stub the fetch).
+
+**Not measured here:** the GitHub runner itself (its git/cmake builds differ from the mirror's:
+3530/13222 KB vs 3077/9318 KB `.text`); Windows/macOS runners for the benchmark (CI runs it on
+Linux only).
+
+## 90. CI obf step on rustc 1.100: glibc programs run past `_start`; rust_ctor asserted where measured (Nov 2026)
+
+With §89 the benchmark step goes green, so the next step of the same job, the obf step
+(`FORMATS=<f> obf_src/build_obf.sh` + `tests/test_obf.py`), runs for the first time since
+`rust_ctor` / `rust_packer` were added (§83, §88; the last green CI ran only goldberg_cff). On the
+rustc 1.100 builds (ubuntu:24.04 linux/amd64 container) it failed: elf 4, pe 2, elf-arm64 2. Not a
+1.100 drift; two separate gaps:
+- `rust_ctor/expected.json` lists its two canaries under `constructor_decoded` (no `strings`):
+  `test_obf_strings` raised KeyError on every format. It now asserts `strings` plus
+  `constructor_decoded` on ELF (replayed from `.init_array`, §87/§88) and skips PE with the reason
+  (PE constructors are not replayed, §87).
+- `rust_packer` on x86-64 **glibc** (`elf`) was never followed to its stage-2: `unpack_emulate`
+  returned 0 from `__libc_start_main`, so `_start` fell onto its `hlt` after one import (reported
+  as `stopped="budget"`). PE and the static musl AArch64 build were fine (no libc entry import).
+  `__libc_start_main(main, argc, argv, ...)` is now modelled as what it does: call `main(argc, argv,
+  envp)` from the process stack with an `exit` trampoline as return address (i386: in the call's
+  own frame). Getting a Rust std program to main's own code on glibc then needed a thread pointer
+  (fs / TPIDR_EL0 -> a zeroed block with the x86-64 TCB self-pointer; std's thread-locals faulted at
+  fs:-8) and libc imports that did the work: `memcpy`/`memmove`/`mempcpy`/`memset`/`memcmp`/`bcmp`/
+  `strlen` (returning 0 gave std a NULL destination and it panicked), `sysconf` (page size), libc
+  `mmap` (the syscall model) and `write` (all bytes written). A model's copy is recorded in the
+  write bitmaps and drops cached translations, so code copied with libc memcpy counts as unpacked.
+  i386 glibc gets no thread pointer (a GDT segment; not needed by any fixture). `.init_array` is not
+  run by the unpacker (the loader's job; it never was). A run that ends on an x86 `hlt` now says
+  `stopped="hlt"` (it said "budget", as if the instruction budget had run out).
+
+**Measured (rustc 1.100.0 builds, ubuntu:24.04 linux/amd64 container, unicorn 2.1.4):**
+`python3 -m pytest tests/test_obf.py` over elf, pe and elf-arm64 (release + size-lto): **24
+passed, 48 skipped, 0 failed** (was 8 failed). rust_packer stage-2 carved and the OEP on all six
+format x profile builds (elf: `stopped=exit`, OEP = the mmap'd region, byte-identical stage-2);
+rust_ctor's two canaries on elf and elf-arm64; PE rust_ctor skipped (§87).
+`tests/fixtures/emu/equiv_golden.json.gz` regenerated for this intended change only: the one
+glibc fixture in it (`benign_rust_std.x64`, both `follow` settings) now runs main to `exit` (896
+blocks) instead of stopping at `_start` (3); nothing else changed.
+Regression tests (`tests/test_unpack_regressions.py`, committed glibc fixture
+`deflatten/rustcloak_tree.x64` + direct import calls + a synthetic `hlt` ELF): all three fail on
+the base code, pass now.
+
+**Not measured:** i386 glibc and AArch64 glibc Rust programs through the new path (no fixture in
+the obf matrix); the GitHub runner itself until a CI run of this tree.
+
+## 91. Precision on the Ubuntu 26.04 runner: the corpus moved, four more false positives (Nov 2026)
+
+CI TRY 2 / TRY 3 of this tree (runs 44855259120, 44861386430) left the `precision` job red with
+1-2 false positives although §89's corpus was clean. Cause of the drift: **`ubuntu-latest` became
+Ubuntu 26.04** (image 20261116.88, `git version 2.56.1`), so the corpus is 26.04's binaries and
+the runner's rustup stable is **1.100.0** (§89's mirror was ubuntu:24.04 with rustup 1.99.1).
+The runner's apt binaries are Ubuntu 26.04's **amd64v3** variant builds (same package versions,
+different code: ubuntu:26.04 under Rosetta installs baseline amd64, whose ssh/tar/curl .text sizes
+differ). Mirror used here: `ubuntu:26.04` linux/amd64, `APT::Architecture-Variants "amd64v3"` +
+`apt-get download` for bash/tar/xz/curl/Xvfb/openssl/ssh/perl/vim (extracted with Python: 26.04's
+GNU tar fails under Rosetta with "Function not implemented"), git from the git-core PPA,
+docker-ce-cli 29.4.2 (Docker's resolute repo), gh 2.104.0, go 1.26.11, cmake 4.5.0, rustup
+1.100.0. Every .text size and function count then equals the CI log's (kubectl excepted: CI's is
+another build); unicorn 2.1.4, lief 1.0.0, capstone 5.0.9.
+
+False positives, each reproduced on the exact binary, fixed where it arises (`recover_emulate`):
+- **rustfmt 1.100** `_tNtCs8uuN1nrGffB_4core3fmt8builders...`: 40-byte blocks of `.dynstr` v0
+  names copied by a routine run on fake lengths, mostly *forwards* past 160-700 byte gaps.
+  `static_scramble` only counted backwards / overlapping pieces and forward gaps <= 64 bytes
+  (0.665 < 0.7). Pieces of 16+ bytes (`SCRAMBLE_BLOCK`) may now also jump forwards within 4 KB.
+- **git 2.56.1** `GNUDyO0lib64`: a URL-encoding loop (fn 0x76bd0) walked a NULL string field of a
+  fake struct from address 0. The PIE is mapped at its own VAs, so address 0.. is its page 0:
+  notes + `.interp`. A real process never maps the first 64 KB. The loader metadata at the start
+  of page 0 (`_header_page`: .interp, notes, .dynsym, .dynstr, .gnu.hash, versions, relocations,
+  up to the first other section -- lld puts a small binary's .rodata in page 0) now reads as
+  zeros, like any NULL page the emulator maps on the fly. (Ending the run on such a read instead
+  was tried and rejected: the emulator's policy is that wild reads continue with zeros, and
+  stopping lost `RUST_BACKTRACE` runs on the benign Rust fixture.)
+- **git 2.56.1** (full budget) `encoding-text-eol-lf-text-eol-crlf-...`: consecutive `.rodata`
+  strings with every separator turned into `-` (a sanitizer on a fake length). Long candidates are
+  also judged by 16-character windows of their letters/digits against the file's NUL-joined text
+  with separators removed (`flattened`).
+- **cargo 1.100** (CI command, a faster run got further than CI's): ``integer `4952364620051328414452318208`
+  as u128, expected struct Hints`` -- 0x100080000000000010008000, the emulator's SCRATCH+0x8000 in
+  both halves of a u128. `_emu_pointers_out` also zeroes long decimal numbers whose 64-bit limbs are
+  emulator pointers.
+- **docker-ce-cli 29.4.2** `xicayicazica{ica` (CI TRY 4, run 44869664418, after the fixes above):
+  Go's runtime ChaCha8 RNG (`expand 32-byte k`) stores its block counter as ctr, ctr+1, ctr+2,
+  ctr+3 (fn 0x41a524..); ctr was 0x61636978. Three or more 32/64-bit words in an arithmetic
+  progression with a step of at most 16 (`_counter_words`) are numbers, not text.
+
+Regression tests (`tests/test_ci_fp.py`, synthetic inputs): each new `ci_fp` case fails without
+its fix and passes with it; keep-side tests check hidden text is still reported. The emulation
+golden changed in one place (fn 0x17ed0 explore: two more static raw strings, two runs fewer;
+`recover()` records unchanged), dumped identically on the Mac, ubuntu:24.04 and ubuntu:26.04 amd64.

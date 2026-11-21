@@ -210,6 +210,8 @@ def test_benign_filter():
     assert soc_triage._benign_indicator(
         "/rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/io/mod.rs")
     assert soc_triage._benign_indicator("/rust/deps/gimli-0.32.3/src/read/abbrev.rs")
+    # rustc 1.100 moved std's vendored crates there (no dot: not a user's ~/.cargo)
+    assert soc_triage._benign_indicator("/cargo/registry/25cdd57fae9f0462/gimli-0.34.0/src/read/line.rs")
     # a real indicator-shaped path must NOT be filtered
     assert not soc_triage._benign_indicator("C:\\ProgramData\\NorthwindSvc\\state.db")
     assert not soc_triage._benign_indicator("/opt/app/resources/data.bin")
