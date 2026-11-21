@@ -149,9 +149,14 @@ Eval/measurement only (not analysis): `evaluate_all.py`, `eval_scatter.py`, `hel
 `bench_emu.py` (emulation-engine benchmark: Unicorn vs optional icicle-emu, and Unicorn hook layouts, on
 equal checked work — `--workload loop|hooks|unpack|setup|funcs`, `--json`; re-run it before any engine decision).
 `lab_matrix.py` (runs `check.sh full` on the real lab -- local, ARM64 Kali, Windows 11 ARM64 under x64
-Python -- from one snapshot of the working tree, Kali/Windows as dualvm background jobs with a
+Python -- from one snapshot of the working tree, Kali/Windows as labhand background jobs with a
 tree-killing timeout; prints a VALIDATION-style table or `--json`; a target it cannot run is NOT
-MEASURED with the reason, never inferred from another; needs the checkout + dualvm, `SOURCE_ONLY`).
+MEASURED with the reason, never inferred from another; needs the checkout + labhand -- the lab-control
+package, formerly `dualvm`: `--labhand-path` / `$LABHAND_PATH`, the old `--dualvm-path` / `$DUALVM_PATH`
+still work; the `kali` / `win` targets are the inventory's first linux / windows host unless
+`--kali-host` / `--win-host` names one, OS-specific steps follow the host's OS, files live under
+labhand's `hosts.workdir()` (`$LABHAND_WORKDIR`); `tests/test_lab_matrix.py` stubs labhand's
+SSH/SFTP layer, skipped without labhand -- `SOURCE_ONLY`).
 
 ### Packaging — `pip install rust-deobf` (see "Releasing" below)
 The import package `rust_deobf` **is** `scripts/` (setuptools `package-dir`), so the clone workflow
@@ -198,7 +203,7 @@ the environment or `--plugin`; the repo is a sibling checkout (the maintainer's 
 `~/Documents/rustcloak`, unbuilt by default) — never hard-code a build path.
 
 ## Test matrix (measured — say which targets you ran, never assume an untested one)
-The maintainer's lab (see the project's `dual-vm-ai-agent/CLAUDE.md`): **ARM64 Kali** (native ELF /
+The maintainer's lab (see the labhand checkout's CLAUDE.md): **ARM64 Kali** (native ELF /
 AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Windows 11 ARM64** VM
 (x64 Python runs there under emulation = the x64-Windows target), and x86-64 Linux (cloud / CI).
 - **Windows ARM64 *native* Python: no PyPI wheels** for `unicorn` (any version) or `capstone<6`
@@ -218,7 +223,7 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   and macos-15-intel; windows-11-arm is a `continue-on-error` canary for native ARM64 Python (it builds the pinned
   capstone + unicorn itself, see above; drop those steps once PyPI has win_arm64 wheels).
   The real lab: `scripts/lab_matrix.py` (local + Kali + Windows x64 Python, one snapshot, one table).
-  The Windows VM's x64 Python is dualvm's `WIN_PYTHON_EXE`; Git Bash is installed there (2026-11).
+  The Windows VM's x64 Python is its labhand inventory interpreter: `WIN_PYTHON_EXE` (legacy keys) or `<NAME>_PYTHON` with a `LABHAND_HOSTS` inventory (`WINDOWS_PYTHON` for a host named `windows`); Git Bash is installed there (2026-11).
 
 ## Gotchas (each cost a debugging round once — don't repeat them)
 - **PE addresses are RVAs** everywhere in this toolkit (LIEF section VAs, function starts, results);

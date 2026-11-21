@@ -4,18 +4,26 @@ results table, ready to paste into a new VALIDATION.md section.
 
 Targets:
     local   this machine (whatever it is; the label comes from what was measured)
-    kali    the ARM64 Kali VM, through dualvm
-    win     the Windows 11 ARM64 VM, through dualvm, under an **x64** Python: native ARM64 Python
+    kali    the ARM64 Kali VM, through labhand
+    win     the Windows 11 ARM64 VM, through labhand, under an **x64** Python: native ARM64 Python
             cannot run the toolkit (no win_arm64 unicorn / capstone<6 wheels; CLAUDE.md "Test
             matrix"), so an interpreter that is not x64 is refused, not measured.
+
+`kali` and `win` are target names, not labhand host names. Each resolves to a host of labhand's
+inventory by OS: `kali` = the first linux host, `win` = the first windows host (labhand's own
+default rule), unless --kali-host / --win-host names one (it must have that OS). The inventory's
+legacy keys (KALI_HOST / WIN_HOST) give hosts named kali / windows; LABHAND_HOSTS names them
+freely. Everything OS-specific (how a job is stopped) follows the host's OS, never its name.
+Files go to and are read back from labhand's working directory on the host
+(`labhand.hosts.workdir()` = $LABHAND_WORKDIR, default `samples`), in rdlab/<run>-<target>/.
 
 Each target gets the CURRENT WORKING TREE (git-tracked + untracked-not-ignored files, uncommitted
 edits included; no .git) as one tarball, unpacks it into a fresh per-run directory and runs
 `check.sh full` there under a small driver script with a real, tree-killing timeout. The remote runs
-are dualvm background jobs (jobs.job_start / job_poll). dualvm stays what it is -- it runs things and
+are labhand background jobs (jobs.job_start / job_poll). labhand stays what it is -- it runs things and
 hands back raw output; reading pytest's summary line and the junit file happens here.
 
-A target that cannot be run (VM off, SSH down, dualvm not configured, wrong interpreter, missing
+A target that cannot be run (VM off, SSH down, labhand not configured, wrong interpreter, missing
 dependency, timeout, a run that ends without a pytest summary) is reported as NOT MEASURED with the
 reason. Nothing is ever carried over from another target.
 
@@ -29,9 +37,10 @@ reason. Nothing is ever carried over from another target.
 Exit status: 0 every target measured and green; 1 a measured target has red tests; 3 nothing red
 but some target was NOT MEASURED; 2 usage error; 130 interrupted (running jobs are stopped).
 
-dualvm is imported lazily (only for kali/win): install it (`pip install -e <dual-vm-ai-agent>`) or
-point --dualvm-path / $DUALVM_PATH at its checkout. Needs a git checkout of this repo (source-only:
-not shipped in the wheel).
+labhand (the lab-control package, formerly dualvm) is imported lazily (only for kali/win): install
+it (`pip install -e <labhand checkout>`) or point --labhand-path / $LABHAND_PATH at its checkout
+(the pre-rename --dualvm-path / $DUALVM_PATH still work). Needs a git checkout of this repo
+(source-only: not shipped in the wheel).
 """
 import argparse
 import hashlib
@@ -51,7 +60,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGETS = ("local", "kali", "win")
-DUALVM_HOST = {"kali": "kali", "win": "windows"}
+TARGET_OS = {"kali": "linux", "win": "windows"}         # target -> OS of its labhand host
 NOMINAL = {"local": "this machine (local)", "kali": "ARM64 Kali (kali)",
            "win": "Windows 11 ARM64, x64 Python (win)"}
 # the win target measures x64 Python on Windows-on-ARM; an ARM64 interpreter is refused. Checked
@@ -327,7 +336,7 @@ def tree_meta(root=ROOT):
 
 
 # --------------------------------------------------------------------------------------------
-# reading the results (all interpretation lives here, never in dualvm or the driver)
+# reading the results (all interpretation lives here, never in labhand or the driver)
 
 _SUMMARY_TOKEN = re.compile(r"(\d+) (passed|failed|skipped|errors?|xfailed|xpassed|deselected)\b")
 
@@ -507,21 +516,41 @@ def exit_code(results):
 
 
 # --------------------------------------------------------------------------------------------
-# running: one controller thread (dualvm's SSH pool is a plain module dict, not thread-safe)
+# running: one controller thread (labhand's SSH pool is a plain module dict, not thread-safe)
 
 def _log(msg):
     print(f"[lab_matrix] {msg}", file=sys.stderr, flush=True)
 
 
-def _dualvm(path=None):
-    p = path or os.environ.get("DUALVM_PATH")
+def lab_path(path=None, environ=None):
+    """Checkout to import labhand from: --labhand-path / --dualvm-path, else $LABHAND_PATH,
+    else the pre-rename $DUALVM_PATH, else None (an installed labhand)."""
+    env = os.environ if environ is None else environ
+    return path or env.get("LABHAND_PATH") or env.get("DUALVM_PATH") or None
+
+
+def _labhand(path=None):
+    """labhand's (hosts, jobs, remote, shell) modules. Importing them reads no inventory (labhand
+    reads it lazily, at the first call); resolve_host() checks it."""
+    p = lab_path(path)
     if p and p not in sys.path:
         sys.path.insert(0, p)
     try:
-        from dualvm import jobs, remote, shell        # noqa: PLC0415 (optional, lab only)
-    except Exception as e:                            # ImportError, or KeyError on unset KALI_HOST
-        raise LabError(f"dualvm unavailable ({type(e).__name__}: {e})") from None
-    return jobs, remote, shell
+        from labhand import hosts, jobs, remote, shell    # noqa: PLC0415 (optional, lab only)
+    except Exception as e:                                # ImportError (missing deps included)
+        raise LabError(f"labhand unavailable ({type(e).__name__}: {e})") from None
+    return hosts, jobs, remote, shell
+
+
+def resolve_host(hosts, target, name=None):
+    """(Host, workdir) for a remote target: the inventory host called `name` (it must run the
+    target's OS), else the first host of that OS; workdir = labhand's working directory. A
+    broken inventory / LABHAND_WORKDIR, or no fitting host, raises LabError with labhand's
+    reason -- nothing has connected anywhere at this point."""
+    try:
+        return hosts.get(name or None, os_name=TARGET_OS[target]), hosts.workdir()
+    except hosts.HostError as e:
+        raise LabError(f"labhand host inventory: {e}") from None
 
 
 class _Target:
@@ -597,10 +626,10 @@ class LocalTarget(_Target):
 
 
 def _bounded(seconds, fn, *a, **kw):
-    """fn(*a, **kw) with a wall-clock cap. dualvm's SFTP calls (upload, read_bytes, the script
+    """fn(*a, **kw) with a wall-clock cap. labhand's SFTP calls (upload, read_bytes, the script
     write inside job_start) have no timeout of their own, so a VM that stalls mid-transfer would
     hang the controller until TCP gives up. The call runs in a daemon thread while this (the only
-    controller) thread waits -- never two dualvm calls at once. On timeout the thread is abandoned
+    controller) thread waits -- never two labhand calls at once. On timeout the thread is abandoned
     and raises TimeoutError; the caller must not touch that host again (its pooled connection may
     still be held by the stuck call)."""
     import threading
@@ -634,9 +663,13 @@ class RemoteTarget(_Target):
             raise
 
     def start(self, tgz):
-        self.host = DUALVM_HOST[self.name]
-        self.jobs, self.remote, self.shell = _dualvm(self.cfg.get("dualvm_path"))
-        self.rel = f"rdlab/{self.run_id}-{self.name}"           # under the VM's samples/ dir
+        hosts, self.jobs, self.remote, self.shell = _labhand(self.cfg.get("labhand_path"))
+        h, workdir = resolve_host(hosts, self.name, self.cfg.get("host"))
+        self.host, self.is_windows = h.name, h.is_windows
+        # relative to labhand's working directory: upload and the job's cwd are there, so the
+        # driver writes its results under <workdir>/<rel> (an SFTP path, '/' on Windows too)
+        self.rel = f"rdlab/{self.run_id}-{self.name}"
+        self.base = f"{workdir}/{self.rel}"
         self.job = f"rdlab-{self.name}-{self.run_id}"
         self.pid, self.fails = None, 0
         try:
@@ -679,7 +712,7 @@ class RemoteTarget(_Target):
 
     def _read(self, name):
         try:
-            return self._call(self.remote.read_bytes, f"samples/{self.rel}/{name}", host=self.host)
+            return self._call(self.remote.read_bytes, f"{self.base}/{name}", host=self.host)
         except Exception:  # noqa: BLE001 - missing file, connection, wedged: the caller says so
             return None
 
@@ -690,10 +723,10 @@ class RemoteTarget(_Target):
         if not self.pid:
             return
         try:
-            if self.host == "windows":
+            if self.is_windows:
                 # the job's cmd.exe -> driver -> bash -> python: /T takes the whole tree
                 self._call(self.shell.run_cmd, f"taskkill /T /F /PID {self.pid}",
-                           host="windows", timeout=30)
+                           host=self.host, timeout=30)
             else:
                 # TERM to the job's group (the driver's handler kills its own run group and writes a
                 # result), then KILL everything left in the job's session -- the driver put its run
@@ -715,10 +748,13 @@ def _decode(b):
     return b.decode("utf-8", "replace") if b is not None else None
 
 
-def run_matrix(targets, timeout=3600, poll=15, keep=False, pythons=None, dualvm_path=None,
-               save=None, root=ROOT):
-    """Run check.sh full on each target; return (results, meta)."""
-    pythons = pythons or {}
+def run_matrix(targets, timeout=3600, poll=15, keep=False, pythons=None, labhand_path=None,
+               save=None, root=ROOT, dualvm_path=None, hosts=None):
+    """Run check.sh full on each target; return (results, meta). `dualvm_path` is the
+    pre-rename name of `labhand_path`. `hosts`: {target: labhand host name} for kali/win
+    (default: the first linux / windows host of the inventory)."""
+    labhand_path = labhand_path or dualvm_path
+    pythons, hosts = pythons or {}, hosts or {}
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
     meta = {"run_id": run_id, "date": datetime.now().strftime("%Y-%m-%d"), **tree_meta(root)}
     files = list_tree(root)
@@ -733,7 +769,7 @@ def run_matrix(targets, timeout=3600, poll=15, keep=False, pythons=None, dualvm_
     try:
         for name in targets:
             cfg = {"timeout": timeout, "keep": keep, "python": pythons.get(name),
-                   "dualvm_path": dualvm_path}
+                   "labhand_path": labhand_path, "host": hosts.get(name)}
             t = (LocalTarget if name == "local" else RemoteTarget)(name, run_id, cfg)
             try:
                 t.start(tgz)
@@ -952,10 +988,52 @@ def _selftest():
             names = {m.name: m.mode for m in tf.getmembers()}
         assert set(names) == {"a.txt", "scripts/check.sh"}
         assert os.name == "nt" or names["scripts/check.sh"] & 0o100
+    # which labhand checkout is imported: flag, then $LABHAND_PATH, then the pre-rename $DUALVM_PATH
+    assert lab_path("/flag", {"LABHAND_PATH": "/l", "DUALVM_PATH": "/d"}) == "/flag"
+    assert lab_path(None, {"LABHAND_PATH": "/l", "DUALVM_PATH": "/d"}) == "/l"
+    assert lab_path(None, {"DUALVM_PATH": "/d"}) == "/d"
+    assert lab_path(None, {}) is None
+    # ... the old flag is an alias of the new one (same dest; given both, the last one wins) ...
+    pa = build_parser().parse_args
+    assert pa(["--dualvm-path", "/d"]).labhand_path == "/d"
+    assert pa(["--labhand-path", "/l"]).labhand_path == "/l"
+    assert pa(["--labhand-path", "/l", "--dualvm-path", "/d"]).labhand_path == "/d"
+    assert pa([]).labhand_path is None
+    # ... and _labhand really imports from the checkout that order picks (a stand-in labhand
+    # package per checkout; sys.path / sys.modules / os.environ are restored afterwards)
+    with tempfile.TemporaryDirectory() as d:
+        for co in ("flag", "new", "old"):
+            Path(d, co, "labhand").mkdir(parents=True)
+            for mod in ("__init__", "hosts", "jobs", "remote", "shell"):
+                Path(d, co, "labhand", mod + ".py").write_text("")
+        saved = (list(sys.path), dict(os.environ),
+                 {k: v for k, v in sys.modules.items() if k.split(".")[0] == "labhand"})
+
+        def imported(path, env):
+            for k in [k for k in sys.modules if k.split(".")[0] == "labhand"]:
+                del sys.modules[k]
+            os.environ.pop("LABHAND_PATH", None)
+            os.environ.pop("DUALVM_PATH", None)
+            os.environ.update(env)
+            mods = _labhand(path)
+            return {Path(m.__file__).parent.parent.name for m in mods}
+        try:
+            env = {"LABHAND_PATH": J(d, "new"), "DUALVM_PATH": J(d, "old")}
+            assert imported(J(d, "flag"), env) == {"flag"}
+            assert imported(None, env) == {"new"}
+            assert imported(None, {"DUALVM_PATH": J(d, "old")}) == {"old"}
+        finally:
+            sys.path[:] = saved[0]
+            os.environ.clear()
+            os.environ.update(saved[1])
+            for k in [k for k in sys.modules if k.split(".")[0] == "labhand"]:
+                del sys.modules[k]
+            sys.modules.update(saved[2])
+
     print("selftest OK")
 
 
-def main(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--targets", default=",".join(TARGETS),
@@ -967,10 +1045,23 @@ def main(argv=None):
     ap.add_argument("--keep", action="store_true", help="keep the unpacked trees on the targets")
     ap.add_argument("--save", metavar="DIR", help="also save each target's check.log/junit/result")
     ap.add_argument("--local-python", help="interpreter for local (default: this one)")
-    ap.add_argument("--kali-python", help="interpreter on Kali (default: dualvm's KALI_PYTHON)")
-    ap.add_argument("--win-python", help="x64 python.exe on Windows (default: dualvm's WIN_PYTHON_EXE)")
-    ap.add_argument("--dualvm-path", help="dualvm checkout to import from (or $DUALVM_PATH)")
+    ap.add_argument("--kali-python", help="interpreter on the kali host (default: the host's "
+                    "python in labhand's inventory: <NAME>_PYTHON, legacy KALI_PYTHON)")
+    ap.add_argument("--win-python", help="x64 python.exe on the win host (default: the host's "
+                    "python in labhand's inventory: <NAME>_PYTHON, legacy WIN_PYTHON_EXE)")
+    ap.add_argument("--kali-host", help="labhand inventory host for the kali target, a linux host "
+                    "(default: the inventory's first linux host)")
+    ap.add_argument("--win-host", help="labhand inventory host for the win target, a windows "
+                    "host (default: the inventory's first windows host)")
+    ap.add_argument("--labhand-path", "--dualvm-path", dest="labhand_path",
+                    help="labhand checkout to import from (or $LABHAND_PATH; --dualvm-path / "
+                         "$DUALVM_PATH are the pre-rename names; given both flags, the last wins)")
     ap.add_argument("--selftest", action="store_true", help="logic only, no VM")
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
     a = ap.parse_args(argv)
     if a.selftest:
         _selftest()
@@ -985,7 +1076,8 @@ def main(argv=None):
         ap.error("needs a git checkout of rust-deobf (it ships the working tree)")
     pythons = {"local": a.local_python, "kali": a.kali_python, "win": a.win_python}
     try:
-        results, meta = run_matrix(targets, a.timeout, a.poll, a.keep, pythons, a.dualvm_path, a.save)
+        results, meta = run_matrix(targets, a.timeout, a.poll, a.keep, pythons, a.labhand_path,
+                                   a.save, hosts={"kali": a.kali_host, "win": a.win_host})
         rc = exit_code(results)
     except _Interrupted as e:
         results, meta, rc = e.results, e.meta, 130
