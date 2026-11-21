@@ -97,7 +97,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `detect_vm.py` | flag functions hidden behind a bytecode VM |
 | `recover_dynamic.py` / `recover_artifacts.py` | Frida runtime memory-diff recovery |
 | `dump_unpacked.py` | Tier 2: dump the stage-2 a runtime packer reveals (dynamic, runs the sample): EXEC flips, the main module's in-memory image at exit (+ a file-layout `.fixed.exe`), MZ sweeps; sample stdio piped away |
-| `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub (x86-64/x86/AArch64, ELF incl. section-less, PE with headers + import stubs), report the OEP, carve stage-2, and the import table the stub rebuilt + stage-2 call sites bound to it (no host execution; `--entry`, `--follow`) |
+| `unpack_emulate.py` | Tier 2: static unpacking — emulate the stub (x86-64/x86/AArch64, ELF incl. section-less, PE with headers + import stubs), report the OEP, carve stage-2, and the import table the stub rebuilt + stage-2 call sites bound to it (no host execution; `--entry`, `--follow`); glibc ELF: `__libc_start_main` calls main (process argc/argv/envp, thread pointer), libc mmap/write/mem* modelled (§90) |
 | `emu_backend.py` | emulator-backend helpers: `fast_hook_add(uc, ...)` = drop-in for `uc.hook_add` (block/code/mem-access/invalid-mem/intr/x86 `syscall`) with one Python frame per event instead of three; same exception/`hook_del`/return semantics; `release(uc)` cuts the hooks' references so a discarded emulator is freed by refcount (no `gc.collect()`). icicle-emu evaluated and deliberately not wired in (no Python hooks; see `bench_emu.py`) |
 | `unpack.py` | Tier 2: one unpacking command — static (unpack_emulate) first + PE-stage carve; dynamic (dump_unpacked/Frida) only as opt-in fallback behind `--i-understand-this-executes`. Nothing runs a sample by default. |
 
@@ -193,7 +193,7 @@ Python deps (`requirements.txt`): lief≥0.16, capstone≥5&lt;6, unicorn≥2.1&
 pyelftools (optional; DWARF enum/niche names in recover_enums.py), pytest. Analysis and the fast CI
 subset need nothing else.
 Only the **benchmark/obfuscation builds** need a compiler toolchain: rustc stable (1.97 measured;
-1.99.1 on the ARM64 lab VM) with the targets `build_all.sh` asks for
+1.99.1 on the ARM64 lab VM; 1.100.0, all five formats, in an ubuntu:24.04 amd64 container, §89) with the targets `build_all.sh` asks for
 (`x86_64-pc-windows-gnu`, `i686-pc-windows-gnu`, `aarch64-unknown-linux-musl`,
 `aarch64-unknown-linux-gnu`), the matching linkers (mingw-w64 x86-64/i686, `gcc-aarch64-linux-gnu`),
 llvm/clang and go. CI installs these per job (`.github/workflows/ci.yml`); a given host may have
@@ -287,6 +287,10 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   `tests/emu_equiv.py` dump (525 functions' runs + explore, recover(), unpack on the pack fixtures)
   with `tests/fixtures/emu/equiv_golden.json.gz`; `python3 tests/emu_equiv.py compare A B` diffs
   two dumps. Regenerate the golden file only for an intended output change.
+  Nothing host-dependent may enter emulated state: unpack_emulate's AT_EXECFN/argv[0] was the
+  sample's host path, so a glibc program's stack addresses moved with the checkout's path length
+  (golden made on a Mac failed on CI); the process sees `/sample/<name>` (`_exec_path`). Make the
+  golden in a fresh `pip install -r requirements.txt` env (ubuntu:24.04) and compare with yours.
 - **Emulation hot paths are inlined on purpose** (recover_emulate `_on_write` = `_Writes.add`'s
   one-page case, `_capture_args` = `_plausible`, `capture` = `written()`/byte reads; unpack_emulate
   `_on_block` = `_written`): change both copies together. Kept as they are, after measuring: `count=`
@@ -416,6 +420,39 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   as before. Remapped registry paths keep `index.crates.io-<16 hex>/<crate>-<ver>/`
   (`RE_CARGO_REMAPPED`); immediate-abort leaves only ELF `.comment` as Rust evidence. A tier that
   comes back empty on such a build says why (`notes`), never a silent nothing.
+- **rustc 1.100.0 (0ef1bc386, Nov 2026) drift (fixed; keep the fixes, §89):** std's vendored crates
+  (gimli, addr2line, rustc-demangle, ...) moved from `/rust/deps/<crate>-<ver>/` to
+  `/cargo/registry/<16 hex>/<crate>-<ver>/` (`RE_STD_DEP`; a user's checkout keeps
+  `registry/src/<index>-<hash>/`). recover_libfuncs picks DB groups by toolchain **identity**
+  (version and/or commit through `gen_sigdb.match_quality`; generate() records `__toolchains__`),
+  never by key string: a stripped build of a rustc newer than `rust_versions.json` is known only by
+  its commit, its unstripped twin (`.comment`) also by the release, and the two keys differed (0
+  functions identified on pe / elf-arm64 / the per-binary DB). AArch64 `<T as Any>::type_id` now
+  loads the TypeId from .rodata (`adrp; add; ldr q0; str q0; ret`): identical for every T once
+  masked, so a short whole-function pattern with a masked word never names a start alone
+  (`A64_ACCESSOR_MAX`).
+- **Precision rules from the CI corpus (§89):** recover.run's compressed-strings engine skips
+  debug-info section spans (`recover_blobs.debug_spans`: compressed DWARF is valid zlib) and reports
+  a stream that is one whole JSON/XML/HTML document under `compressed_documents`, not as decoded
+  lines. Text stored into a read-only data section or a NULL-based page is never captured
+  (`_read_only_pages`, `NULL_GUARD`: a PIE is mapped at its own VAs, so its page 0 is
+  `.interp`/`.dynsym`). Emulator-made values in text are not decodes: the clock (any 1970 time,
+  `_EPOCH0`), the CPUID vendor id (`_CPUID_VENDOR`), pointers into the emulator's regions
+  (`_emu_pointers_out`), all-zero numbers, a hash in a template. Static data read word by word
+  goes forwards with small gaps (`STRIDE_GAP`; candidates over 160 characters get the scramble
+  walk too); static identifiers / path components joined at run time are static; `near_static`
+  tries every 4-byte anchor and the aligned suffix (scattered bit flips); `_drop_junk_factories`
+  counts a function's forced outputs that were already explained as static.
+  §91 (`ubuntu-latest` = **Ubuntu 26.04** since Nov 2026: the precision corpus is 26.04's binaries
+  plus the runner's rustup stable, mirror it with `ubuntu:26.04`, not 24.04): a PIE's loader
+  metadata at VA 0 (`_header_page`: .interp/notes/.dynsym before the first other section) reads
+  as zeros -- NULL+offset reads saw `.interp`; long candidates are also judged on letters/digits
+  against the file's NUL-joined text (`flattened`); `static_scramble` lets 16+ byte pieces jump
+  forwards within 4 KB (`SCRAMBLE_BLOCK`); decimal numbers made of emulator pointers and
+  word-by-word counters (`_counter_words`, Go's ChaCha8) are emulator-made. The runner's apt
+  binaries are 26.04's **amd64v3** builds: `APT::Architecture-Variants "amd64v3";` + `apt-get
+  download` gets them (Rosetta containers install baseline amd64 otherwise). Ubuntu 26.04's GNU tar fails under Rosetta amd64
+  (`Cannot open: Function not implemented`): extract with Python's tarfile there.
 - **Compressed sections are not text**: SHF_COMPRESSED / `.zdebug_*` bytes are zlib; a 3-byte key
   matches them by chance (`\nkvm?` in Go 1.24's .debug_info). recover_antianalysis zeroes them.
 - **Windows: never `subprocess.run(["bash", ...])`** -- CreateProcess searches the app dir and

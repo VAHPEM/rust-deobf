@@ -37,7 +37,7 @@ from pathlib import Path
 # Benign strings every Rust binary carries (compiler/std panic-location paths, debug paths). They
 # match the "path" indicator shape but are noise in a triage card, so they are filtered out.
 _BENIGN_RE = re.compile(
-    r"/rustc/|/rust/deps/|\.cargo[/\\]registry|[/\\]library[/\\](std|core|alloc|backtrace|"
+    r"/rustc/|/rust/deps/|\.cargo[/\\]registry|[/\\]cargo[/\\]registry[/\\][0-9a-f]{16}[/\\]|[/\\]library[/\\](std|core|alloc|backtrace|"
     r"portable-simd|panic_unwind|panic_abort|proc_macro)|/proc/self/|/usr/lib/debug|"
     r"^/sys/|rustlib|/\.rustup/|^/dev/u?random$", re.I)
 

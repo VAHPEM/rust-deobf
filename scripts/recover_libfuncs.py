@@ -320,11 +320,62 @@ def _toolchain_from_meta(d: dict) -> str:
 
 
 def _toolchain(path: Path) -> str:
+    return _toolchain_from_meta(_meta(path))
+
+
+def _meta(path: Path) -> dict:
     try:
         import recover_rust_meta as M
-        return _toolchain_from_meta(M.recover(path))
+        return M.recover(Path(path))
     except Exception:
-        return "unknown"
+        return {}
+
+
+def _ids_from_meta(d: dict) -> tuple:
+    """(release version, rustc commit) a binary is known by -- either may be None. The two sources
+    are independent: the version comes from the commit table OR rustc's `.comment`, the commit from
+    `/rustc/<hash>/` paths or the `.comment`. A stripped build of a rustc newer than the table has
+    only the commit, its unstripped twin also the version (rustc 1.100.0, measured)."""
+    rel = d.get("rust_release") if isinstance(d.get("rust_release"), dict) else {}
+    return rel.get("version") or None, d.get("rustc_commit") or None
+
+
+def _ids_from_key(key: str) -> tuple:
+    if key.startswith("rustc-") and key != "rustc-unknown":
+        return key[len("rustc-"):], None
+    if key.startswith("commit-"):
+        return None, key[len("commit-"):]
+    return None, None
+
+
+def _db_toolchains(db: dict) -> dict:
+    """{group key: (version, commit)}: what the key says plus what the DB recorded about the
+    toolchain that produced the group (generate()'s `__toolchains__`, gen_sigdb's `__meta__`)."""
+    out = {}
+    for k in _groups(db):
+        out[k] = _ids_from_key(str(k))
+    tcs = db.get("__toolchains__")
+    if isinstance(tcs, dict):
+        for k, v in tcs.items():
+            if k in out and isinstance(v, dict):
+                ver, com = out[k]
+                out[k] = (ver or v.get("version"), com or v.get("commit"))
+    m = db.get("__meta__")
+    if isinstance(m, dict):
+        b = m.get("built") if isinstance(m.get("built"), dict) else {}
+        for k, ver, com in ((b.get("tool_key"), b.get("rust_version"), b.get("rustc_commit")),
+                            (None, m.get("rustc"), m.get("commit"))):
+            for key in ([k] if k else list(out)):
+                if key in out and isinstance(ver, (str, type(None))) and isinstance(com, (str, type(None))):
+                    v0, c0 = out[key]
+                    out[key] = (v0 or ver, c0 or com)
+    return out
+
+
+def _same_toolchain(bin_ids: tuple, key_ids: tuple) -> str:
+    """gen_sigdb.match_quality of a binary's (version, commit) against a group's."""
+    import gen_sigdb as S
+    return S.match_quality(bin_ids[1], bin_ids[0], key_ids[1], key_ids[0])
 
 
 
@@ -359,22 +410,25 @@ def generate(paths):
     G = _engine()
     seen: dict[tuple, dict] = {}        # (tool, arch, name, pat) -> {"files": set, "sym": sym}
     per_group = {}
+    toolchains: dict[str, dict] = {}    # tool -> {"version", "commit"} it was generated from
     for p in paths:
         b = lief.parse(str(p))
         arch = G._arch(b)
         macho = b.format.name == "MACHO"
-        tool = _toolchain(Path(p))
+        meta = _meta(Path(p))
+        tool = _toolchain_from_meta(meta)
+        ver, com = _ids_from_meta(meta)
+        rec_tc = toolchains.setdefault(tool, {})
+        if ver:
+            rec_tc.setdefault("version", ver)
+        if com:
+            rec_tc.setdefault("commit", com)
         text = next((s for s in b.sections if s.name == ("__text" if macho else ".text")), None)
         if text is None:
             continue
         code, base = bytes(text.content), text.virtual_address
         starts = function_starts(b)
-        crates = set()
-        try:
-            import recover_rust_meta as M
-            crates = set(M.recover(Path(p)).get("crates", {}).keys())
-        except Exception:
-            pass
+        crates = set((meta.get("crates") or {}).keys())
         own = _own_crate(b)
         per_group.setdefault((tool, arch), 0)
         per_group[(tool, arch)] += 1
@@ -417,6 +471,11 @@ def generate(paths):
             for e in lst:
                 bypat.setdefault(e["pattern"], set()).add(e["name"])
             byarch[arch] = [e for e in lst if len(bypat[e["pattern"]]) == 1]
+    # the toolchain behind each group, so a binary known only by its commit (stripped, rustc newer
+    # than the release table) still finds a group keyed by the release, and vice versa
+    tcs = {t: v for t, v in toolchains.items() if t in db and v}
+    if tcs:
+        db["__toolchains__"] = tcs
     return db
 
 
@@ -459,7 +518,21 @@ def _groups(db: dict) -> dict:
 # they load look identical; a repeated full match there must be almost unmasked. (On x86-64 the
 # same rule cost 14 points of recall on per-CGU copies at no precision gain -- measured.)
 FULL_REPEAT_MAX_WILD = 0.10
-_PREFIX = 4                                       # index signatures by up to 4 leading concrete bytes
+# AArch64 only: a whole function of <= this many bytes that loads through a masked page address
+# (`adrp x9, C; add x9, x9, :lo12:C; ldr q0, [x9]; str q0, [x8]; ret`) is named by the datum it
+# loads, not by its code: every `<T as Any>::type_id` of rustc 1.100 is that body (the 128-bit
+# TypeId now comes from .rodata), and the lo12 offset can coincide across builds -- measured, a
+# StringError type_id signature landed on core::any::Any::type_id in another program. Such a
+# pattern names a start only through the other rules (whole-function verification), never alone.
+A64_ACCESSOR_MAX = 24
+
+
+def _data_named(pat: str, arch: str) -> bool:
+    n = len(pat) // 2
+    return arch == "aarch64" and n < SIG_LEN and n <= A64_ACCESSOR_MAX and ".." in pat
+
+
+_PREFIX = 4                                      # index signatures by up to 4 leading concrete bytes
 
 
 def _index(sigs):
@@ -527,12 +600,13 @@ def _ends_with_padding(code: bytes, base: int, end: int, next_start: int, arch: 
         return False
 
 
-def match_binary(path: Path, db=None, tool: str | None = None):
+def match_binary(path: Path, db=None, tool: str | None = None, meta: dict | None = None):
     import lief
     G = _engine()
     if db is None:
         db = load_db()
     std = db.get("__std__") if isinstance(db.get("__std__"), dict) else {}
+    tcs = _db_toolchains(db)
     db = _groups(db)
     b = lief.parse(str(path))
     arch = G._arch(b)
@@ -542,26 +616,38 @@ def match_binary(path: Path, db=None, tool: str | None = None):
         return []
     code, base = bytes(text.content), text.virtual_address
     starts = sorted(a for a in function_starts(b) if base <= a < base + len(code))
+    if meta is None and tool is None:
+        meta = _meta(path)
     if tool is None:
-        tool = _toolchain(path)
+        tool = _toolchain_from_meta(meta)
+    # the binary's identity: what its key says plus what its metadata says (a group key is
+    # rustc-<release> or commit-<hash> depending on whether the release table knew the commit and
+    # whether `.comment` survived stripping -- compare toolchains, not key strings)
+    kv, kc = _ids_from_key(tool)
+    mv, mc = _ids_from_meta(meta or {})
+    bin_ids = (kv or mv, kc or mc)
+    quality = {t: ("exact" if t == tool else _same_toolchain(bin_ids, tcs.get(t, (None, None))))
+               for t in db}
     # the target's own toolchain; pool every toolchain's sigs only when the binary's toolchain is
     # unknown -- for a KNOWN other rustc, signatures from a different toolchain mislabel more
     # than they name (measured: 1.97 sigs on a 1.85 binary, 0.4-24% precision)
     groups = []
-    minor = ".".join(tool.split(".")[:2]) + "." if tool.startswith("rustc-") else None
-    if tool in db and arch in db[tool]:
-        groups.append(db[tool][arch])
-    elif minor and any(str(t).startswith(minor) and arch in db[t] for t in db):
+    exact = [t for t in db if arch in db[t] and quality[t] == "exact"]
+    minor = [t for t in db if arch in db[t] and quality[t] == "same-minor"]
+    if exact:
+        groups += [db[t][arch] for t in exact]
+    elif minor:
         # another patch release of the same minor (1.85.0 vs 1.85.1): same std, near-same codegen
-        groups += [db[t][arch] for t in db if str(t).startswith(minor) and arch in db[t]]
+        groups += [db[t][arch] for t in minor]
     elif tool == "unknown" or not any(str(t).startswith(("rustc-", "commit-")) for t in db):
         # (nothing to compare: the binary's toolchain, or every DB group's, is unknown)
         for t, byarch in db.items():
             if arch in byarch:
                 groups.append(byarch[arch])
     # bundled prebuilt-std signatures: same rustc only, same arch AND format
-    if tool in std and isinstance(std[tool], dict):
-        groups.append(std[tool].get("%s-%s" % (arch, fmt), []))
+    for t, byfmt in _groups(std).items():
+        if isinstance(byfmt, dict) and (t == tool or _same_toolchain(bin_ids, _ids_from_key(t)) == "exact"):
+            groups.append(byfmt.get("%s-%s" % (arch, fmt), []))
     sigs = [e for g in groups for e in g]
     idx = _index(sigs)
     labels: dict[int, str] = {}
@@ -612,7 +698,8 @@ def match_binary(path: Path, db=None, tool: str | None = None):
     verified: dict[int, dict] = {}                # start -> {name: (sym, full)}
     full_hits: dict[str, set] = {}                # full pattern -> starts it verified at
     for a in sorted(matched_at):
-        tight = [(n, s) for pat, n, s, _e in matched_at[a] if pat not in loose or (pat, a) in copies]
+        tight = [(n, s) for pat, n, s, _e in matched_at[a]
+                 if (pat not in loose or (pat, a) in copies) and not _data_named(pat, arch)]
         names = {n: s for n, s in tight}
         if len(names) == 1:
             (name, sym), = names.items()
@@ -750,7 +837,7 @@ def recover(path, db: str = "bundled", propagate_labels: bool = False) -> dict:
     except Exception:
         meta = {}
     dbd, info = select_db(path, db, meta)
-    res = match_binary(path, dbd, tool=_toolchain_from_meta(meta))
+    res = match_binary(path, dbd, tool=_toolchain_from_meta(meta), meta=meta)
     prop = propagate(path, res) if propagate_labels else []
     info["signatures"] = sum(len(lst) for byarch in _groups(dbd).values() for lst in byarch.values())
     return {"file": str(path), "libfuncs": res, "propagated": prop, "db": info}

@@ -123,6 +123,10 @@ _CTOR_TIMEOUT_US = 2_000_000   # wall-clock bound per constructor run (slow-hook
 _CTOR_TOTAL_S = 10.0      # wall-clock bound for the whole priming phase
 MAX_DEPTH = 8             # call levels executed below the emulated function
 MAX_RUNS = 8              # runs per function (1 natural + forced-branch runs)
+STRIDE_GAP = 64           # _static_cover: forward gap between pieces of a strided static read
+SCRAMBLE_BLOCK = 16       # _static_cover: file pieces this long may jump forwards within 4 KB
+SCRAMBLE_MAX = 2048       # _static_cover: longest candidate the scramble walk judges
+NULL_GUARD = 0x10000      # stores into on-the-fly pages below this are NULL-based (not captured)
 WRITE_BUDGET = 1 << 21    # bytes one run may store
 FUNC_SECONDS = 30.0       # wall-clock safety cap per function (runs are bounded by MAX_RUNS)
 # kept for compatibility with callers that imported the old constant
@@ -1030,6 +1034,68 @@ def _mappable_sections(binary):
         yield s
 
 
+def _read_only_pages(binary, pe):
+    """Page numbers that hold only read-only data sections (not writable, not executable): a store
+    there faults in a real process, so text the emulated code writes there exists only in
+    emulation. (A PIE is mapped at its own VAs, so its .interp/.dynsym page is page 0: cargo-fmt's
+    clap usage `ptions]...` was "written" at 0x10 through a NULL-based pointer, CI precision run
+    43869999822.) Pages shared with a writable or executable section are not included."""
+    ro, other = set(), set()
+    macho = binary.format.name == "MACHO"
+    try:
+        for s in _mappable_sections(binary):
+            n = _seg_extent(s)
+            if not s.virtual_address or not n:
+                continue
+            if pe:
+                c = int(s.characteristics)
+                w, x = bool(c & 0x80000000), bool(c & 0x20000000)
+            elif macho:
+                # Mach-O section flags are type/attribute bits: the segment's initial protection
+                # says what a store may do (VM_PROT_WRITE 2, VM_PROT_EXECUTE 4)
+                sg = s.segment
+                prot = int(sg.init_protection) if sg is not None else 7
+                w, x = bool(prot & 2), bool(prot & 4)
+            else:
+                f = int(s.flags)
+                w, x = bool(f & 0x1), bool(f & 0x4)
+            va = BASE + s.virtual_address
+            (other if w or x else ro).update(range(va >> 12, (va + n + 0xfff) >> 12))
+    except Exception:
+        return frozenset()
+    return frozenset(ro - other)
+
+
+_LOADER_META = re.compile(r"\.(interp|note.*|dynsym|dynstr|gnu\.hash|hash|gnu\.version.*|rela?\..*)$")
+
+
+def _header_page(binary, pe):
+    """End of the loader-metadata span at the start of page 0, or 0: an ELF mapped at VA 0 (a PIE
+    / shared object: BASE is 0, so it sits at its own VAs) whose first page begins with .interp,
+    notes, .gnu.hash, .dynsym, ... In a real process those bytes are at the load base, never at
+    address 0, and the first 64 KB are never mapped: a data read there is a NULL-based pointer
+    and faults. (git 2.56.1, CI precision run 44855259120: a URL-encoding loop walked a NULL
+    string field of a fake struct from address 0 and copied the notes and .interp out as
+    `GNUDyO0lib64`.) The span ends at the first other section (lld puts a small binary's .rodata
+    in page 0, read legitimately) and never goes past the page."""
+    if pe or binary.format.name != "ELF":
+        return 0
+    end, meta = 0x1000, False
+    try:
+        for s in _mappable_sections(binary):
+            va, n = s.virtual_address, _seg_extent(s)
+            if not va or not n or va >= end:
+                continue
+            name = s.name if isinstance(s.name, str) else ""
+            if _LOADER_META.match(name) and not int(s.flags) & 0x5:
+                meta = True
+            else:
+                end = va
+    except Exception:
+        return 0
+    return end if meta else 0
+
+
 def map_image(uc, binary):
     """Map every section at its virtual address (rebased under BASE window)."""
     pages = {}
@@ -1165,7 +1231,8 @@ class _Writes:
         pg = self.pages.get(a >> 12)
         return pg[a & 0xfff] if pg else 0
 
-    def capture(self, uc, out, addrs=None):
+    def capture(self, uc, out, addrs=None, skip_pages=()):
+        """`skip_pages`: page numbers whose text is not captured (wild NULL-based stores)."""
         if not self.dirty:
             return
         spans = sorted(self.dirty)
@@ -1190,6 +1257,8 @@ class _Writes:
 
         pages = self.pages
         for a, b in merged:
+            if skip_pages and (a >> 12) in skip_pages:
+                continue
             # extend through neighbouring bytes that were written AND are printable (a written
             # check -- self.written() -- before each byte is read, as before; inlined: hot)
             s, e = a, b
@@ -1504,6 +1573,16 @@ class Emulator:
         # run that function first (results depended on the worker count).
         self._ctx0 = uc.context_save()
         map_image(uc, self.img.binary)
+        meta_end = _header_page(self.img.binary, self.img.pe)
+        if meta_end:
+            # a PIE's loader metadata sits at address 0 here: what a NULL-based pointer reads must
+            # be what it reads anywhere else in the first 64 KB -- zeros (an unmapped page mapped
+            # on the fly), not .interp / notes / .dynsym (emulated code never reads those)
+            try:
+                uc.mem_write(BASE, bytes(meta_end))
+            except UcError:
+                pass
+        self._ro_pages = _read_only_pages(self.img.binary, self.img.pe)
         # read+execute only: a store through an import's address (a data import such as msvcrt's
         # `__initenv`, or a fake pointer that is really a function pointer) faults like it would
         # natively, instead of overwriting the `ret` stubs every later call goes through
@@ -2072,7 +2151,15 @@ class Emulator:
         return True
 
     def _capture(self):
-        self.writes.capture(self.uc, self.strings, self.straddr)
+        # text stored where a real process cannot store: read-only data sections (_read_only_pages)
+        # and pages mapped on the fly for a store into the first 64 KB (a NULL-based pointer: a field
+        # of a zeroed struct the emulator handed in; Linux mmap_min_addr / Windows never map it)
+        skip = self._ro_pages
+        if self.auto_pages:
+            low = {p >> 12 for p in self.auto_pages if p < NULL_GUARD}
+            if low:
+                skip = skip | low
+        self.writes.capture(self.uc, self.strings, self.straddr, skip)
 
     def _plausible(self, p):
         # (the same test is inlined in _capture_args: keep the two in step)
@@ -2839,12 +2926,20 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
     typed = []
     mid = []
     _normalized = []
+    _flattened = []
 
     def normalized():
         if not _normalized:
             _normalized.append(b"\0".join(_norm_text(m.group())
                                            for m in re.finditer(rb"[\x20-\x7e]{4,}", file_bytes)))
         return _normalized[0]
+
+    def flattened():
+        # runs of NUL-separated text (string tables) normalized as one: separators dropped
+        if not _flattened:
+            _flattened.append(b"\0".join(_norm_text(m.group())
+                                         for m in re.finditer(rb"[\x00\x20-\x7e]{16,}", file_bytes)))
+        return _flattened[0]
 
     def printf_output(st):
         """Text a printf-style format string in the file produced, e.g. `Assertion failed: %s
@@ -2940,12 +3035,22 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
         (Go's runtime printing fake values). Numbers are taken out and every piece of text
         between them must be static on its own. Text must make up most of the candidate, so an
         address (`10.66.12.7:8443`) or a version-stamped name is never explained this way."""
+        # (a hash is one formatted value however long: it weighs like a 4-digit number)
+        b = _HASH_RE.sub(b"1000", b)
         parts = _NUMBER.split(b)
         if len(parts) < 2:
             return False
         text = [x for x in parts if x.strip()]
         n_text = sum(len(x) for x in text)
-        if n_text < 0.6 * len(b) or not any(len(x.strip()) >= 6 for x in text):
+        # numbers that are all zero are the emulator's zeroed memory printed (go's runtime:
+        # `Ints: 0 0 0 `, `key  0 0 0 0`): the static label alone carries the candidate
+        nums = _NUMBER.findall(b)
+        zeros = all(not n.strip(b"-+0x.") for n in nums)
+        if zeros and any(len(x.strip()) >= 3 for x in text):
+            pass
+        elif zeros and len(nums) >= 3 and not re.search(rb"[A-Za-z]", b):
+            return True     # only zeros and punctuation: a zeroed value (`0.0.0.0:0`, SocketAddr)
+        elif n_text < 0.6 * len(b) or not any(len(x.strip()) >= 6 for x in text):
             return False
         for x in text:
             y = x.strip()
@@ -2965,9 +3070,26 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
             return True
         if numbers and typed_output(b):
             return True
+        # consecutive machine words counting up or down (a block counter stored word by word:
+        # Go's runtime ChaCha8 RNG wrote ctr, ctr+1, ctr+2, ctr+3 -> `xicayicazica{ica`, docker
+        # 29.4.2, CI precision run 44869664418): numbers, not text
+        if _counter_words(b):
+            return True
         # a fake argument the emulator passed (out-pointers point into SCRATCH) that the code
         # formatted into text, e.g. "/proc/self/fd/268468224"
-        if any(a in st for a in _EMULATOR_VALUES):
+        if any(a in st for a in _EMULATOR_VALUES) or any(a in st for a in _CPUID_VENDOR):
+            return True
+        # ... or the emulator's zero clock formatted in: judge the text with a number in its place
+        z = _emu_pointers_out(_EPOCH0.sub(b"0", b))
+        if z != b and _explained(z.decode("ascii"), numbers):
+            return True
+        # a temporary file's name: a static path prefix and the 6 random alphanumerics mkstemp
+        # (`XXXXXX`) / the tempfile crate append, drawn from the emulator's deterministic RNG
+        # (cargo: `@/tmp/cargo-argfile.ANmKoZ`). Random over [A-Za-z0-9] mixes upper and lower
+        # case (all one case: < 1%), so a hidden lower-case name (`/tmp/xmrig1`) is not this.
+        m = _TEMPNAME.fullmatch(b)
+        if m and re.search(rb"[a-z]", m.group(2)) and re.search(rb"[A-Z]", m.group(2)) and \
+                (m.group(1) in file_bytes or _explained(m.group(1).decode("ascii"), numbers)):
             return True
         # static text plus a number the emulator made up (a fake pointer or fd formatted into a
         # path, e.g. "/proc/self/fd/" + the scratch address) is static too
@@ -2983,11 +3105,43 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
         if len(toks) >= 3 and len(words) >= 3 and len(letters) <= 2 and \
                 all(t in file_bytes for t in words):
             return True
+        # static identifiers joined by single separators at run time, no spaces (perl's
+        # `File::Glob` -> `File/Glob.pm`, `SV_YES` + `:` + `UNDEF`; vim's `print` + `/` +
+        # `prolog` + `.ps`): every token in the file, two of them 4+ characters
+        if not re.search(rb"\s", b):
+            ids = [t for t in re.split(rb"[:/\\.]+", b) if t]
+            if len(ids) >= 2 and sum(1 for t in ids if len(t) >= 4) >= 2 and \
+                    sum(len(t) for t in ids) >= 8 and all(t in file_bytes for t in ids):
+                return True
+        # static path components joined at run time (`PathBuf::push`: cargo's sysroot
+        # `lib` + `rustlib` + `src` + `rust` -> `lib/rustlib/src/rust/`); a component may itself be
+        # formatted text (`metabuild-` + a hash + `.rs`). One component of 6+ characters must be
+        # in the file verbatim, so a path the program hides is not explained by common words.
+        segs = [t for t in re.split(rb"[/\\]", b) if t]
+        if 2 <= len(segs) < len(b) and len(segs) <= 16 and \
+                any(len(t) >= 6 and t in file_bytes for t in segs) and \
+                all(len(t) >= 3 and (t in file_bytes or (numbers and formatted(t))) for t in segs):
+            return True
         if len(b) > 160:
             # long text (help screens, formatted messages): judge it by its windows instead of an
             # exact cover, which is quadratic in the length and searches the whole file each step
             wins = [b[i:i + 16] for i in range(0, len(b) - 15, 8)]
-            return sum(1 for w in wins if w in file_bytes) >= 0.8 * len(wins)
+            if sum(1 for w in wins if w in file_bytes) >= 0.8 * len(wins):
+                return True
+            # ... or a run of consecutive static strings rewritten character by character (git
+            # sanitizing a buffer into a name on a fake length: `encoding\0text eol=lf\0...` ->
+            # `encoding-text-eol-lf-...`, CI precision run 44855259120): the same windows on the
+            # letters and digits alone, against the file's text with every separator (NULs too)
+            # taken out
+            k = _norm_text(b)
+            if len(k) >= 64:
+                wins = [k[i:i + 16] for i in range(0, len(k) - 15, 8)]
+                flat = flattened()
+                if sum(1 for w in wins if w in flat) >= 0.8 * len(wins):
+                    return True
+            # ... or static data read in pieces shorter than a window (8-byte words of a table
+            # of strings): the scramble walk is linear in the length, bounded here
+            return len(b) <= SCRAMBLE_MAX and static_scramble(b)
         # longest file match starting at every position, then the fewest pieces that cover the
         # candidate (any prefix of a file substring is one too). Greedy longest-match alone
         # splits `_` + `ation` (from `__errno_location`) into `_at` + `ion` and misses it.
@@ -3069,6 +3223,21 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
             if prev is not None and abs(here - prev[1]) < 4096 and here < prev[1]:
                 hit += k + (prev[2] if prev[2] else 0)     # backwards or overlapping: both count
                 prev = (here, here + k, 0)
+            elif (prev is not None and k >= 6 and prev[1] - prev[0] >= 6
+                  and 0 < here - prev[1] <= STRIDE_GAP):
+                # forwards with a small gap: a loop reading the first word of each element of a
+                # table of static strings (cargo-fmt's std backtrace symbolizer run forced over
+                # .rodata: `identifi` + ` rust-ve` + `ata is n` ..., 8-byte pieces 0x18 apart)
+                hit += k + (prev[2] if prev[2] else 0)
+                prev = (here, here + k, 0)
+            elif (prev is not None and k >= SCRAMBLE_BLOCK and prev[1] - prev[0] >= SCRAMBLE_BLOCK
+                  and 0 < here - prev[1] < 4096):
+                # forwards past a bigger gap, but in long blocks of the same few KB: a copy
+                # routine moving fixed-size chunks of a nearby string table in table order with
+                # skips (rustfmt 1.100's .dynstr v0 names in 40-byte blocks, CI precision run
+                # 44855259120). Text the program hides is never 16+ bytes of the file verbatim.
+                hit += k + (prev[2] if prev[2] else 0)
+                prev = (here, here + k, 0)
             else:
                 prev = (here, here + k, k)
             i += k
@@ -3082,23 +3251,44 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
         if n < 8:
             return False
         allow = max(2, n // 4)
-        for i in sorted({0, n // 2 - 2, n - 4}):
+
+        def covered(pairs):
+            # the longest run from the start of `pairs` with at most a quarter of its bytes changed
+            miss, best = 0, 0
+            for m, (x, y) in enumerate(pairs, 1):
+                miss += x != y
+                if miss <= max(1, m // 4):
+                    best = m
+            return best
+
+        # every 4-byte anchor, not three fixed ones: flipped bits are scattered (vim's .dynstr names
+        # under a forced path: `OYObject_CallFwnctionOcj@Rgs`, every fixed anchor held a flip)
+        tried = set()
+        for i in range(n - 3):
             anchor = b[i:i + 4]
+            if anchor in tried:
+                continue
+            tried.add(anchor)
             j, seen = file_bytes.find(anchor), 0
             while j >= 0 and seen < 16:
                 seen += 1
                 st = j - i
                 if st >= 0:
                     ref = file_bytes[st:st + n]
-                    if len(ref) == n and sum(x != y for x, y in zip(b, ref)) <= allow:
-                        return True
+                    if len(ref) == n:
+                        diff = sum(x != y for x, y in zip(b, ref))
+                        if diff <= allow:
+                            return True
+                        # short text: up to 3/8 changed when an exact run of 5+ survives (forced
+                        # copies of rustfmt's .interp: `LIninux-` from `d-linux-`, `.//jb64/l`)
+                        if diff <= 3 * n // 8 and _longest_equal_run(b, ref) >= 5:
+                            return True
                     # ... or most of it, then junk (`PyRun_SimrleStrin` + `uhnNHome`): the longest
-                    # aligned prefix with a quarter of its bytes changed covers 60%+
-                    miss, best = 0, 0
-                    for m, (x, y) in enumerate(zip(b, ref), 1):
-                        miss += x != y
-                        if miss <= max(1, m // 4):
-                            best = m
+                    # aligned prefix -- or suffix: junk, then most of it (`endptifProcmask` from
+                    # `sigprocmask`) -- with a quarter of its bytes changed covers 60%+
+                    best = covered(zip(b, ref))
+                    if len(ref) == n:
+                        best = max(best, covered(zip(reversed(b), reversed(ref))))
                     if best >= 10 and best >= 0.6 * n:
                         return True
                 j = file_bytes.find(anchor, j + 1)
@@ -3110,6 +3300,9 @@ def _static_cover(file_bytes, min_piece=4, min_edge=1, max_pieces=3):
 # a number formatted into text: decimal, float with exponent, 0x-hex, a bare hex run at the very
 # start of a view (`40a138, newval=`), digits inside an identifier (`CMP0008`). The text around
 # the numbers must be static piece by piece, so `Win64` + `NorthwindAgent/2.1` is not explained
+# a hash formatted in as one value (cargo's `metabuild-{name}-{16 hex}.rs`): 8+ lowercase hex
+# digits, both digits and letters
+_HASH_RE = re.compile(rb"(?<![A-Za-z0-9])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{8,64}(?![A-Za-z0-9])")
 _NUMBER = re.compile(rb"^(?=[0-9a-fA-F]*\d)[0-9a-fA-F]+(?![A-Za-z0-9_])"
                      rb"|(?<![A-Za-z0-9_])[-+]?(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:e[-+]?\d+)?)"
                      rb"|\d+")      # (and digits inside an identifier: `CMP0008`)
@@ -3119,6 +3312,71 @@ _EMULATOR_VALUES = tuple(
     fmt % v for v in (SCRATCH, SCRATCH + 0x8000, STACK, STACK + STACK_SIZE // 2, HEAP,
                       STACK32, STACK32 + STACK_SIZE // 2)   # the 32-bit stack base, formatted too
     for fmt in ("%d", "%x", "%#x"))
+# the CPU vendor id Unicorn's CPUID reports, as code stores EBX/EDX/ECX (or EBX/ECX/EDX, as Go's
+# runtime does: docker / go printed `GenuntelineI`, CI precision run 43869999822)
+_CPUID_VENDOR = tuple("".join(p) for p in __import__("itertools").permutations(("Genu", "ineI", "ntel")))
+# a pointer into the emulator's own regions, formatted into text (`entersyscall inconsistent sp
+# 0x0 [0x1cb54c0,0x7f00000ffaf8]`: Go's runtime printing the emulated stack pointer)
+_EMU_REGIONS = ((STACK, STACK + STACK_SIZE), (STACK32, STACK32 + STACK_SIZE),
+                (SCRATCH, SCRATCH + SCRATCH_SIZE), (HEAP, HEAP + HEAP_SIZE), (TLS, TLS + TLS_SIZE),
+                (BRK, BRK + 0x1000000))
+_TEMPNAME = re.compile(rb"(.{0,200}/(?:[^/]{0,80}[._-])?)([A-Za-z0-9]{6})", re.S)
+_HEXNUM = re.compile(rb"(?<![0-9A-Za-z_])0x([0-9a-fA-F]{6,16})(?![0-9A-Za-z_])")
+
+
+def _counter_words(b: bytes) -> bool:
+    """True when `b` is 3+ little-endian 32- or 64-bit words in an arithmetic progression with a
+    small non-zero step (|step| <= 16): a counter stored word by word."""
+    for size, fmt in ((4, "I"), (8, "Q")):
+        n = len(b) // size
+        if n < 3 or len(b) % size:
+            continue
+        w = struct.unpack("<%d%s" % (n, fmt), b)
+        d = w[1] - w[0]
+        if 0 < abs(d) <= 16 and all(w[i + 1] - w[i] == d for i in range(n - 1)):
+            return True
+    return False
+
+
+_DECNUM = re.compile(rb"(?<![0-9A-Za-z_.])\d{9,40}(?![0-9A-Za-z_])")
+
+
+def _emu_pointer(v: int) -> bool:
+    return any(lo <= v < hi for lo, hi in _EMU_REGIONS)
+
+
+def _emu_pointers_out(b: bytes) -> bytes:
+    """`b` with every 0x-number that points into an emulator region replaced by 0x0, and every
+    long decimal number whose 64-bit halves are emulator pointers (or zero, one at least a
+    pointer) replaced by 0: a fake pointer the code read as an integer and printed in decimal
+    (cargo 1.100: serde's `invalid type: integer `4952364620051328414452318208` as u128` =
+    0x10008000 in both halves of a u128)."""
+    def sub(m):
+        v = int(m.group(1), 16)
+        return b"0x0" if _emu_pointer(v) else m.group()
+
+    def dec(m):
+        v = int(m.group())
+        limbs = []
+        while v:
+            limbs.append(v & 0xffffffffffffffff)
+            v >>= 64
+        if len(limbs) <= 2 and any(limbs) and all(x == 0 or _emu_pointer(x) for x in limbs):
+            return b"0"
+        return m.group()
+    return _DECNUM.sub(dec, _HEXNUM.sub(sub, b))
+
+
+# the emulator's clock reads 0 (time / clock_gettime / gettimeofday return 0 and leave the zeroed
+# out-struct alone), so a time formatted at run time is the Unix epoch: cargo's
+# `session \`19700101T000000000Z-\` not found` (CI precision, cargo 1.99.1). ISO basic / extended,
+# RFC 2822 and asctime renderings of 1970-01-01 00:00:00.
+# A clock derived from the emulated TSC / instruction count lands days into 1970 instead
+# (cargo: `session \`19701122T063448000Z-`): any 1970 date is the emulator's.
+_EPOCH0 = re.compile(rb"1970(?:0[1-9]|1[0-2])(?:[0-2]\d|3[01])(?:T\d{6,}Z?)?"
+                     rb"|1970-(?:0[1-9]|1[0-2])-(?:[0-2]\d|3[01])(?:[T ]\d\d:\d\d:\d\d(?:\.\d+)?Z?)?"
+                     rb"|(?:[A-Z][a-z]{2},? )?\d{1,2} [A-Z][a-z]{2} 1970 \d\d:\d\d:\d\d(?: GMT| UTC| \+0000)?"
+                     rb"|[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d\d:\d\d:\d\d (?:UTC )?1970")
 
 
 def _drop_overlap_artifacts(records):
@@ -3499,6 +3757,14 @@ def _drop_overlap_artifacts(records):
     return out
 
 
+def _longest_equal_run(a, b):
+    best = cur = 0
+    for x, y in zip(a, b):
+        cur = cur + 1 if x == y else 0
+        best = max(best, cur)
+    return best
+
+
 def _static_share(b, file_bytes, min_piece=4):
     """Fraction of `b` made of file substrings of `min_piece`+ bytes (greedy, left to right)."""
     n, i, c = len(b), 0, 0
@@ -3512,23 +3778,36 @@ def _static_share(b, file_bytes, min_piece=4):
     return c / n if n else 0.0
 
 
-def _drop_junk_factories(records, file_bytes, many=6, share=0.85):
+_STATIC_KEY = "\x01"       # by_string keys of static text forced paths produced (value: function)
+
+
+def _drop_junk_factories(records, file_bytes, static_by_fn=None, many=6, share=0.85):
     """A function whose forced paths produce many strings, most of them reshuffled static text
     (rustfmt: one function, 17 strings like `  secs in tarsihe phaseng pd `, a sort or copy
     routine running on fake lengths over .rodata). Its forced-only strings that are 85%+ pieces
     of the file go. A decoder with many `match` arms still keeps them: decoded text is not made
-    of the file's own pieces."""
+    of the file's own pieces.
+    `static_by_fn`: per function, how many forced-path strings were already explained as static
+    text (never records). They count too: a function whose forced paths mostly produced static
+    text explained as such -- vim's text-property code overlaying records on stale .dynstr names,
+    4 of 6 explained (`OYObject_CallFwnctionOcj@Rgs`) -- is a mutator of static data, and its
+    remaining forced-only strings with 40%+ file pieces (`PyGIL` + a backtick + `EmSure`) are
+    more of the same."""
+    static_by_fn = static_by_fn or {}
     forced = {}
     for r in records:
         if r.get("forced") and not r.get("used"):
             forced.setdefault(r["function"], []).append(r)
     junk = set()
     for fva, rs in forced.items():
-        if len(rs) < many:
+        n_static = static_by_fn.get(fva, 0)
+        if len(rs) + n_static < many:
             continue
         shares = {r["string"]: _static_share(r["string"][:400].encode("ascii", "ignore"), file_bytes)
                   for r in rs}
-        if 2 * sum(1 for v in shares.values() if v >= share) >= len(rs):
+        if 3 * n_static >= 2 * (len(rs) + n_static):
+            junk.update(st for st, v in shares.items() if v >= 0.4)
+        elif 2 * (sum(1 for v in shares.values() if v >= share) + n_static) >= len(rs) + n_static:
             # a factory of reshuffled text: its other forced-only strings that are mostly file
             # pieces too (60%+) are more of the same
             junk.update(st for st, v in shares.items() if v >= 0.6)
@@ -3669,6 +3948,9 @@ def _emulate(img, order, scores, explained, canaries, time_budget, explore):
                 if _degenerate(st) or not looks_like_text(st.encode("ascii", "ignore")) or \
                         (explained(st) and not resolver_arg):
                     by_string[st] = False
+                    if st not in natural and looks_like_text(st.encode("ascii", "ignore")):
+                        # static text a forced path produced: _drop_junk_factories weighs it
+                        by_string.setdefault(_STATIC_KEY + st, fva)
                     continue
                 rec = by_string[st] = {"string": st, "function": fva, "method": "emulation",
                                        "forced": True}
@@ -3750,6 +4032,9 @@ def _worker(path, share, canaries, time_budget, explore):
 
 def _merge(into, other):
     for st, rec in other.items():
+        if st.startswith(_STATIC_KEY):
+            into.setdefault(st, rec)        # (a function address, not a record)
+            continue
         cur = into.get(st)
         if cur is None or (cur is False and rec):
             into[st] = rec
@@ -3904,8 +4189,13 @@ def recover(path, canaries, max_funcs=0, time_budget=None, explore=True, workers
                         "in_file": _in_file(r["name"])}
                        for k, r in by_string.items() if k.startswith("\x00") and r),
                       key=lambda r: (r["in_file"], r["kind"] != "module", r["name"]))
-    records = [r for k, r in by_string.items() if r and not k.startswith("\x00")]
-    records = _drop_junk_factories(records, img.file_bytes)
+    records = [r for k, r in by_string.items()
+               if r and not k.startswith("\x00") and not k.startswith(_STATIC_KEY)]
+    static_by_fn = {}
+    for k, fva in by_string.items():
+        if k.startswith(_STATIC_KEY):
+            static_by_fn[fva] = static_by_fn.get(fva, 0) + 1
+    records = _drop_junk_factories(records, img.file_bytes, static_by_fn)
     records = _drop_overlap_artifacts(records)
     for r in records:
         r.pop("natural_done", None)       # an input of the overlap rules, not a result

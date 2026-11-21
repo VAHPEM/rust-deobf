@@ -266,10 +266,12 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
     # inflater within its budgets). Format-independent: a file scan.
     def _compressed():
         import recover_blobs as B
-        return list(B.small_streams(Path(path).read_bytes()))
+        # (not inside debug-info sections: their streams are the toolchain's compressed DWARF)
+        return list(B.small_streams(Path(path).read_bytes(), skip=B.debug_spans(path)))
     t0 = time.monotonic()
     zs = _engine(result, "compressed strings (recover_blobs)", _compressed)
     if zs is not None:
+        import recover_blobs as B
         known = {x["string"] for x in result["decoded"]}
         comp = []
         for z in zs:
@@ -277,11 +279,23 @@ def run(path: Path, emulate: str = "always", stackstrings: bool = True, min_len:
             # a string table, not a binary asset: almost all printable
             if sum(1 for c in t if " " <= c <= "~" or c in "\t\r\n") < 0.9 * len(t):
                 continue
+            # ... and not one whole document (an embedded JSON/XML/HTML resource): reported as
+            # such, its lines are not strings the program hides
+            kind = B.document_kind(z["out"])
+            if kind:
+                result.setdefault("compressed_documents", []).append(
+                    {"offset": z["offset"], "method": z["method"], "size": z["size"], "kind": kind,
+                     "out_size": len(z["out"]), "preview": t[:80]})
+                continue
             for m in re.finditer(r"[ -~]{%d,}" % min_len, t):
                 if m.group() not in known:
                     known.add(m.group())
                     comp.append({"string": m.group(), "method": z["method"], "offset": z["offset"]})
         result["decoded"].extend(comp)
+        for d in result.get("compressed_documents", []):
+            result["notes"].append("%s-compressed %s document at file offset 0x%x (%d bytes): an "
+                                   "embedded resource, not decoded strings" % (
+                                       d["method"], d["kind"], d["offset"], d["out_size"]))
         result["engines"].append({"engine": "compressed strings (recover_blobs)", "strings": len(comp),
                                   "streams": len(zs), "seconds": round(time.monotonic() - t0, 1)})
 
