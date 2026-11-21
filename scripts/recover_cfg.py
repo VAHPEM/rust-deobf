@@ -15,6 +15,12 @@ What it resolves:
     vtables, a function that takes a vtable's address can reach that vtable's methods, so those edges
     (and the methods behind the trait) are added instead of being dropped as `call rax`.
 
+  * Windows x64 exception funclets -- MSVC code (rustc's windows-msvc target included) moves every
+    cleanup landing pad, catch block, SEH filter and `__finally` body into a funclet with its own
+    .pdata entry that only the OS unwinder enters, through image-relative RVAs in the function's
+    unwind handler data (`__CxxFrameHandler3` FuncInfo, `__C_specific_handler` scope table): an
+    edge owner -> funclet (`eh_edges`; FH4's compressed tables are not read).
+
 The coverage metric then reports functions reachable from the realistic root set over direct +
 dispatch edges, and how many indirect call sites resolved to an import vs. stayed opaque -- turning
 "code coverage" into a number, and showing the lift that resolving indirect flow buys over a
@@ -278,6 +284,87 @@ _SEED_MAX_FUNCS = 20000
 _SEED_MAX_INSNS = 2_000_000
 
 
+_FH3_MAGIC = (0x19930520, 0x19930521, 0x19930522)
+
+
+def _pe_eh_edges(img, starts):
+    """Windows x64: {owner function start: {funclet starts}} from the unwind handler data.
+
+    Each RUNTIME_FUNCTION's UNWIND_INFO with a handler (UNW_FLAG_EHANDLER / UHANDLER, not
+    CHAININFO) is followed by the handler RVA and its data. Two shapes are read, each only when it
+    validates (the handler itself is an import thunk, so it is recognised by its data):
+      * `__CxxFrameHandler3` (rustc's personality on windows-msvc, MSVC C++): data = RVA of a
+        FuncInfo (magic 0x1993052x) -> unwind map {toState, action RVA} (cleanup funclets) and
+        try-block map -> HandlerType[] {.., addressOfHandler RVA, ..} (catch funclets);
+      * `__C_specific_handler` (C SEH; also prefixes the GS-SEH handlers' data): a scope count
+        and {begin, end, handler, target} records -- `handler` is a filter or `__finally` funclet
+        (1 = EXCEPTION_EXECUTE_HANDLER), `target` the `__except` body.
+    Only targets that are function starts count (a funclet has its own .pdata entry). Bounded by
+    the image: a garbage FuncInfo / scope table fails validation and adds nothing."""
+    if not img.pe or img.arm or img.x32:
+        return {}
+    pdata = next((s for s in img.binary.sections if s.name == ".pdata"), None)
+    if pdata is None:
+        return {}
+    raw = bytes(pdata.content)
+    startset = set(starts)
+    lo, hi = img.text_va, img.text_end
+
+    def u32s(rva, n):
+        b = img.read_any(rva, 4 * n)
+        return struct.unpack(f"<{n}I", b) if len(b) == 4 * n else None
+
+    def code(v):
+        return lo <= v < hi
+
+    fh3_seen, out = {}, {}
+    for k in range(0, len(raw) - 11, 12):
+        begin, end, uw = struct.unpack_from("<III", raw, k)
+        if not (code(begin) and begin < end) or begin not in startset:
+            continue
+        hdr = img.read_any(uw, 4)
+        if len(hdr) != 4:
+            continue
+        flags = hdr[0] >> 3
+        if flags & 4 or not flags & 3:          # chained, or no handler
+            continue
+        at = uw + 4 + 2 * ((hdr[2] + 1) & ~1)
+        h = u32s(at, 2)
+        if h is None or not code(h[0]):
+            continue
+        targets = set()
+        fi = h[1]
+        info = u32s(fi, 5)
+        if info is not None and info[0] in _FH3_MAGIC:
+            if fi not in fh3_seen:
+                got = set()
+                _magic, max_state, unwind_map, n_try, try_map = info
+                if max_state <= 0x10000 and n_try <= 0x10000:
+                    um = u32s(unwind_map, 2 * max_state) if max_state else ()
+                    for i in range(1, len(um or ()), 2):
+                        got.add(um[i])
+                    tm = u32s(try_map, 5 * n_try) if n_try else ()
+                    for j in range(0, len(tm or ()), 5):
+                        n_catch, arr = tm[j + 3], tm[j + 4]
+                        if n_catch <= 0x1000:
+                            ht = u32s(arr, 5 * n_catch) if n_catch else ()
+                            got.update(ht[c + 3] for c in range(0, len(ht or ()), 5))
+                fh3_seen[fi] = got
+            targets = fh3_seen[fi]
+        else:
+            n = h[1]
+            recs = u32s(at + 8, 4 * n) if 0 < n <= 256 else None
+            if recs and all(code(recs[r]) and recs[r] < recs[r + 1] <= hi
+                            and (recs[r + 2] == 1 or code(recs[r + 2]))
+                            and (recs[r + 3] == 0 or code(recs[r + 3]))
+                            for r in range(0, len(recs), 4)):
+                targets = {recs[r + c] for r in range(0, len(recs), 4) for c in (2, 3)}
+        hit = {t for t in targets if t in startset and t != begin}
+        if hit:
+            out.setdefault(begin, set()).update(hit)
+    return out
+
+
 def _seed_starts(img, starts, ep):
     """Recursive descent from the entry point along direct calls, for binaries whose metadata gives
     few or no function starts (a stripped 32-bit PE has no .pdata and no symbols). Within a function
@@ -379,6 +466,14 @@ def build(path) -> dict:
     except Exception:
         by_va = {}
 
+    # Windows x64 exception funclets: entered by the unwinder on behalf of their owner
+    eh_edges = 0
+    for owner, funclets in _pe_eh_edges(img, starts).items():
+        for f in funclets:
+            if f not in edges.setdefault(owner, set()):
+                edges[owner].add(f)
+                eh_edges += 1
+
     # roots: entry, exported functions, and every address-taken function (incl. main, callbacks,
     # vtable methods). These are where execution can actually start / be entered.
     roots = set()
@@ -415,6 +510,7 @@ def build(path) -> dict:
         "functions_seeded": seeded,
         "direct_edges": sum(len(v) for v in direct.values()),
         "dispatch_edges": dispatch_edges,
+        "eh_edges": eh_edges,
         "vtables": len(by_va),
         "import_call_sites": n_import_sites,
         "indirect_call_sites_unresolved": n_indirect,
@@ -528,8 +624,43 @@ def _selftest():
     assert 0x1000 in _seed_starts(_seed_img, [], 0x1000 + len(code))
     # a W write invalidates the X register it aliases
     assert _arm_xreg("w5") == "x5" and _arm_xreg("x5") == "x5" and _arm_xreg("wzr") == "wzr"
+
+    # Windows x64 funclets from unwind handler data: A (0x1000) has an FH3 FuncInfo -> cleanup
+    # 0x1100 + catch 0x1180; B (0x1200) a C scope table -> filter 0x1300 + __finally 0x1380 (its
+    # __except target 0x1230 is no function start); C (0x1400) garbage data; 0x1500 unreferenced
+    rd = bytearray(0x800)
+
+    def put(off, *vals):
+        struct.pack_into(f"<{len(vals)}I", rd, off, *vals)
+    rd[0:4] = bytes([1 | 1 << 3, 0, 2, 0])                    # EHANDLER, 2 unwind codes
+    put(0x008, 0x1f00, 0x3100)                                # handler thunk, FuncInfo RVA
+    put(0x100, 0x19930522, 2, 0x3200, 1, 0x3300)              # magic, maxState, map, nTry, tries
+    put(0x200, 0xffffffff, 0x1100, 0, 0)                      # unwind map: action funclet / none
+    put(0x300, 0, 0, 1, 1, 0x3400)                            # try block: 1 catch at 0x3400
+    put(0x400, 0, 0, 0, 0x1180, 0x38)                         # HandlerType.addressOfHandler
+    rd[0x500:0x504] = bytes([3 << 3, 0, 1, 0])                # E+U handler, 1 code (padded)
+    put(0x508, 0x1f10, 2, 0x1210, 0x1220, 0x1300, 0x1230, 0x1240, 0x1250, 0x1380, 0)
+    rd[0x600:0x604] = bytes([1 << 3, 0, 0, 0])
+    put(0x604, 0x1f20, 0x9999)                                # neither FuncInfo nor scope table
+    rd[0x700:0x704] = bytes([4 << 3, 0, 0, 0])                # chained: no handler of its own
+    ents = [(0x1000, 0x10f0, 0x3000), (0x1100, 0x1170, 0x3700), (0x1180, 0x11f0, 0x3700),
+            (0x1200, 0x12f0, 0x3500), (0x1300, 0x1370, 0x3700), (0x1380, 0x13f0, 0x3700),
+            (0x1400, 0x14f0, 0x3600), (0x1500, 0x1580, 0x3700)]
+
+    class _Sec:
+        name, content = ".pdata", b"".join(struct.pack("<3I", *e) for e in ents)
+
+    class _Bin:
+        sections = [_Sec()]
+    eh = _Img(False, False, {0x3000: bytes(rd)})
+    eh.pe, eh.binary, eh.text_va, eh.text_end = True, _Bin(), 0x1000, 0x2000
+    st = [e[0] for e in ents]
+    assert _pe_eh_edges(eh, st) == {0x1000: {0x1100, 0x1180}, 0x1200: {0x1300, 0x1380}}
+    eh.pe = False                                             # not a PE: nothing
+    assert _pe_eh_edges(eh, st) == {}
     print("selftest OK: reachability BFS, address-taken root coverage-lift, dispatch-edge reach, "
-          "branch-immediate parse, PLT/.plt.sec/IAT/Mach-O __stubs decode (AArch64 + x86)")
+          "branch-immediate parse, PLT/.plt.sec/IAT/Mach-O __stubs decode (AArch64 + x86), "
+          "Windows x64 EH funclet edges (FH3 + C scope table)")
 
 
 def main(argv=None) -> int:

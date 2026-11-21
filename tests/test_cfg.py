@@ -20,6 +20,25 @@ pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 FIXTURE = ROOT / "tests" / "fixtures" / "vm" / "benign_rust_std.x64"
 
 
+# test_dyn_dispatch_adds_edges' program as windows-latest's default rustc builds it: rustc 1.100.0
+# x86_64-pc-windows-msvc (`rustc -O d.rs`, runner image win25-vs2026 20261116, CI run 44746651936).
+MSVC_FIXTURE = ROOT / "tests" / "fixtures" / "msvc" / "dyn_dispatch_msvc.exe"
+
+
+def test_msvc_eh_funclets_are_reached():
+    """MSVC moves every cleanup landing pad / catch / SEH filter into a funclet with its own .pdata
+    entry, entered only by the unwinder through RVAs in the unwind handler data -- no call, no
+    relocation. Without reading those, 112 of 357 functions (mostly funclets of lang_start_internal,
+    args_os, main, ...) were unreachable: 68.6% < 70% failed test_dyn_dispatch_adds_edges on
+    windows-latest once its rustc became 1.100. Measured with the PDB: 126 of the 128 targets are
+    cleanup funclets of their owner, 2 the CRT's SEH filters."""
+    res = G.build(MSVC_FIXTURE)
+    assert res["format"] == "PE" and res["arch"] == "x86_64"
+    assert res["vtables"] >= 1 and res["dispatch_edges"] > 0
+    assert res["reachable_pct"] >= 90.0, res["reachable_pct"]      # 96.4 with funclets, 68.6 without
+    assert res["eh_edges"] >= 100, res["eh_edges"]                 # 128
+
+
 def test_build_on_committed_binary_lifts_coverage():
     res = G.build(FIXTURE)
     assert res["arch"] == "x86_64" and res["functions_total"] > 50

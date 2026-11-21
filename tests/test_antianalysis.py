@@ -133,7 +133,17 @@ def test_benign_go_not_flagged(tmp_path, cgo):
     assert e["techniques"] == [], e
     assert not e["likely_direct_syscalls"]
     assert "anti-debug" not in e["evasion_apis"] and "sandbox/vm" not in e["evasion_apis"]
-    assert e["instruction_counts"]["go_runtime_excluded"] > 0
+    import recover_emulate
+    img = recover_emulate.Image(p)
+    if img.pe and img.arm:
+        # Go on windows/arm64 reaches the OS only through DLL calls and ARM64 has no rdtsc/cpuid:
+        # its runtime holds none of the counted instructions (go1.27.4: no svc in 225k decoded
+        # instructions), so there is nothing to exclude -- and nothing may be counted either
+        c = e["instruction_counts"]
+        assert c["go_runtime_excluded"] == 0 and not any(
+            c[k] for k in ("rdtsc", "rdtscp", "cpuid", "syscall", "int80", "svc")), c
+    else:
+        assert e["instruction_counts"]["go_runtime_excluded"] > 0
     if cgo and e["dynamic"]:
         assert e["syscall_instructions"] < 8
 
