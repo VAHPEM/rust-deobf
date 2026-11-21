@@ -91,7 +91,7 @@ Apache-licensed core; `premium/` is AGPL/commercial Tier-4 deobfuscation.
 | `recover_apihash.py` | resolve hash-obfuscated API imports (Tier 2) |
 | `recover_imports.py` | PE import reconstruction: IAT map + bind indirect call sites to API names; flag runtime resolution (post-unpack) |
 | `recover_crypto.py` | identify crypto primitives by their constants |
-| `recover_cfg.py` | resolved call graph + code-coverage metric (`_import_sites`/`_indirect`); x86/x86-64/AArch64, PLT/`.plt.sec`/IAT/Mach-O `__stubs` stubs + tail calls resolved, recursive-descent start seeding when metadata has none (stripped PE32) |
+| `recover_cfg.py` | resolved call graph + code-coverage metric (`_import_sites`/`_indirect`); x86/x86-64/AArch64, PLT/`.plt.sec`/IAT/Mach-O `__stubs` stubs + tail calls resolved, recursive-descent start seeding when metadata has none (stripped PE32); Windows x64 EH funclets (cleanup/catch/SEH filter, own .pdata entry, entered only by the unwinder) get owner -> funclet edges from `__CxxFrameHandler3` FuncInfo / `__C_specific_handler` scope tables (`eh_edges`; MSVC target 68.6% -> 96.4% reachable, FH4 not read) |
 | `recover_behavior.py` | per-function behavior/capability map from imports |
 | `recover_lang.py` | per-function source-language map (mixed-language binaries) |
 | `detect_vm.py` | flag functions hidden behind a bytecode VM |
@@ -201,9 +201,13 @@ the environment or `--plugin`; the repo is a sibling checkout (the maintainer's 
 The maintainer's lab (see the project's `dual-vm-ai-agent/CLAUDE.md`): **ARM64 Kali** (native ELF /
 AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Windows 11 ARM64** VM
 (x64 Python runs there under emulation = the x64-Windows target), and x86-64 Linux (cloud / CI).
-- **Windows ARM64 *native* Python cannot run this toolkit today**: no win_arm64 wheels for
-  `unicorn` (any version) or `capstone<6` (only 6.0 alphas), and no MSVC ARM64 to build them. Use
-  x64 Python on Windows-on-ARM.
+- **Windows ARM64 *native* Python: no PyPI wheels** for `unicorn` (any version) or `capstone<6`
+  (only 6.0 alphas). capstone 5.0.9's sdist builds under an MSVC ARM64 environment (vcvars arm64);
+  unicorn 2.1.4 does not run as released (its MSVC CMake assumes an x86 host, and every `_WIN64`
+  build installs an x86-64 exception trampoline: a MinGW/clang DLL dies in the first `uc_mem_map`)
+  -- it needs upstream PR unicorn-engine/unicorn#2286 (open). The CI canary builds both that way
+  and passes `check.sh full` natively (CI run 44746651936, Nov 2026); the lab VM has no such build,
+  so locally use x64 Python on Windows-on-ARM.
 - Host-built tests follow the host arch: on ARM64 Kali `rustc` emits AArch64 (LLVM tables a match
   only from ~20 arms there, not 8; every import goes through a `.plt` stub).
 - Windows: no `/tmp` (use `tempfile`), no `resource` module, no `fork`/`forkserver` (fall back to
@@ -211,13 +215,18 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
 - `tests/test_dump_unpacked_dynamic.py` EXECUTES the benign UPX fixture: opt-in only
   (`RUST_DEOBF_DYNAMIC=1`, frida, Windows), run it on the Windows VM.
 - **CI `native` job** runs `check.sh full` on ubuntu-24.04-arm, windows-latest, macos-latest (ARM64)
-  and macos-15-intel; windows-11-arm is a `continue-on-error` canary (green = win_arm64 wheels exist).
+  and macos-15-intel; windows-11-arm is a `continue-on-error` canary for native ARM64 Python (it builds the pinned
+  capstone + unicorn itself, see above; drop those steps once PyPI has win_arm64 wheels).
   The real lab: `scripts/lab_matrix.py` (local + Kali + Windows x64 Python, one snapshot, one table).
   The Windows VM's x64 Python is dualvm's `WIN_PYTHON_EXE`; Git Bash is installed there (2026-11).
 
 ## Gotchas (each cost a debugging round once — don't repeat them)
 - **PE addresses are RVAs** everywhere in this toolkit (LIEF section VAs, function starts, results);
   LIEF's `binary.entrypoint` for a PE is an absolute VA — subtract `optional_header.imagebase`.
+  A COFF symbol's `value` is an offset into its section (`Image.function_symbols` adds the section
+  RVA), and MinGW's `__CTOR_LIST__` (inside `.text` with GNU ld <= 2.41, `.rdata` with 2.47 =
+  windows-latest's MSYS2) holds absolute VAs: at x86-64's default
+  ImageBase 0x140000000 mixing these up gives negative "RVAs" (`tests/test_ollvm_shapes.py` `*_high_base`).
 - **ELF mapping symbols** (`$x`/`$d` on AArch64, `$a`/`$t` on ARM) share each function's address:
   skip names starting with `$` when building an address → name map, or they hide the real name.
 - **LIEF:** keep the parsed binary alive while iterating `.symbols` (iterating a temporary's
@@ -415,7 +424,9 @@ AArch64; has upx, mingw-w64, rustc with i686/aarch64/windows-gnu targets), **Win
   MSVC debug info is PDB, which nothing here reads) and exception tables (recover_idioms' landing-pad
   drop glue keys on `_Unwind_Resume`; MSVC uses `__CxxFrameHandler3` funclets). Rust's own
   mangling and vtables are ABI-independent. `gen_sigdb._pe_abi` detects MSVC; nothing else uses it
-  yet, and recover_libfuncs keys the std layer by arch+format only (§75).
+  yet, and recover_libfuncs keys the std layer by arch+format only (§75). One exception:
+  `tests/fixtures/msvc/dyn_dispatch_msvc.exe` (rustc 1.100 windows-msvc) for recover_cfg's
+  funclet edges -- test_cfg's own `rustc -O` build is not pinned and IS MSVC on windows-latest.
 - **unpack_emulate models Win32 TLS** (§83): `TlsAlloc/Get/Set/Free` keep real values and
   WriteFile/WriteConsole succeed -- returning 0 made every Rust std program on Windows abort
   (`int 0x29`) before main, so a Rust-written packer was never followed to its stage-2.

@@ -34,6 +34,12 @@ ROOT = Path(__file__).resolve().parent.parent
 PRINT = set(bytes(string.printable, "ascii")) - set(b"\x0b\x0c")
 
 def load(path):
+    # Only a regular file reaches LIEF. On Linux, lief 1.0.0 opens a directory as a stream, takes
+    # its seek-to-end offset (~2**63) for the size and dies in the allocator (MemoryError:
+    # std::bad_alloc; on macOS the same call returns None). Devices/FIFOs have no size either.
+    if not Path(path).is_file():
+        what = "missing" if not Path(path).exists() else "not a regular file"
+        raise ValueError(f"cannot parse {path} as a binary ({what})")
     b = lief.parse(str(path))
     if b is None:   # missing, unreadable or not an ELF/PE/Mach-O: say so (was an AttributeError)
         raise ValueError(f"cannot parse {path} as a binary (missing, unreadable or unknown format)")
