@@ -56,9 +56,13 @@ RE_COMMENT = re.compile(rb"rustc version (\d+\.\d+\.\d+)(?:-[0-9A-Za-z.]+)? \(([
                         rb"(\d{4}-\d\d-\d\d)\)")
 RE_RUSTC = re.compile(r"/rustc/(?P<hash>[0-9a-f]{7,40})/")
 # crates vendored into the standard library itself (gimli, addr2line, miniz_oxide, ...):
-# their panic paths read `/rust/deps/<crate>-<ver>/src/...` and are not the author's code
+# their panic paths read `/rust/deps/<crate>-<ver>/src/...` (rustc <= 1.99) or, from rustc 1.100,
+# `/cargo/registry/<16 hex>/<crate>-<ver>/src/...` (measured: 1.100.0 0ef1bc386, every target;
+# a user's registry checkout keeps cargo's `registry/src/<index>-<hash>/` instead) -- not the
+# author's code
 RE_STD_DEP = re.compile(
-    r"(?:[\\/]|^)rust[\\/]deps[\\/](?P<crate>[A-Za-z0-9_.-]+?)-(?P<ver>" + _SEMVER + r")[\\/]")
+    r"(?:(?:[\\/]|^)rust[\\/]deps|(?:[\\/]|^)cargo[\\/]registry[\\/][0-9a-f]{16})[\\/]"
+    r"(?P<crate>[A-Za-z0-9_.-]+?)-(?P<ver>" + _SEMVER + r")[\\/]")
 # a Rust legacy-mangled symbol ends with the hash component `17h<16 hex>E`; a v0 symbol starts `_R`.
 # Itanium C++ also emits `_ZN...E`, so the `_ZN` prefix ALONE does not prove Rust -- the hash does.
 RE_RUST_HASH = re.compile(r"17h[0-9a-f]{16}E")

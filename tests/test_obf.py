@@ -32,7 +32,16 @@ def test_obf_strings(crate, fmt, ext, profile):
     path = BUILD / f"{crate}__{fmt}__{profile}__strip{ext}"
     if not path.is_file():
         pytest.skip(f"not built: {path.name}")
-    want = set(json.loads((OBF / crate / "expected.json").read_text())["strings"])
+    exp = json.loads((OBF / crate / "expected.json").read_text())
+    want = set(exp.get("strings", []))
+    # text a constructor decrypts before main (rust_ctor, §88): replayed from ELF .init_array;
+    # PE constructors (.CRT$XCU) are not replayed at all (§87), so PE asserts only the rest
+    ctor = exp.get("constructor_decoded", [])
+    if fmt != "pe":
+        want |= set(ctor)
+    if not want:
+        pytest.skip(f"{crate}: no strings expected on {fmt}"
+                    + (" (PE constructors are not replayed, VALIDATION §87)" if ctor else ""))
     got = {x["string"] for x in _run(path)["decoded"]}
     missing = sorted(w for w in want if not any(w in g for g in got))
     assert not missing, missing

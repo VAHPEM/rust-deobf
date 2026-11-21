@@ -563,17 +563,83 @@ SMALL_MAX_OUT = 1 << 16          # output cap per small stream (a string table, 
 SMALL_MAX_TRIES = 20000          # header candidates tried per file (each fails within bytes)
 
 
-def small_streams(data: bytes, max_tries=SMALL_MAX_TRIES):
+def debug_spans(path) -> list[tuple[int, int]]:
+    """File-offset spans [lo, hi) of debug-info sections: ELF SHF_COMPRESSED (0x800), `.debug*` /
+    `.zdebug*` (ELF, and MinGW PE through the COFF long-name table), Mach-O `__DWARF`. Their zlib
+    streams are the toolchain's compressed DWARF -- valid, checksummed streams whose output is
+    file names, type names and producer strings, never a string the program hides (measured: CI
+    precision, docker / rustfmt 1.99.1: 723 "decoded" DWARF strings). [] when LIEF cannot parse."""
+    spans = []
+    try:
+        import lief
+        import recover_rust_meta as M
+        b = lief.parse(str(path))
+        if b is None:
+            return []
+        fmt = b.format.name
+        long_names = M._coff_long_names(Path(path)) if fmt == "PE" else {}
+        for s in b.sections:
+            name = M._str(s.name)
+            name = long_names.get(name, name)
+            seg = ""
+            if fmt == "MACHO":
+                seg = M._str(getattr(s, "segment_name", "") or "")
+            flags = int(getattr(s, "flags", 0) or 0) if fmt == "ELF" else 0
+            if not (flags & 0x800 or name.startswith((".debug", ".zdebug", "__debug"))
+                    or seg == "__DWARF"):
+                continue
+            off = int(getattr(s, "offset", 0) or getattr(s, "pointerto_raw_data", 0) or 0)
+            size = int(getattr(s, "sizeof_raw_data", 0) or 0) if fmt == "PE" else int(s.size)
+            if off > 0 and size > 0:
+                spans.append((off, off + size))
+    except Exception:
+        return []
+    merged = []                              # disjoint, so small_streams' bisect sees every span
+    for lo, hi in sorted(spans):
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def document_kind(out: bytes) -> str | None:
+    """'json' / 'xml' / 'html' when a decompressed stream is one whole structured document -- an
+    embedded resource (kubectl gzips kustomize's OpenAPI schema: 3 KB of JSON whose lines the
+    compressed-strings engine reported as 50 "decoded" strings, CI precision run 43869999822),
+    not a string table. None otherwise."""
+    import json
+    t = out.strip()
+    if t[:1] in (b"{", b"["):
+        try:
+            v = json.loads(t.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return "json" if isinstance(v, (dict, list)) and len(t) >= 64 else None
+    head = t[:64].lower()
+    if head.startswith((b"<!doctype html", b"<html")):
+        return "html"
+    if head.startswith(b"<?xml") and t.endswith(b">"):
+        return "xml"
+    return None
+
+
+def small_streams(data: bytes, max_tries=SMALL_MAX_TRIES, skip=()):
     """Checksum-validated zlib/gzip streams at their headers, at ANY size (a 38-byte zlib string
     that recover() never carves: below the entropy grid and _MIN_STREAM). Yields
-    {offset, size (bytes consumed), method, out}; only streams that end in a valid checksum."""
+    {offset, size (bytes consumed), method, out}; only streams that end in a valid checksum.
+    `skip`: sorted [lo, hi) file spans whose streams are not strings (debug_spans())."""
     import zlib
+    los = [lo for lo, _ in skip]
     tries = 0
     for m in _SMALL_HDR.finditer(data):
+        off = m.start()
+        k = bisect.bisect_right(los, off) - 1
+        if k >= 0 and off < skip[k][1]:
+            continue                         # inside a debug section (no try spent on it)
         tries += 1
         if tries > max_tries:
             return
-        off = m.start()
         gz = data[off] == 0x1f
         if not gz and ((data[off] << 8) | data[off + 1]) % 31:
             continue                         # FCHECK: CMF*256 + FLG must be a multiple of 31

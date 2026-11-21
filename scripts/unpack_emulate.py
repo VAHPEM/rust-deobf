@@ -44,8 +44,8 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from recover_emulate import (  # noqa: E402  (shared, fuzz-hardened primitives)
-    BASE, HEAP, HEAP_SIZE, RET_SENTINEL, STACK, STACK32, STACK_SIZE, TRAMP, TRAMP_SIZE, Image,
-    map_image,
+    BASE, HEAP, HEAP_SIZE, RET_SENTINEL, STACK, STACK32, STACK_SIZE, TLS, TLS_SIZE, TRAMP,
+    TRAMP_SIZE, Image, map_image,
 )
 from emu_backend import fast_hook_add  # noqa: E402  (one Python frame per hook event)
 from unicorn import (  # noqa: E402
@@ -64,6 +64,7 @@ _ENTROPY_HI = 7.2            # bits/byte above which a blob reads as packed/encr
 _MAX_WRITE_PAGES = 1 << 15   # distinct pages a run may dirty (128 MB) before it is stopped
 _DYN = TRAMP + TRAMP_SIZE // 2   # trampolines handed out by GetProcAddress / dlsym at run time
 _DYN_MAX = (TRAMP_SIZE // 2) // 16
+_LIBC_MEM = frozenset({"memcpy", "memmove", "mempcpy", "memset", "memcmp", "bcmp", "strlen"})
 _MODULES = 0x6f000000        # fake HMODULE values returned by LoadLibrary / GetModuleHandle
 _MAX_CALLSITES = 4096
 _CALLSITE_SCAN = 16 << 20    # bytes of each executed stage disassembled for call-site binding
@@ -103,6 +104,14 @@ _ENOENT, _EBADF = -2, -9
 # mmap of that fd). Only the sample itself is ever served -- any other path is ENOENT.
 _SELF_PATHS = ("/proc/self/exe",)
 _SELF_FD = 3
+# The path the emulated process sees as its own (AT_EXECFN, argv[0], readlink /proc/self/exe):
+# a fixed directory + the file's name, never the host path -- the host path's length moved every
+# address on the initial stack, so results depended on where the checkout lives (§89).
+_EXEC_DIR = "/sample/"
+
+
+def _exec_path(path) -> str:
+    return _EXEC_DIR + Path(path).name[:200]
 
 
 def _entropy(b: bytes) -> float:
@@ -171,7 +180,7 @@ class _Unpacker:
         self.hatches = []                # UPX escape hatches passed through (not hand-offs)
         self._hatch_span = None          # (lo, hi) of the last hatch: its later blocks are hatch too
         self.oep = None
-        self.stopped = "ret"             # ret|oep|exit|budget|timeout|unmapped|write_cap|error|import:<n>
+        self.stopped = "ret"             # ret|oep|exit|hlt|budget|timeout|unmapped|write_cap|error|import:<n>
         self.blocks = 0
         self.modules = {}                # fake handle -> dll name
         self.tls = {}                    # TlsAlloc index -> value (Rust std on Windows needs it)
@@ -494,6 +503,22 @@ class _Unpacker:
             return self._ret(1, nargs)
         if api in ("virtualfree", "flushinstructioncache"):
             return self._ret(1, nargs)
+        if api == "libc_start_main" and not self.pe:
+            return self._libc_start_main()
+        if api == "mmap" and not self.pe:
+            # libc's mmap wrapper (a Rust program allocating with it, not a raw syscall): the
+            # syscall model, same arguments; -1 (MAP_FAILED) for the kernel's -errno
+            r = self._syscall(_SYS["mmap"][1 if self.arm else 0], [self._arg(i) for i in range(6)])
+            return self._ret(r if r < 2**63 else -1, nargs)
+        if not self.pe and api in _LIBC_MEM:
+            return self._ret(self._libc_mem(api), nargs)
+        if api == "sysconf" and not self.pe:
+            # _SC_PAGESIZE (30) / _SC_NPROCESSORS_ONLN (84): std divides by / asserts on them
+            return self._ret({30: 0x1000, 84: 1}.get(self._arg(0), 0), nargs)
+        if api == "write" and not self.pe:
+            # output succeeds (all bytes written), as the write syscall model: a failed write is
+            # an io::Error and Rust's println! panics
+            return self._ret(min(self._arg(2), 1 << 30), nargs)
         if api in ("exitprocess", "exit", "_exit"):
             self.stopped = "exit"
             uc.emu_stop()
@@ -536,6 +561,131 @@ class _Unpacker:
             uc.emu_stop()
             return
         return self._ret(0, nargs)
+
+    def _model_write(self, a, data):
+        """A store an import model makes: uc.mem_write fires no write hook and does not drop
+        translated blocks, so record it in the write bitmaps like the stub's own stores (code a
+        stub copies with libc memcpy is unpacked code too) and invalidate the cached translation."""
+        uc = self.uc
+        uc.mem_write(a, data)
+        try:
+            uc.ctl_remove_cache(a, a + len(data))
+        except (UcError, AttributeError):
+            pass
+        end = a + len(data)
+        while a < end:
+            pg = a & ~0xfff
+            bm = self.wpages.get(pg)
+            if bm is None:
+                if len(self.wpages) >= _MAX_WRITE_PAGES:
+                    self.stopped = "write_cap"
+                    uc.emu_stop()
+                    return
+                bm = self.wpages[pg] = bytearray(512)
+            stop = min(end, pg + 0x1000)
+            lo, hi = a & 0xfff, ((stop - 1) & 0xfff) + 1         # byte offsets [lo, hi) in the page
+            while lo < hi and lo & 7:                            # bit by bit to a byte boundary,
+                bm[lo >> 3] |= 1 << (lo & 7)
+                lo += 1
+            full = (hi - lo) >> 3                                # whole bitmap bytes in one slice
+            bm[lo >> 3:(lo >> 3) + full] = b"\xff" * full
+            for o in range(lo + 8 * full, hi):
+                bm[o >> 3] |= 1 << (o & 7)
+            self.page_epoch[pg] = self.epoch
+            a = stop
+
+    def _libc_mem(self, api):
+        """The libc memory/string primitives a program calls through the PLT (a Rust program on
+        glibc: memcpy/memset are imports there). Returning 0 without doing the work handed std
+        uncopied data and a NULL destination. Sizes are capped at the heap size; a fault in the
+        copy stops the run like any other unmapped access."""
+        uc, a0, a1, a2 = self.uc, self._arg(0), self._arg(1), self._arg(2)
+        if api in ("memcpy", "memmove", "mempcpy", "memset"):
+            n = min(a2, HEAP_SIZE)
+            if n:
+                data = bytes([a1 & 0xff]) * n if api == "memset" else bytes(uc.mem_read(a1, n))
+                self._model_write(a0, data)
+            return a0 + n if api == "mempcpy" else a0
+        if api in ("memcmp", "bcmp"):
+            n = min(a2, HEAP_SIZE)
+            x, y = bytes(uc.mem_read(a0, n)), bytes(uc.mem_read(a1, n))
+            d = next((i for i in range(n) if x[i] != y[i]), None)
+            return 0 if d is None else (x[d] - y[d]) & ((1 << (8 * self.ptr)) - 1)
+        if api == "strlen":
+            n = 0
+            while n < 1 << 20:
+                chunk = bytes(uc.mem_read(a0 + n, 256))
+                z = chunk.find(0)
+                if z >= 0:
+                    return n + z
+                n += 256
+            return n
+        return 0
+
+    def _thread_pointer(self):
+        """A zeroed thread-local block for glibc code past __libc_start_main (the loader sets it up
+        in a real process): Rust std reads its thread-locals through fs (x86-64) / TPIDR_EL0
+        (AArch64); with the base at 0 the first access faulted. x86-64 keeps the TCB self-pointer
+        at fs:0 with variables below it, as recover_emulate's emulator does. i386 (a GDT segment)
+        is not set up here."""
+        uc = self.uc
+        if self.x32:
+            return
+        try:
+            uc.mem_map(TLS, TLS_SIZE)
+        except UcError:
+            return                                  # already mapped (a second call) or overlapping
+        tp = TLS + TLS_SIZE // 2
+        if self.arm:
+            uc.reg_write(A.UC_ARM64_REG_TPIDR_EL0, tp)
+        else:
+            uc.reg_write(X.UC_X86_REG_FS_BASE, tp)
+            uc.mem_write(tp, struct.pack("<Q", tp))
+
+    def _libc_start_main(self):
+        """glibc's __libc_start_main(main, argc, argv, init, fini, rtld_fini, stack_end): every
+        glibc ELF's _start ends in it and it never returns -- it calls main(argc, argv, envp) and
+        then exit() with main's result. Returning 0 from it left _start at its `hlt`, so no glibc
+        program's own code (a Rust-written packer's stub included) ever ran. Modelled as exactly
+        that call: main gets the process stack's argc/argv/envp and returns into an `exit`
+        trampoline. Constructors (.init_array) are not run here: the dynamic loader runs them
+        before _start in a real process, and this unpacker never did."""
+        uc, w = self.uc, self.ptr
+        fmt = "<I" if w == 4 else "<Q"
+        main, argc, argv = self._arg(0), self._arg(1), self._arg(2)
+        argc &= 0xffffffff
+        if not main or argc > 0x10000:
+            self.stopped = "import:__libc_start_main"
+            uc.emu_stop()
+            return
+        envp = argv + w * (argc + 1)
+        name = "libc.so.6!exit"
+        if name not in self.dyn_by_name:
+            if len(self.dyn) >= _DYN_MAX:
+                self.stopped = "import:__libc_start_main"
+                uc.emu_stop()
+                return
+            self.dyn_by_name[name] = _DYN + 16 * len(self.dyn)
+            self.dyn.append(name)
+        exit_tramp = self.dyn_by_name[name]
+        self._thread_pointer()
+        if self.arm:
+            for i, v in enumerate((argc, argv, envp)):
+                uc.reg_write(A.UC_ARM64_REG_X0 + i, v)
+            uc.reg_write(A.UC_ARM64_REG_X30, exit_tramp)
+        elif self.x32:
+            # cdecl: reuse the call's frame -- [esp] = return address, then main's three arguments
+            # (this call never returns, so its own argument slots are free)
+            sp = uc.reg_read(self.SP)
+            uc.mem_write(sp, b"".join(struct.pack(fmt, v) for v in (exit_tramp, argc, argv, envp)))
+        else:
+            # the return address slot becomes exit's: rsp keeps the alignment a call gives main
+            sp = uc.reg_read(self.SP)
+            uc.mem_write(sp, struct.pack(fmt, exit_tramp))
+            uc.reg_write(X.UC_X86_REG_RDI, argc)
+            uc.reg_write(X.UC_X86_REG_RSI, argv)
+            uc.reg_write(X.UC_X86_REG_RDX, envp)
+        uc.reg_write(self.PC, main)        # the PC alone, last (Unicorn leaves the block on it)
 
     # ---- syscalls ----------------------------------------------------------------------------------
     def _is(self, nr, name):
@@ -586,7 +736,7 @@ class _Unpacker:
             return 0
         if self._is(nr, "open") or self._is(nr, "openat"):
             path = self._cstr(args[1] if self._is(nr, "openat") else args[0], limit=4096)
-            if path in _SELF_PATHS or path == str(self.img.path):
+            if path in _SELF_PATHS or path in (str(self.img.path), _exec_path(self.img.path)):
                 self._fd_off = 0
                 return _SELF_FD
             return neg(_ENOENT)
@@ -595,7 +745,7 @@ class _Unpacker:
                 else (args[0], args[1], args[2])
             if self._cstr(path_p, limit=4096) not in _SELF_PATHS:
                 return neg(_ENOENT)
-            target = str(Path(self.img.path).resolve()).encode()[:max(0, size)]
+            target = _exec_path(self.img.path).encode()[:max(0, size)]
             try:
                 uc.mem_write(buf, target)
             except UcError:
@@ -658,7 +808,7 @@ class _Unpacker:
         uc, w = self.uc, self.ptr
         fmt = "<I" if w == 4 else "<Q"
         top = self.stack + STACK_SIZE - 0x100
-        name = str(Path(self.img.path).resolve()).encode()[:200] + b"\0"
+        name = _exec_path(self.img.path).encode()[:255] + b"\0"
         execfn = top - len(name)
         rnd = (execfn - 16) & ~0xf
         uc.mem_write(execfn, name)
@@ -703,9 +853,25 @@ class _Unpacker:
             if self.stopped == "ret":
                 self.stopped = "error"
         if self.stopped == "ret" and uc.reg_read(self.PC) != RET_SENTINEL:
-            # emu_start returned without reaching the sentinel: a budget or wall-clock stop
+            # emu_start returned without reaching the sentinel: a budget or wall-clock stop --
+            # or an x86 `hlt` (Unicorn ends the run with the PC just past it; glibc's _start
+            # has one after __libc_start_main), which used to be reported as "budget"
             self.stopped = "timeout" if time.monotonic() - t0 >= _WALL_S * 0.98 else "budget"
+            if self.stopped == "budget" and not self.arm and self._after_hlt():
+                self.stopped = "hlt"
         return self._regions()
+
+    def _after_hlt(self):
+        """Did the run end on `hlt`? The PC sits right after an f4 byte that the last executed
+        block contains (prev_block / blocks are tracked per block, so the f4 must lie inside it)."""
+        pc = self.uc.reg_read(self.PC)
+        last = self.prev_block
+        try:
+            if bytes(self.uc.mem_read(pc - 1, 1)) != b"\xf4":
+                return False
+        except UcError:
+            return False
+        return last is None or last[0] <= pc - 1 < last[0] + last[1]
 
     def _runs(self):
         """Contiguous written runs (gaps <= 8 bytes bridged), from the per-page bit maps."""

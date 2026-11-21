@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -40,11 +41,11 @@ def fetch(version: str):
     return version, {"hash": m.group(1), "date": d.group(1) if d else ""}
 
 
-def main():
+def main(argv=None, out: Path = OUT) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--max-minor", type=int, default=130)
     ap.add_argument("--max-patch", type=int, default=5)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     versions = [f"1.{mi}.{pa}" for mi in range(8, args.max_minor + 1) for pa in range(args.max_patch + 1)]
     with ThreadPoolExecutor(max_workers=16) as pool:
@@ -54,11 +55,27 @@ def main():
     for v in sorted(found, key=lambda s: tuple(int(x) for x in s.split("."))):
         info = found[v]
         table.setdefault(info["hash"], {"version": v, "date": info["date"]})
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n")
+    # a fetch that saw fewer releases than the table already holds failed (no network, a proxy, a
+    # rate limit): writing it would wipe every version attribution -- an offline run once wrote {}
+    # over the 118-entry table. Keep the table, say why, exit non-zero.
+    try:
+        old = json.loads(out.read_text())
+    except (OSError, ValueError):
+        old = {}
+    if not isinstance(old, dict):
+        old = {}
+    if len(table) < len(old):
+        print(f"fetched {len(table)} releases, fewer than the {len(old)} in {out}: not written "
+              f"(network failure?)", file=sys.stderr)
+        return 1
+    for h, rel in old.items():
+        table.setdefault(h, rel)      # a release no longer fetched stays attributed
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n")
     newest = max(found, key=lambda s: tuple(int(x) for x in s.split("."))) if found else None
-    print(f"{len(table)} releases (1.8.0 .. {newest}) -> {OUT}")
+    print(f"{len(table)} releases (1.8.0 .. {newest}) -> {out}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
