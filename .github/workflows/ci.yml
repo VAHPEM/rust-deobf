@@ -40,8 +40,10 @@ jobs:
     # No benchmark build here (Windows only adds the GNU target for the tests' own small
     # fixtures). Committed benign fixtures only; the one test that executes a sample stays off
     # (RUST_DEOBF_DYNAMIC is not set).
-    # windows-11-arm is a canary (continue-on-error): unicorn and capstone<6 ship no win_arm64
-    # wheels yet, so it is expected to fail at `pip install`; the day it goes green, they do.
+    # windows-11-arm is a canary (continue-on-error) for native ARM64 Python: unicorn and
+    # capstone<6 ship no win_arm64 wheels, so the canary builds the PINNED versions itself (its
+    # steps before `pip install`): capstone from its sdist with the runner's MSVC ARM64 (vcvars
+    # via msvc-dev-cmd), unicorn 2.1.4 from its sdist + upstream PR 2286 (see those steps).
     strategy:
       fail-fast: false
       matrix:
@@ -73,10 +75,74 @@ jobs:
           architecture: ${{ matrix.arch }}   # empty = the runner's native arch
       - name: Interpreter (the canary must be native ARM64 to mean anything)
         run: |
-          python -c "import platform, sys; print(sys.version); print(platform.machine())"
+          python -c "import platform, sys, sysconfig; print(sys.version); print(platform.machine(), sysconfig.get_platform())"
+          # the interpreter's own arch is sysconfig's platform: platform.machine() is the HOST CPU
+          # (ARM64 even for an x64 python.exe on Windows-on-ARM, see CLAUDE.md)
           if [ "${{ matrix.canary }}" = "true" ]; then
-            python -c "import platform, sys; sys.exit(platform.machine() != 'ARM64')"
+            python -c "import sys, sysconfig; sys.exit(sysconfig.get_platform() != 'win-arm64')"
           fi
+      # --- canary only: win_arm64 builds of the pinned capstone / unicorn ---------------------
+      # Drop these steps once capstone 5.x and unicorn 2.x publish win_arm64 wheels on PyPI.
+      - name: MSVC ARM64 environment (canary; capstone's sdist runs CMake + NMake, needs vcvars)
+        if: matrix.canary == true
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+      # unicorn 2.1.4 cannot run on Windows ARM64 as released: under MSVC its CMake assumes an
+      # x86 host (-D__x86_64__, tcg/i386, an ml64 setjmp file), and every _WIN64 build installs an
+      # x86-64 vectored-exception trampoline (a MinGW/clang build dies in the first uc_mem_map).
+      # Upstream PR unicorn-engine/unicorn#2286 ("Add Windows ARM64 build support", open) fixes
+      # both; its source hunks apply cleanly to the 2.1.4 sdist. The PR is fetched at a pinned
+      # commit and checked by sha256 (GPL-2.0 source stays out of this Apache-2.0 repo), built
+      # with MSVC ARM64, and the DLL goes into the sdist's prebuilt/ -> a local win_arm64 wheel.
+      # requirements.txt and its pin are unchanged.
+      - name: Cached unicorn win_arm64 wheel (canary)
+        if: matrix.canary == true
+        id: ucwheel
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/uc-wheel
+          key: unicorn-2.1.4-pr2286-e45dd6e3c473371761684dd8e4f4e353c67cd6cb1b1febc26950e575dc089da6-win-arm64-v1
+      - name: Build unicorn 2.1.4 + PR 2286 with MSVC ARM64 (canary, cache miss)
+        if: matrix.canary == true && steps.ucwheel.outputs.cache-hit != 'true'
+        env:
+          UC_VER: "2.1.4"
+          PR_BASE: 681bd329438b32f4efe8503e9b316f613a9a27ba   # unicorn dev, the PR's base
+          PR_HEAD: a3f97aaf9ee98839fbdc4711df262411f1906343   # PR 2286 head commit
+          PR_SHA256: e45dd6e3c473371761684dd8e4f4e353c67cd6cb1b1febc26950e575dc089da6
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/uc-build"; mkdir -p "$work" && cd "$work"
+          curl -fsSL -o pr2286.diff "https://github.com/unicorn-engine/unicorn/compare/$PR_BASE...$PR_HEAD.diff"
+          echo "$PR_SHA256  pr2286.diff" | sha256sum -c - || { echo "::error::PR 2286 diff sha256 mismatch"; exit 1; }
+          python -m pip download --no-binary :all: --no-deps "unicorn==$UC_VER"
+          tar -xzf "unicorn-$UC_VER.tar.gz"
+          cd "unicorn-$UC_VER/src"
+          # the PR also edits upstream's CI workflow, which the sdist does not carry
+          git apply --exclude='.github/workflows/build-uc2.yml' --verbose "$work/pr2286.diff"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DUNICORN_BUILD_TESTS=ON
+          cmake --build build
+          # unicorn's own unit tests on the native build: a broken engine fails here, not later
+          ctest --test-dir build --output-on-failure
+          cp build/unicorn.dll ../prebuilt/unicorn.dll
+          cd .. && python -m pip wheel --no-deps -w "$RUNNER_TEMP/uc-wheel" .
+      - name: Install the unicorn win_arm64 wheel (canary)
+        if: matrix.canary == true
+        run: |
+          set -euo pipefail
+          ls "$RUNNER_TEMP"/uc-wheel
+          python -m pip install "$RUNNER_TEMP"/uc-wheel/unicorn-2.1.4-*-win_arm64.whl
+          python - <<'PY'
+          from unicorn import Uc, UC_ARCH_X86, UC_MODE_64, UC_HOOK_CODE, __version__
+          from unicorn.x86_const import UC_X86_REG_RAX
+          code = bytes.fromhex("4831c048c7c1e80300004801c848ffc975f8")   # rax = sum(1..1000)
+          uc = Uc(UC_ARCH_X86, UC_MODE_64); uc.mem_map(0x1000, 0x1000); uc.mem_write(0x1000, code)
+          n = []
+          uc.hook_add(UC_HOOK_CODE, lambda *a: n.append(1))
+          uc.emu_start(0x1000, 0x1000 + len(code))
+          assert uc.reg_read(UC_X86_REG_RAX) == 500500, uc.reg_read(UC_X86_REG_RAX)
+          print("unicorn", __version__, "OK:", len(n), "hooked instructions")
+          PY
       - run: python -m pip install -r requirements.txt pytest
       # Host-built test fixtures are pinned to the GNU ABI on Windows (tests/conftest.py:
       # CLANG_TARGET / RUSTC_TARGET): the default clang / rustc there target MSVC, which changes the

@@ -446,10 +446,33 @@ def test_rate_limit_spaces_requests():
     import time
     with _ghidra_pe() as g:
         c = DB.HttpClient(g.url, rate=20)
-        t0 = time.monotonic()
+        t0 = time.perf_counter()     # not monotonic: ~15.6 ms ticks on Windows read short
         for _ in range(5):
             c.request("GET", "health")
-        assert time.monotonic() - t0 >= 4 / 20 - 0.01
+        assert time.perf_counter() - t0 >= 4 / 20 - 0.01
+
+
+def test_rate_limit_spacing_with_coarse_monotonic(monkeypatch):
+    """The limiter must not trust a coarse clock: Windows' time.monotonic ticks every 15.625 ms.
+    A virtual clock makes it deterministic: true time advances only through sleep() and the
+    request work; monotonic() reads it rounded down to a tick, perf_counter() exactly."""
+    import math
+    import types
+    tick, now = 0.015625, [0.0155]                    # start just before a tick
+    fake = types.SimpleNamespace(
+        perf_counter=lambda: now[0],
+        monotonic=lambda: math.floor(now[0] / tick) * tick,
+        sleep=lambda s: now.__setitem__(0, now[0] + max(s, 0.0)),
+    )
+    monkeypatch.setattr(DB, "time", fake)
+    c = DB.HttpClient("http://127.0.0.1:1/", rate=20)
+    sent = []
+    for _ in range(6):
+        c._throttle()
+        sent.append(now[0])
+        now[0] += 0.0002                              # the request itself
+    gaps = [b - a for a, b in zip(sent, sent[1:])]
+    assert min(gaps) >= 1 / 20 - 1e-9, gaps
 
 
 # --- CLI + real fixtures -----------------------------------------------------------------------
